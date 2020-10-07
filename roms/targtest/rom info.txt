@@ -1,0 +1,3 @@
+Place Test ROM 7A (hrl7a-1) in this folder, and Targ files in the seperate Targ folder.  Do not distribute this emulator with ROM files.
+
+http://www.outerworldarcade.com/arcade/targ/targ_test_rom.html

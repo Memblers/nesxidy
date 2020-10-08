@@ -4,7 +4,7 @@
 additional credits:\
 Fake6502 by Mike Chambers, interpreted emulator\
 vbcc by Volker Barthelmann, C compiler used for development\
-lazyNES by Matthias Bock, NES library for vbcc\
+lazyNES by Matthias Bock, NES library for vbcc
 
 ## what it is
 nesxidy is an experimental emulator that runs on the NES, which emulates a number of arcade games Exidy made on their 6502-based board.  In this Alpha version, the emulation is extremely slow and the games are not fully playable.  That could change in future versions.

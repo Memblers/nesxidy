@@ -1,5 +1,5 @@
 # nesxidy V0.6 Alpha
-Copyright ©2020 Joseph Parsell (Memblers)
+Copyright ©2020 Joseph Parsell
 
 additional credits:\
 Fake6502 by Mike Chambers, interpreted emulator\
@@ -25,7 +25,7 @@ nesxidy is an experimental emulator that runs on the NES, which emulates a numbe
 This emulator is a demonstration of DynaMOS, dynamic recompiler targeting the MOS Technology 6502 CPU as the host system.  In this case, another 6502 is the guest system, as well.  The reason one can't simply run 6502 code from one machine on different 6502 machine is because the memory map may be completely different.  As it is a full-blown recompiler, much of the framework (with a significant amount of additional work) could be reused to host another CPU.
 
 ## how the hell
-Every single instruction must be evaluated and replaced with equivalent sequences, every single memory access examined and remapped, and all of it reassembled, to suit the target system.  Any instructions which can't be recompiled, such as a branch or jump to a destination that hasn't been recompiled yet, or any unsupported instructions, are run through the interpreted emulator (Fake6502).  Interpreted instructions may take hundreds of times longer than the native equivalent, but as more of the emulated program has been run, branch destinations become known and can be assembled into a native 6502 branch.
+Every single instruction must be evaluated and replaced with equivalent sequences, every single memory access examined and remapped, and all of it reassembled, to suit the target system.  For any instructions that can't be recompiled, such as a branch or jump to a destination that hasn't been recompiled yet, or any unsupported instructions, control is handed over to an interpreter emulator (Fake6502).  Handling an interpreted instructions may take several hundred times longer than the native equivalent, but as more of the emulated program has been run, more branch destinations have become known, and can be assembled into a native 6502 branch.
 
 ## minimum system requirements
 * NMOS 6502 or compatible CPU
@@ -34,11 +34,11 @@ Every single instruction must be evaluated and replaced with equivalent sequence
 For NES: mapper 30 variant, 512kB Flash, 8kB PRG-RAM, 32kB CHR-RAM, 4-screen nametable.
 
 ## emulation features
-Supports up to 64kB of emulated RAM/ROM
+Supports up to 64kB of emulated RAM/ROM\
 6502 disassembler output to screen
 
 ## technical details
-The 512kB of program memory is reserved as such:
+The 512kB of Flash memory is reserved as such:
 * 32kB emulation program
 * 32kB emulated ROM
 * 64kB program counter flags and bank numbers
@@ -69,7 +69,7 @@ possible next steps
 * partial TMS9918 emulation (CreatiVision (6502), Colecovision (Z80), MSX (Z80)
 
 ## version history
-V0.1 - interpreted-only emulator.\
+V0.1 - interpreter-only emulator.\
 V0.2 - added Exidy I/O hardware emulation.  Speed approx 2 seconds per frame.\
 V0.3 - DynaMOS system added. Speed approx 1.5 seconds per frame, hamstrung by limited RAM for cache.\
 V0.4 - added cache linking stage.\

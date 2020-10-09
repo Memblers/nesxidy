@@ -1,5 +1,5 @@
 # nesxidy V0.6 Alpha
-(C)2020 Joseph Parsell (Memblers)
+Copyright ©2020 Joseph Parsell (Memblers)
 
 additional credits:\
 Fake6502 by Mike Chambers, interpreted emulator\

@@ -66,7 +66,7 @@ possible next steps
 * debug breakpoints and single-step disassembly
 * code/data flag for detection of self-modifying code
 * additional CPU support.  Chip-8, 8080, Z80, LR35902..?
-* partial TMS9918 emulation (CreatiVision (6502), Colecovision (Z80), MSX (Z80)
+* partial TMS9918 emulation (CreatiVision)
 
 ## version history
 V0.6A - experimental support for new cache block format in FlashROM.  Much slower emulation, as the new system is unoptimized and the old system is still being used at the same time.  First public release.\

@@ -69,11 +69,16 @@ possible next steps
 * partial TMS9918 emulation (CreatiVision (6502), Colecovision (Z80), MSX (Z80)
 
 ## version history
-V0.1 - interpreter-only emulator.\
-V0.2 - added Exidy I/O hardware emulation.  Speed approx 2 seconds per frame.\
-V0.3 - DynaMOS system added. Speed approx 1.5 seconds per frame, hamstrung by limited RAM for cache.\
-V0.4 - added cache linking stage.\
+V0.6A - experimental support for new cache block format in FlashROM.  Much slower emulation, as the new system is unoptimized and the old system is still being used at the same time.  First public release.\
 V0.5 - changed cartridge hardware to use mapper 30 with FlashROM and WRAM.\
-V0.6A - experimental support for new cache block format in FlashROM.  Much slower emulation, as the new system is unoptimized and the old system is still being used at the same time.  First public release.
+V0.4 - added cache linking stage.\
+V0.3 - DynaMOS system added. Speed approx 1.5 seconds per frame, hamstrung by limited RAM for cache.\
+V0.2 - added Exidy I/O hardware emulation.  Speed approx 2 seconds per frame.\
+V0.1 - interpreter-only emulator.
+
+
+
+
+
 
 For personal use only.  Do not distribute any copyrighted ROM files with this emulator without specific permission.

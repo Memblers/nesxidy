@@ -45,7 +45,6 @@ _CHARACTER_RAM_BASE:	reserve $800
 	section "nesram"
 	align 8
 _SCREEN_RAM_BASE: reserve $400
-
 	
 
 ;=======================================================	
@@ -502,6 +501,55 @@ _indx_operand:
 	db _decoded_address	; (ind,x)
 	ldx _x
 	rts
+	
+;=======================================================
+	section "text"
+	global _opcode_6502_pha, _opcode_6502_pha_size
+;-------------------------------------------------------
+_opcode_6502_pha:
+	php
+	stx _x
+	ldx _sp
+	sta _RAM_BASE + $100, x
+	dec _sp
+	ldx _x
+	plp
+	
+_opcode_6502_pha_end:
+_opcode_6502_pha_size:	db (_opcode_6502_pha_end - _opcode_6502_pha)
+
+;=======================================================
+	section "text"
+	global _opcode_6502_pla, _opcode_6502_pla_size
+;-------------------------------------------------------
+_opcode_6502_pla:	; verify push/store order..
+	php
+	stx _x
+	ldx _sp
+	lda _RAM_BASE + $100, x
+	inc _sp
+	ldx _x
+	plp
+	
+_opcode_6502_pla_end:
+_opcode_6502_pla_size:	db (_opcode_6502_pla_end - _opcode_6502_pla)
+
+;=======================================================
+	section "data"
+	global _opcode_stx_zpy, _opcode_stx_zpy_size
+;-------------------------------------------------------	; to add
+
+_opcode_stx_zpy:
+	php
+	sta _a
+	txa
+_opcode_stx_zpy_address = * + 1
+	sta $FFFF,y
+	lda _a
+	plp
+	
+_opcode_stx_zpy_end:
+_opcode_stx_zpy_size:	db (_opcode_stx_zpy_end - _opcode_stx_zpy)
 
 ;=======================================================	
 	section "bank3"

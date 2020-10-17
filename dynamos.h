@@ -32,6 +32,7 @@
 #define RECOMPILED		0x80
 #define INTERPRETED		0x40
 
+#define BANK_FLASH_BLOCK_FLAGS	3
 #define BANK_CODE		4
 #define	BANK_PC			19
 #define BANK_PC_FLAGS	27
@@ -83,6 +84,12 @@ extern const uint8_t addr_6502_indx_size;
 extern uint8_t indx_opcode, indx_opcode_location;
 extern uint16_t indx_address_lo, indx_address_hi;
 
+extern const uint8_t opcode_6502_pha_size;
+extern const uint8_t opcode_6502_pla_size;
+extern uint8_t opcode_6502_pha[];
+extern uint8_t opcode_6502_pla[];
+
+
 extern uint8_t flash_cache_pc[];
 extern uint8_t flash_cache_pc_flags[];
 
@@ -102,6 +109,7 @@ void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx);
 void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
 uint8_t flash_cache_search(uint16_t emulated_pc);
 void flash_cache_pc_flag_clear(uint16_t emulated_pc, uint8_t flag);
+void cache_test(void);
 
 enum 6502op
 {
@@ -118,8 +126,8 @@ enum 6502op
 	opBNE = 0xD0,
 	opBEQ = 0xF0,	
 	
-	opTXS = 0xBA,
-	opTSX = 0x9A,
+	opTXS = 0x9A,
+	opTSX = 0xBA,
 	
 	opSEI = 0x78,
 	opCLI = 0x58,
@@ -130,9 +138,13 @@ enum 6502op
 	opSTA_ABS = 0x8D,
 	opSTA_INDX = 0x81,
 	opSTA_INDY = 0x91,
+	opSTX_ABS = 0x8E,
+	opSTX_ZP = 0x86,
 	
 	opLDA_ABS = 0xAD,
 	opLDA_ZP = 0xA5,
+	opLDX_ABS = 0xAE,
+	opLDX_ZP = 0xA6,
 	
 	opPHA = 0x48,
 	opPLA = 0x68,

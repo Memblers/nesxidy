@@ -65,6 +65,7 @@ possible next steps
 * NES emulator
 * debug breakpoints and single-step disassembly
 * code/data flag for detection of self-modifying code
+* cleaner separation of 6502-output-specific parts from the recompiler logic
 * additional CPU support.  Chip-8, 8080, Z80, LR35902..?
 * partial TMS9918 emulation (CreatiVision)
 

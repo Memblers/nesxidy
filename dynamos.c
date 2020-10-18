@@ -320,10 +320,11 @@ void flash_cache_pc_flag_clear(uint16_t emulated_pc, uint8_t flag)
 //============================================================================================================
 
 uint8_t flash_cache_search(uint16_t emulated_pc)
-{
+{	
 	lookup_pc_jump_flag(emulated_pc);
 	bankswitch_prg(pc_jump_flag_bank);
-	if (flash_cache_pc_flags[pc_jump_flag_address] >= 0x80);	// D7 clear if RECOMPILED
+	IO8(0x4020) = 0x27;
+	if (flash_cache_pc_flags[pc_jump_flag_address] == 0x80);	// D7 clear if RECOMPILED
 		return 0;
 		
 	// run!

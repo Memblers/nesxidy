@@ -29,8 +29,10 @@
 
 #define FLASH_AVAILABLE		0x01
 
-#define RECOMPILED		0x80
-#define INTERPRETED		0x40
+// Program remap status bits
+#define RECOMPILED		0x80	// 0 = has been recompiled.  bits D0-D5 contain PRG bank number
+#define INTERPRETED		0x40	// 0 = interpret this instruction
+#define	CODE_DATA		0x20	// 0 = code, 1 = data
 
 #define BANK_FLASH_BLOCK_FLAGS	3
 #define BANK_CODE		4

@@ -6,7 +6,7 @@ GAME_NUMBER = 0
 	global _ROM_NAME, _ROM_OFFSET
 
 ; - dynamos.h settings MUST match these
-ASM_BLOCK_COUNT = 14
+ASM_BLOCK_COUNT = 8
 ASM_CODE_SIZE = 250
 
 FLASH_CACHE_BLOCKS 		= 960
@@ -34,6 +34,26 @@ _ROM_NAME = _rom_spectar
 	endif
 
 ; end of that
+
+;=======================================================	
+;-------------------------------------------------------
+
+RECOMPILED	=	$80
+INTERPRETED	=	$40
+
+BANK_PC			=	19
+BANK_PC_FLAGS	=	27
+
+BLOCK_CONFIG_BASE	=	250
+
+;=======================================================	
+	section "zpage"
+;-------------------------------------------------------
+addr_lo:	reserve 1
+addr_hi:	reserve 1
+temp:		reserve 1
+temp2:		reserve 1
+target_bank:	reserve 1
 
 ;=======================================================	
 	section "bss"
@@ -146,6 +166,7 @@ _run_loc = * + 1
 	
 	rts
 	
+
 ;=======================================================	
 	section "data"
 	global _cache_code, _cache_index, _asm_return, _dispatch_return, _dispatch_cache_asm, _dispatch_table
@@ -259,6 +280,110 @@ _dispatch_table:
 	word _cache_code + (ASM_CODE_SIZE * 62)
 	word _cache_code + (ASM_CODE_SIZE * 63)
 	
+
+;=======================================================	
+	section "data"
+	global _dispatch_on_pc, _flash_cache_index, _flash_dispatch_return
+	zpage addr_lo, addr_hi, target_bank, temp, temp2
+;-------------------------------------------------------
+_dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
+	lda #1
+	sta $4020
+	lda _pc+1		; D14-D15 - bank number
+	asl
+	rol temp
+	asl
+	rol temp
+	sta temp2
+	lsr
+	sec		; set upper bit
+	ror	
+	sta addr_hi
+	lda temp	
+	and #%00000011
+	;clc
+	adc #BANK_PC_FLAGS
+	sta $C000
+	lda _pc
+	sta addr_lo
+	ldy #0
+	lda (addr_lo),y	; get pc_flag
+	bmi not_recompiled
+	and #$1F	; bank select
+	sta target_bank
+	;jsr _bankswitch_prg
+	
+	; get PC remap address	
+	asl temp2
+	lda temp
+	rol
+	and #%00000111
+	clc
+	adc #BANK_PC
+	sta $C000
+		
+	asl addr_lo
+	lda _pc+1
+	rol
+	and #%00111111
+	ora #%10000000
+	sta addr_hi
+	
+	lda (addr_lo),y
+	sta .dispatch_addr
+	iny
+	lda (addr_lo),y
+	sta .dispatch_addr + 1
+	
+	lda target_bank
+	sta $C000
+	
+	lda _status
+	ora #$04	; hide IRQ/BRK flag
+	pha	
+	
+	lda _a
+	ldx _x	
+	ldy _y
+	plp
+	
+.dispatch_addr = * + 1
+	jmp $FFFF	; self-modifying	
+	
+_flash_dispatch_return:	
+	php	
+	sta _a
+	stx _x
+	sty _y	
+	
+	pla
+	sta _status
+	
+	lda _flash_cache_index
+	and #$3F
+	ora #$80
+	sta addr_hi
+	lda #0
+	sta addr_lo
+	ldy #BLOCK_CONFIG_BASE
+	lda (addr_lo),y
+	sta _pc
+	iny
+	lda (addr_lo),y
+	sta _pc+1	
+	
+	rts	
+	
+not_recompiled:
+	and #INTERPRETED
+	bne not_interpreted
+	lda #2
+	rts
+	
+not_interpreted:
+	lda #1
+	rts
+
 
 ;=======================================================	
 	section "text"
@@ -437,8 +562,6 @@ _indy_address_hi = * + 1
 	lda $FFFF
 	;sta _encoded_address+1
 	jsr _decode_address_asm
-	lda #1
-	sta $C000
 	pla
 	plp
 	jsr handle_io_indy
@@ -478,8 +601,6 @@ _indx_address_hi = * + 1
 	lda $FFFF
 	;sta _encoded_address+1
 	jsr _decode_address_asm
-	lda #1
-	sta $C000	
 	pla
 	plp
 	jsr handle_io_indx

@@ -53,6 +53,16 @@ __zpage uint8_t address_8;
 
 uint32_t cache_branch_long = 0;
 
+extern	uint8_t flash_block_flags[];
+
+uint16_t pc_jump_address;
+uint8_t pc_jump_bank;
+uint16_t pc_jump_flag_address;
+uint8_t pc_jump_flag_bank;
+uint16_t flash_code_address;
+uint8_t flash_code_bank;
+
+
 const uint8_t addrmodes[256] = {
 /*        |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  |  A  |  B  |  C  |  D  |  E  |  F  |     */
 /* 0 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 0 */
@@ -125,6 +135,7 @@ void run_6502(void)
 
 
 	flash_cache_search(pc);
+	//dispatch_on_pc();
 	
 	matched = 0;
 	cache_search();
@@ -175,11 +186,13 @@ void run_6502(void)
 
 	cache_entry_pc_lo[cache_index] = (uint8_t) pc;
 	cache_entry_pc_hi[cache_index] = (uint8_t) (pc >> 8);
+	/*
 	if (flash_enabled)
 	{
 		setup_flash_address(pc, flash_cache_index);
 		flash_cache_pc_update(code_index);		
 	}
+	*/
 	
 	cache_flag[cache_index] = 0;
 	cache_cycles[cache_index] = 0;	
@@ -193,7 +206,10 @@ void run_6502(void)
 		cache_cycles[cache_index] += ticktable[read6502(pc)];
 		#else
 		cache_cycles[cache_index]++;
-		#endif			
+		#endif
+		
+		uint16_t pc_old = pc;
+		uint8_t code_index_old = code_index;
 		
 		recompile_opcode();
 		
@@ -204,8 +220,11 @@ void run_6502(void)
 		}
 		if (flash_enabled)
 		{
-			setup_flash_address(pc, flash_cache_index);
-			flash_cache_pc_update(code_index);
+			setup_flash_address(pc_old, flash_cache_index);
+			if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
+				flash_cache_pc_update(code_index_old, INTERPRETED);
+			else
+				flash_cache_pc_update(code_index_old, RECOMPILED);
 		}
 		
 	} while (cache_flag[cache_index] & READY_FOR_NEXT);	// need to re-add OUT_OF_CACHE_LOGIC		
@@ -218,12 +237,14 @@ void run_6502(void)
 		cache_code[cache_index][code_index++] = (uint8_t) ((uint16_t) &dispatch_return); //opJMP
 		cache_code[cache_index][code_index++] = (uint8_t) (((uint16_t) &dispatch_return) >> 8); //opJMP
 		
-		flash_cache_pc_flag_clear((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)), (uint8_t) ~RECOMPILED);	// testing - may be interpreted
+		//flash_cache_pc_flag_clear((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)), (uint8_t) ~RECOMPILED);	// testing - may be interpreted
+		if (flash_enabled)
+			flash_cache_copy(cache_index, flash_cache_index);
 	}
 		
 	else // code buffer empty
 	{
-		flash_cache_pc_flag_clear((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)), ~INTERPRETED);	// testing - may be interpreted		
+		//flash_cache_pc_flag_clear((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)), ~INTERPRETED);	// testing - may be interpreted		
 		bankswitch_prg(0);
 		interpret_6502();
 		cache_entry_pc_hi[cache_index] = 0; // cancel cache
@@ -266,13 +287,19 @@ void run_6502(void)
 			default:
 		}
 		cache_exit_pc_lo[cache_index] = (uint8_t) pc_temp;
-		cache_exit_pc_hi[cache_index] = (uint8_t) (pc_temp >> 8);
+		cache_exit_pc_hi[cache_index] = (uint8_t) (pc_temp >> 8);		
 	}
 	else
 	{
 		cache_exit_pc_lo[cache_index] = (uint8_t) pc;
-		cache_exit_pc_hi[cache_index] = (uint8_t) (pc >> 8 );
+		cache_exit_pc_hi[cache_index] = (uint8_t) (pc >> 8 );		
 	}
+	
+	if (flash_enabled)
+	{
+		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 0), flash_code_bank, cache_exit_pc_lo[cache_index]);
+		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 1), flash_code_bank, cache_exit_pc_hi[cache_index]);
+	}		
 
 	check_cache_links();	
 /*	
@@ -283,8 +310,7 @@ void run_6502(void)
 	next_new_cache = cache_index;
 	
 	//cache_bit_enable(pc);
-
-	flash_cache_copy(cache_index, flash_cache_index);
+	
 
 	ready();
 	return;
@@ -293,14 +319,7 @@ void run_6502(void)
 //============================================================================================================
 
 
-extern	uint8_t flash_block_flags[];
 
-uint16_t pc_jump_address;
-uint8_t pc_jump_bank;
-uint16_t pc_jump_flag_address;
-uint8_t pc_jump_flag_bank;
-uint16_t flash_code_address;
-uint8_t flash_code_bank;
 
 #define lookup_pc_jump_flag(address)\
 pc_jump_flag_bank = ((address >> 14) + BANK_PC_FLAGS);\
@@ -323,8 +342,9 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 {	
 	lookup_pc_jump_flag(emulated_pc);
 	bankswitch_prg(pc_jump_flag_bank);
-	IO8(0x4020) = 0x27;
-	if (flash_cache_pc_flags[pc_jump_flag_address] == 0x80);	// D7 clear if RECOMPILED
+	IO8(0x4020) = 0x27;	
+	uint8_t test = (flash_cache_pc_flags[pc_jump_flag_address] && RECOMPILED);
+	if (test) //(flash_cache_pc_flags[pc_jump_flag_address] && RECOMPILED);	// D7 clear if RECOMPILED
 		return 0;
 		
 	// run!
@@ -359,24 +379,29 @@ uint16_t flash_cache_select()
 //============================================================================================================
 void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx)
 {
-	//IO8(0x4020) = 0x91;		
-	for (uint8_t i = 0; (i < FLASH_CACHE_BLOCK_SIZE - 6) && (i < cache_vpc[src_idx]); i++)
+	//IO8(0x4020) = 0x91;
+	uint8_t i;
+	for (i = 0; (i < FLASH_CACHE_BLOCK_SIZE - 6) && (i < cache_vpc[src_idx]); i++)
 	{
 		uint8_t data = cache_code[src_idx][i];
 		flash_byte_program((flash_code_address + i), flash_code_bank, data);
 	}
+	flash_byte_program((flash_code_address + i + 0), flash_code_bank, 0x4C); //opJMP
+	flash_byte_program((flash_code_address + i + 1), flash_code_bank, (uint8_t) ((uint16_t) &flash_dispatch_return)); //opJMP
+	flash_byte_program((flash_code_address + i + 2), flash_code_bank, (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8)); //opJMP
+		
 	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
 	flash_byte_program((uint16_t) &flash_block_flags[0] + dest_idx, mapper_prg_bank, flash_block_flags[dest_idx] & ~FLASH_AVAILABLE);
 }
 
 //============================================================================================================
 
-void flash_cache_pc_update(uint8_t code_address)
+void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 {		
-	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0 + code_address, pc_jump_bank, (uint8_t) flash_code_address);
-	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1 + code_address, pc_jump_bank, (uint8_t) (flash_code_address >> 8));			
+	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t) flash_code_address + code_address);
+	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t) ((flash_code_address + code_address) >> 8));			
 	
-	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, (flash_code_bank | 0xE0));
+	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, flash_code_bank | ((~flags) & 0xE0));
 }
 
 //============================================================================================================
@@ -393,11 +418,8 @@ void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
 	pc_jump_bank = ((emulated_pc >> 13) + BANK_PC);
 	pc_jump_address = (full_address & FLASH_BANK_MASK);	
 
-	lookup_pc_jump_flag(emulated_pc);
-	
-	
-	//bankswitch_prg((jump_target / FLASH_BANK_SIZE) + BANK_PC);
-	
+	lookup_pc_jump_flag(emulated_pc);	
+	//bankswitch_prg((jump_target / FLASH_BANK_SIZE) + BANK_PC);	
 }
 
 //============================================================================================================
@@ -525,6 +547,7 @@ uint8_t recompile_opcode()
 				cache_code[cache_index][code_index+1] = (uint16_t) &sp;				
 				pc += 1;
 				code_index += 2;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}			
 			else
@@ -543,6 +566,7 @@ uint8_t recompile_opcode()
 				cache_code[cache_index][code_index+1] = (uint16_t) &sp;				
 				pc += 1;
 				code_index += 2;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}			
 			else
@@ -563,6 +587,8 @@ uint8_t recompile_opcode()
 					}						
 					pc += 2;
 					code_index += opcode_6502_pha_size;
+					cache_flag[cache_index] |= READY_FOR_NEXT;
+					return cache_flag[cache_index];
 			}
 			else
 			{
@@ -580,7 +606,9 @@ uint8_t recompile_opcode()
 						cache_code[cache_index][code_index+i] = opcode_6502_pla[i];
 					}						
 					pc += 2;
+					cache_flag[cache_index] |= READY_FOR_NEXT;
 					code_index += opcode_6502_pla_size;
+					return cache_flag[cache_index];
 			}
 			else
 			{
@@ -611,6 +639,7 @@ uint8_t recompile_opcode()
 		case opNOP:
 		{
 			pc +=1;
+			cache_flag[cache_index] |= READY_FOR_NEXT;
 			return cache_flag[cache_index]; //continue; // do while
 		}		
 			
@@ -1017,15 +1046,17 @@ void cache_test(void)
 			cache_code[0][count] = ix++;
 		}
 		cache_vpc[0] = count;		
-		
 		test_block = (flash_cache_select()) - 1;
-		setup_flash_address(ix, test_block);
-		flash_cache_pc_update(count);
-		flash_cache_pc_flag_clear(ix, (uint8_t) ~RECOMPILED);	// testing - may be interpreted
-		flash_cache_copy(0, test_block);	
-		
+		setup_flash_address(i, test_block);
+		flash_cache_copy(0, test_block);			
 	}
 	
+	for (uint16_t i = 0; i < 0xFFFF; i++)
+	{				
+		setup_flash_address(i, 0);
+		flash_cache_pc_update(i, 0x55);
+		//flash_cache_pc_flag_clear(ix, (uint8_t) ~RECOMPILED);	// testing - may be interpreted
+	}	
 	
 	IO8(0x4020) = 0x86;	
 }

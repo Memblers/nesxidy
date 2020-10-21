@@ -1,7 +1,7 @@
 #ifndef DYNAMOS_H
 #define DYNAMOS_H
 
-#define	BLOCK_COUNT 14
+#define	BLOCK_COUNT 8
 #define CODE_SIZE 250
 
 #define CACHE_L1_CODE_SIZE 256
@@ -26,6 +26,8 @@
 #define FLASH_BANK_MASK			0x3FFF
 #define FLASH_CACHE_BLOCKS		(FLASH_CACHE_MEMORY_SIZE / FLASH_CACHE_BLOCK_SIZE)
 #define FLASH_CACHE_BANKS		(FLASH_CACHE_MEMORY_SIZE / FLASH_BANK_SIZE)
+
+#define BLOCK_CONFIG_BASE 250
 
 #define FLASH_AVAILABLE		0x01
 
@@ -74,6 +76,8 @@ extern void decode_address_asm2();
 //__regsused("a/x") extern void decode_address_asm(__reg("a/x") uint16_t encoded_address);
 __regsused("a/x/y") extern void dispatch_cache_asm();
 __regsused("a/x/y") extern void dispatch_return();
+__regsused("a/x/y") extern void dispatch_on_pc();
+__regsused("a/x/y") extern void flash_dispatch_return();
 
 
 extern uint8_t addr_6502_indy[];
@@ -93,7 +97,7 @@ extern uint8_t opcode_6502_pla[];
 
 
 extern uint8_t flash_cache_pc[];
-extern uint8_t flash_cache_pc_flags[];
+extern const uint8_t flash_cache_pc_flags[];
 
 
 void ready();
@@ -106,7 +110,7 @@ void decode_address_c(void);
 void cache_bit_enable(uint16_t addr);
 uint8_t cache_bit_check(uint16_t addr);
 uint16_t flash_cache_select();
-void flash_cache_pc_update(uint8_t code_address);
+void flash_cache_pc_update(uint8_t code_address, uint8_t flags);
 void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx);
 void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
 uint8_t flash_cache_search(uint16_t emulated_pc);

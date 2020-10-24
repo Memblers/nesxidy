@@ -123,6 +123,7 @@ void run_6502(void)
 	{
 		if (status & FLAG_DECIMAL)			
 		{
+			bankswitch_prg(0);
 			interpret_6502(); //enable_interpret();	
 			return;
 		}
@@ -132,10 +133,31 @@ void run_6502(void)
 			decimal_mode = 0;
 		}
 	}
-
+	
 
 	flash_cache_search(pc);
-	//dispatch_on_pc();
+	/*
+	uint8_t result = dispatch_on_pc();
+	switch (result)
+	{
+		case 2:
+		{
+			bankswitch_prg(0);
+			interpret_6502();
+			return;
+		}
+		case 0:
+		{
+			return;
+		}
+		case 1:
+		{			
+		}
+	}
+	*/
+	
+	
+			
 	
 	matched = 0;
 	cache_search();
@@ -223,7 +245,7 @@ void run_6502(void)
 			setup_flash_address(pc_old, flash_cache_index);
 			if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
 				flash_cache_pc_update(code_index_old, INTERPRETED);
-			else
+			else if (code_index)
 				flash_cache_pc_update(code_index_old, RECOMPILED);
 		}
 		
@@ -299,6 +321,8 @@ void run_6502(void)
 	{
 		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 0), flash_code_bank, cache_exit_pc_lo[cache_index]);
 		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 1), flash_code_bank, cache_exit_pc_hi[cache_index]);
+		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 2), flash_code_bank, cache_entry_pc_lo[cache_index]);
+		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 3), flash_code_bank, cache_entry_pc_hi[cache_index]);
 	}		
 
 	check_cache_links();	
@@ -462,7 +486,7 @@ uint8_t recompile_opcode()
 		{
 			#ifdef ENABLE_LINKING
 			op_buffer_1 = read6502(pc+1);
-			uint16_t branch_loc = op_buffer_1;
+			uint16_t branch_loc = op_buffer_1;			
 			if (branch_loc & 0x80)
 				branch_loc |= 0xFF00;
 			branch_loc += pc+2;
@@ -472,14 +496,17 @@ uint8_t recompile_opcode()
 			// allow backwards branch within the cache block
 			
 			branch_loc = op_buffer_1;
+			
 			/*
 			if (branch_loc & 0x80)	// only branch back	// UNSTABLE removed for now
-			{
+			{								
 				branch_loc |= 0xFF00;
+				IO8(0x4020) = ((branch_loc + pc) >> 8);
 				if (((branch_loc + pc) >> 8) >= (cache_entry_pc_hi[cache_index]))	// only within the current cache
-				{
+				{					
+					IO8(0x4020) = ((branch_loc + pc) & 0xFF);
 					if (((branch_loc + pc) & 0xFF) >= (cache_entry_pc_lo[cache_index]))
-					{
+					{						
 						uint8_t temp = op_buffer_1;
 						uint16_t start_pc = ((cache_entry_pc_hi[cache_index] << 8) | cache_entry_pc_lo[cache_index]);
 						temp -= (code_index - ((pc + code_index) - start_pc));
@@ -635,14 +662,18 @@ uint8_t recompile_opcode()
 			decimal_mode = 1;
 			enable_interpret();
 		}		
-		
+
 		case opNOP:
 		{
 			pc +=1;
 			cache_flag[cache_index] |= READY_FOR_NEXT;
 			return cache_flag[cache_index]; //continue; // do while
-		}		
-			
+		}
+		
+		case opBRK:
+		{
+			IO8(0x4021) = 0;			
+		}
 
 		default:
 		{			
@@ -849,6 +880,7 @@ void ready()
 	
 	//pc = (cache_exit_pc_lo[cache_index]) | (cache_exit_pc_hi[cache_index] << 8);
 		
+	
 	if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
 	{
 		bankswitch_prg(0);
@@ -868,9 +900,10 @@ void ready()
 	{
 		cache_index = verify_link_type0(cache_index) - 1;
 		goto run_again;
-	}	
-	
+	}
+		
 	#endif // ENABLE_LINKING	
+	
 	bankswitch_prg(0);
 }
 

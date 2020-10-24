@@ -76,7 +76,7 @@ extern void decode_address_asm2();
 //__regsused("a/x") extern void decode_address_asm(__reg("a/x") uint16_t encoded_address);
 __regsused("a/x/y") extern void dispatch_cache_asm();
 __regsused("a/x/y") extern void dispatch_return();
-__regsused("a/x/y") extern void dispatch_on_pc();
+__regsused("a/x/y") extern uint8_t dispatch_on_pc();
 __regsused("a/x/y") extern void flash_dispatch_return();
 
 
@@ -119,6 +119,7 @@ void cache_test(void);
 
 enum 6502op
 {
+	opBRK = 0x38,
 	opJMP = 0x4C,
 	opJMPi = 0x6C,
 	opJSR = 0x20,

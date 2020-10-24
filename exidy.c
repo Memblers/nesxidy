@@ -91,6 +91,7 @@ int main(void)
 		#else
 		run_6502();
 		#endif
+
 	
 #ifndef TRACK_TICKS		
 		if (frame_time++ > FRAME_LENGTH)

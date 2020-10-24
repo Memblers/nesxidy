@@ -287,8 +287,6 @@ _dispatch_table:
 	zpage addr_lo, addr_hi, target_bank, temp, temp2
 ;-------------------------------------------------------
 _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
-	lda #1
-	sta $4020
 	lda _pc+1		; D14-D15 - bank number
 	asl
 	rol temp
@@ -358,7 +356,7 @@ _flash_dispatch_return:
 	
 	pla
 	sta _status
-	
+
 	lda _flash_cache_index
 	and #$3F
 	ora #$80
@@ -371,17 +369,17 @@ _flash_dispatch_return:
 	iny
 	lda (addr_lo),y
 	sta _pc+1	
-	
+	lda #0	; PC has advanced
 	rts	
 	
 not_recompiled:
 	and #INTERPRETED
 	bne not_interpreted
-	lda #2
+	lda #2 ; interpret this PC
 	rts
 	
 not_interpreted:
-	lda #1
+	lda #1	; recompile from this PC
 	rts
 
 

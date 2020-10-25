@@ -154,10 +154,8 @@ void run_6502(void)
 		{			
 		}
 	}
-	*/
+	*/	
 	
-	
-			
 	
 	matched = 0;
 	cache_search();
@@ -167,7 +165,6 @@ void run_6502(void)
 		ready();
 		return;
 	}
-
 	
 	// create new cache for this pc
 
@@ -183,21 +180,6 @@ void run_6502(void)
 	{
 		flash_enabled = 0;
 	}
-	
-	
-/*
-	// find least-used cache		
-	//cache_hit_count[cache_index]++;
-	for (uint8_t i = 0, lowest = 0; i < BLOCK_COUNT; i++)
-	{
-		if (cache_hit_count[i] <= lowest)
-		{
-			next_new_cache = i;
-			lowest = cache_hit_count[i];				
-		}
-	}
-	cache_index = next_new_cache;		
-*/		
 
 	cache_index = next_new_cache;		
 	// when cache is full, overwrite the oldest ones
@@ -208,13 +190,6 @@ void run_6502(void)
 
 	cache_entry_pc_lo[cache_index] = (uint8_t) pc;
 	cache_entry_pc_hi[cache_index] = (uint8_t) (pc >> 8);
-	/*
-	if (flash_enabled)
-	{
-		setup_flash_address(pc, flash_cache_index);
-		flash_cache_pc_update(code_index);		
-	}
-	*/
 	
 	cache_flag[cache_index] = 0;
 	cache_cycles[cache_index] = 0;	
@@ -332,18 +307,12 @@ void run_6502(void)
 */			
 
 	next_new_cache = cache_index;
-	
-	//cache_bit_enable(pc);
-	
 
 	ready();
 	return;
 }
 
 //============================================================================================================
-
-
-
 
 #define lookup_pc_jump_flag(address)\
 pc_jump_flag_bank = ((address >> 14) + BANK_PC_FLAGS);\
@@ -446,24 +415,6 @@ void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
 	//bankswitch_prg((jump_target / FLASH_BANK_SIZE) + BANK_PC);	
 }
 
-//============================================================================================================
-/*
-uint16_t flash_cache_search(uint16_t emulated_pc)
-{
-	if (emulated_pc < 0x4000)
-		bankswitch_prg(BANK_PC_FLAGS + 0);
-	if (emulated_pc < 0x8000)
-		bankswitch_prg(BANK_PC_FLAGS + 1);
-	if (emulated_pc < 0xC000)
-		bankswitch_prg(BANK_PC_FLAGS + 2);
-	else
-		bankswitch_prg(BANK_PC_FLAGS + 3);
-	uint16_t bank_index = (emulated_pc & FLASH_BANK_MASK);
-	if (flash_cache_pc_flags[bank_index])
-		
-
-}
-*/
 //============================================================================================================
 
 uint8_t recompile_opcode()
@@ -858,18 +809,9 @@ void check_cache_links()
 
 void ready()
 {	
-	//const uint16_t *run_label = (uint16_t *) &run_again[0];
-	//void (*code_ptr)(void) = (void*) &cache_code[cache_index][0];
-	//(*code_ptr)();		
-	
 	bankswitch_prg(1);
 	run_again:	
-	
-	//if (cache_hit_count[cache_index] < 0xF0)		
-//		cache_hit_count[cache_index]++;
-	
-	//run_loc = (uint16_t *) &cache_code[cache_index][0];		
-	//run_asm();
+
 	dispatch_cache_asm();
 	
 	#ifdef TRACK_TICKS
@@ -877,9 +819,6 @@ void ready()
 	#else
 	frame_time += cache_cycles[cache_index];
 	#endif
-	
-	//pc = (cache_exit_pc_lo[cache_index]) | (cache_exit_pc_hi[cache_index] << 8);
-		
 	
 	if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
 	{
@@ -906,7 +845,6 @@ void ready()
 	
 	bankswitch_prg(0);
 }
-
 
 //============================================================================================================
 // return 0 - bad link, otherwise return link+1
@@ -978,8 +916,7 @@ void combine_caches(uint8_t start_with)
 	else
 	{
 		l1_cache_code[0] = 0x60;		
-	}
-	
+	}	
 }
 
 //============================================================================================================
@@ -1038,58 +975,6 @@ uint8_t cache_bit_check(uint16_t addr)
 	}
 	bankswitch_prg(0);
 	return value;
-	
-/*
-	IO8(0x4020) = 0x43;		
-	uint8_t bit_mask = (1 << (addr & 3));
-	addr = addr >> 3;
-	bankswitch_prg(3);
-	uint8_t value = bit_mask & cache_bit_array[addr];
-	bankswitch_prg(0);
-	return value;
-*/
 }
 
 //============================================================================================================
-
-void cache_test(void)
-{
-	/*
-	uint8_t count;
-	uint16_t ix = 128;
-	for (count = 0; count < 240; count++)
-		{
-			cache_code[0][count] = ix++;
-		}
-		cache_vpc[0] = count;		
-	
-	uint16_t number = flash_cache_select();
-	number--;
-	setup_flash_address(0, 256);
-	flash_cache_copy(0, 256);	
-	*/
-	
-	for (uint16_t i = 0; i < FLASH_CACHE_BLOCKS; i++)
-	{
-		uint16_t ix = i;
-		uint8_t count;
-		uint16_t test_block;
-		for (count = 0; count < 240; count++)
-		{
-			cache_code[0][count] = ix++;
-		}
-		cache_vpc[0] = count;		
-		test_block = (flash_cache_select()) - 1;
-		setup_flash_address(i, test_block);
-		flash_cache_copy(0, test_block);			
-	}
-	
-	for (uint16_t i = 0; i < 0xFFFF; i++)
-	{				
-		setup_flash_address(i, 0);
-		flash_cache_pc_update(i, 0x55);
-		//flash_cache_pc_flag_clear(ix, (uint8_t) ~RECOMPILED);	// testing - may be interpreted
-	}	
-	
-	IO8(0x4020) = 0x86;	
-}

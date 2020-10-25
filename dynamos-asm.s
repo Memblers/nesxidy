@@ -132,39 +132,6 @@ _rom_spectar:
 	zpage	_status, _a, _x, _y, _pc
 	
 ;=======================================================	
-	section "data"	
-	global	_run_asm, _run_loc
-;-------------------------------------------------------
-
-_run_asm:
-	lda _status
-	ora #$04	; hide IRQ/BRK flag
-	pha	
-	
-	lda _a
-	ldx _x	
-	ldy _y
-	plp
-	
-_run_loc = * + 1	
-	jsr $FFFF	; self-modifying
-	
-	php	
-	sta _a
-	stx _x
-	sty _y	
-	
-	pla
-	sta _status
-	
-	; save program counter
-	ldx _cache_index
-	lda _cache_exit_pc_lo,x
-	sta _pc
-	lda _cache_exit_pc_hi,x
-	sta _pc+1
-	
-	rts
 	
 
 ;=======================================================	

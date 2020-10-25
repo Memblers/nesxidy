@@ -67,7 +67,6 @@ extern uint8_t mapper_register;
 //#pragma section text0
 
 // asm functions
-__regsused("a/x/y") extern void run_asm();
 __regsused("a/x/y") extern uint16_t *run_loc;
 __regsused("a/x") extern void cache_search();
 extern void decode_address_asm();
@@ -115,7 +114,6 @@ void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx);
 void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
 uint8_t flash_cache_search(uint16_t emulated_pc);
 void flash_cache_pc_flag_clear(uint16_t emulated_pc, uint8_t flag);
-void cache_test(void);
 
 enum 6502op
 {

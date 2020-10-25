@@ -335,7 +335,6 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 {	
 	lookup_pc_jump_flag(emulated_pc);
 	bankswitch_prg(pc_jump_flag_bank);
-	IO8(0x4020) = 0x27;	
 	uint8_t test = (flash_cache_pc_flags[pc_jump_flag_address] && RECOMPILED);
 	if (test) //(flash_cache_pc_flags[pc_jump_flag_address] && RECOMPILED);	// D7 clear if RECOMPILED
 		return 0;
@@ -360,11 +359,8 @@ uint16_t flash_cache_select()
 	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
 	for (uint16_t i = 0; i < FLASH_CACHE_BLOCKS; i++)
 	{
-		if (flash_block_flags[i] & FLASH_AVAILABLE)
-		{
-			//flash_byte_program((uint16_t) &flash_block_flags[0] + i, mapper_prg_bank, flash_block_flags[i] & ~FLASH_AVAILABLE);
-			return (i + 1);
-		}
+		if (flash_block_flags[i] & FLASH_AVAILABLE)					
+			return (i + 1);		
 	}
 	return 0;
 }	
@@ -372,7 +368,6 @@ uint16_t flash_cache_select()
 //============================================================================================================
 void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx)
 {
-	//IO8(0x4020) = 0x91;
 	uint8_t i;
 	for (i = 0; (i < FLASH_CACHE_BLOCK_SIZE - 6) && (i < cache_vpc[src_idx]); i++)
 	{

@@ -335,8 +335,8 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 {	
 	lookup_pc_jump_flag(emulated_pc);
 	bankswitch_prg(pc_jump_flag_bank);
-	uint8_t test = (flash_cache_pc_flags[pc_jump_flag_address] && RECOMPILED);
-	if (test) //(flash_cache_pc_flags[pc_jump_flag_address] && RECOMPILED);	// D7 clear if RECOMPILED
+	uint8_t test = (flash_cache_pc_flags[pc_jump_flag_address] & RECOMPILED);
+	if (test) //(flash_cache_pc_flags[pc_jump_flag_address] & RECOMPILED);	// D7 clear if RECOMPILED
 		return 0;
 		
 	// run!

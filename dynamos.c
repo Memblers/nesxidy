@@ -384,7 +384,13 @@ void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t) flash_code_address + code_address);
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t) ((flash_code_address + code_address) >> 8));			
 	
-	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, flash_code_bank | ((~flags) & 0xE0));
+	uint8_t flag_byte;
+	if (flags == RECOMPILED)
+		flag_byte = flash_code_bank | 0x40;  // Bits 7,6 = 01: execute compiled code
+	else  // INTERPRETED
+		flag_byte = flash_code_bank;         // Bits 7,6 = 00: interpret override
+	
+	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, flag_byte);
 }
 
 //============================================================================================================

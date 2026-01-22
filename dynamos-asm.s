@@ -312,6 +312,8 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	ldy _y
 	plp
 	
+	jsr .dispatch_addr
+	
 .dispatch_addr = * + 1
 	jmp $FFFF	; self-modifying	
 	

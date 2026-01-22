@@ -134,9 +134,6 @@ void run_6502(void)
 		}
 	}
 	
-
-	flash_cache_search(pc);
-	/*
 	uint8_t result = dispatch_on_pc();
 	switch (result)
 	{
@@ -154,8 +151,6 @@ void run_6502(void)
 		{			
 		}
 	}
-	*/	
-	
 	
 	matched = 0;
 	cache_search();
@@ -337,9 +332,9 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 	bankswitch_prg(pc_jump_flag_bank);
 	uint8_t test = (flash_cache_pc_flags[pc_jump_flag_address] & RECOMPILED);
 	if (test) //(flash_cache_pc_flags[pc_jump_flag_address] & RECOMPILED);	// D7 clear if RECOMPILED
-		return 0;
+		return 0; // not found
 		
-	// run!
+	// run native code, return through flash_dispatch_return
 	uint32_t full_address = (emulated_pc << 1);
 	pc_jump_bank = ((emulated_pc >> 13) + BANK_PC);
 	pc_jump_address = (full_address & FLASH_BANK_MASK);
@@ -349,7 +344,7 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 	IO8(0x4020) = 0x25;
 	void (*code_ptr)(void) = (void*) flash_cache_pc[pc_jump_address];
 	(*code_ptr)();
-	return 1;
+	//unreachable, returns through flash_dispatch_return
 }
 
 //============================================================================================================

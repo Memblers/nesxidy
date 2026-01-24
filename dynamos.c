@@ -342,7 +342,9 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 	
 	//const uint16_t *run_label = (uint16_t *) &run_again[0];
 	IO8(0x4020) = 0x25;
-	void (*code_ptr)(void) = (void*) flash_cache_pc[pc_jump_address];
+	uint16_t code_addr = flash_cache_pc[pc_jump_address] | 
+	                     (flash_cache_pc[pc_jump_address + 1] << 8);
+	void (*code_ptr)(void) = (void*) code_addr;
 	(*code_ptr)();
 	//unreachable, returns through flash_dispatch_return
 }

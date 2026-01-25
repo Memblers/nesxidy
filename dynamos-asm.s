@@ -306,14 +306,17 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	lda _status
 	ora #$04	; hide IRQ/BRK flag
 	pha	
+
+	lda #$26	
+	sta $4020
 	
 	lda _a
 	ldx _x	
 	ldy _y
 	plp
 	
-	jsr .dispatch_addr
-	
+	jsr .dispatch_jsr
+.dispatch_jsr:
 .dispatch_addr = * + 1
 	jmp $FFFF	; self-modifying	
 	

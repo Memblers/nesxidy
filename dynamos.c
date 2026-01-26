@@ -547,9 +547,11 @@ uint8_t recompile_opcode()
 
 		case opNOP:
 		{
-			pc +=1;
+			cache_code[cache_index][code_index] = opNOP;
+			pc += 1;
+			code_index += 1;
 			cache_flag[cache_index] |= READY_FOR_NEXT;
-			return cache_flag[cache_index]; //continue; // do while
+			return cache_flag[cache_index];
 		}
 		
 		case opBRK:

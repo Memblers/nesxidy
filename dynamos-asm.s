@@ -230,12 +230,12 @@ _flash_dispatch_return:
 	
 not_recompiled:
 	and #INTERPRETED
-	bne not_interpreted
-	lda #2 ; interpret this PC
+	bne needs_interpret   ; If INTERPRETED bit SET, go interpret
+	lda #1 ; not interpreted, needs recompile
 	rts
 	
-not_interpreted:
-	lda #1	; recompile from this PC
+needs_interpret:
+	lda #2	; interpret this PC
 	rts
 
 

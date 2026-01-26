@@ -18,9 +18,7 @@ static uint16_t rom_remap_index = 0;
 static uint8_t debug_out[0x80];
 __zpage uint32_t cache_hits = 0;
 __zpage uint32_t cache_misses = 0;
-uint32_t cache_links = 0;
-uint32_t cache_links_found = 0;
-uint32_t cache_links_dropped = 0;
+// Removed: cache_links, cache_links_found, cache_links_dropped (RAM cache linking)
 uint32_t cache_branches = 0;
 //static uint16_t cache_index = 0;
 __zpage uint8_t cache_index = BLOCK_COUNT-1;
@@ -39,8 +37,7 @@ __zpage uint8_t cache_entry_pc_lo[BLOCK_COUNT];
 __zpage uint8_t cache_entry_pc_hi[BLOCK_COUNT];
 uint8_t cache_exit_pc_lo[BLOCK_COUNT];
 uint8_t cache_exit_pc_hi[BLOCK_COUNT];
-uint8_t cache_link[BLOCK_COUNT];
-uint8_t cache_branch_link[BLOCK_COUNT];
+// Removed: cache_link, cache_branch_link (RAM cache linking)
 uint16_t cache_cycles[BLOCK_COUNT];
 uint8_t cache_hit_count[BLOCK_COUNT];
 uint8_t cache_branch_pc_lo[BLOCK_COUNT];
@@ -680,177 +677,9 @@ uint8_t recompile_opcode()
 	return cache_flag[cache_index];
 }
 
-//============================================================================================================
-
-void check_cache_links()
-{
-		#ifdef ENABLE_LINKING
-		// see if caches can be linked together
-		/*
-		// if it loops into itself - sounds dangerous
-		for (uint16_t i = 0; i < BLOCK_COUNT; i++)
-		{
-			if ((cache_entry_pc_lo[i] | (cache_entry_pc_hi[i] << 8)) == (cache_exit_pc_lo[i] | (cache_exit_pc_hi[i] << 8)))
-			{
-				cache_links_found++;
-				cache_link[cache_index] = i;
-				cache_flag[cache_index] |= LINKED;
-			}
-		}
-		*/
-		
-		// if exit of this cache leads to the entrance of another
-		for (uint16_t i = 0; i < BLOCK_COUNT; i++)
-		{
-			if ((cache_entry_pc_lo[i] | (cache_entry_pc_hi[i] << 8)) == (cache_exit_pc_lo[cache_index] | (cache_exit_pc_hi[cache_index] << 8)))
-			{				
-				//cache_links_found++;
-				cache_link[cache_index] = i;
-				cache_flag[cache_index] |= LINKED;
-				//combine_caches(cache_index);
-				break;
-			}
-		}
-		
-		// if another cache leads into this one
-		for (uint16_t i = 0; i < BLOCK_COUNT; i++)
-		{
-			if ((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)) == (cache_exit_pc_lo[i] | (cache_exit_pc_hi[i] << 8)))
-			{			
-				//cache_links_found++;
-				cache_link[i] = cache_index;
-				cache_flag[i] |= LINKED;
-			}
-		}
-
-		// if branch is linked to another cache
-		for (uint16_t i = 0; i < BLOCK_COUNT; i++)
-		{
-			if ((cache_entry_pc_lo[i] | (cache_entry_pc_hi[i] << 8)) == (cache_branch_pc_lo[cache_index] | (cache_branch_pc_hi[cache_index] << 8)))
-			{				
-				//cache_links_found++;
-				cache_branch_link[cache_index] = i;
-				cache_flag[cache_index] |= BRANCH_LINKED;
-				break;
-			}
-		}
-
-		#endif // ENABLE_LINKING
-}
-
-//============================================================================================================
-
-void ready()
-{	
-	bankswitch_prg(1);
-	run_again:	
-
-	dispatch_cache_asm();
-	
-	#ifdef TRACK_TICKS
-	clockticks6502 += cache_cycles[cache_index];
-	#else
-	frame_time += cache_cycles[cache_index];
-	#endif
-	
-	if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
-	{
-		bankswitch_prg(0);
-		interpret_6502();					
-	}
-	
-	#ifdef ENABLE_LINKING
-
-	if (verify_link_type1(cache_index))
-	{
-		cache_index = verify_link_type1(cache_index) - 1;
-		goto run_again;
-	}	
-	
-
-	if (verify_link_type0(cache_index))
-	{
-		cache_index = verify_link_type0(cache_index) - 1;
-		goto run_again;
-	}
-		
-	#endif // ENABLE_LINKING	
-	
-	bankswitch_prg(0);
-}
-
-//============================================================================================================
-// return 0 - bad link, otherwise return link+1
-uint8_t verify_link_type0(uint8_t ix)
-{
-	if (cache_flag[ix] & LINKED)
-	{		
-		if (((uint8_t) pc == cache_entry_pc_lo[cache_link[ix]])  && (((uint8_t) pc >> 8) == cache_entry_pc_hi[cache_link[ix]]))
-		{			
-			cache_links++;
-			return (cache_link[ix]) + 1;
-		}
-		else
-		{
-			cache_link[ix] = 0;	// delete link
-			cache_flag[ix] &= ~LINKED;
-			cache_links_dropped++;
-			return 0;
-		}
-	}
-	return 0;
-}
-//============================================================================================================
-uint8_t verify_link_type1(uint8_t ix)
-{
-	if (cache_flag[ix] & BRANCH_LINKED)
-	{		
-		if (((uint8_t) pc == cache_entry_pc_lo[cache_branch_link[ix]]) && (((uint8_t) pc >> 8) == cache_entry_pc_hi[cache_branch_link[ix]]))
-		{			
-			cache_links++;
-			return (cache_branch_link[ix]) + 1;
-		}
-		else
-		{
-			cache_branch_link[ix] = 0;	// delete link
-			cache_flag[ix] &= ~BRANCH_LINKED;
-			cache_links_dropped++;
-			return 0;
-		}
-	}
-	return 0;
-}
-//============================================================================================================
-
-// rewrite
-void combine_caches(uint8_t start_with)
-{
-	int i = start_with;	
-	uint16_t vpc_count = 0;
-	
-	uint8_t ix2 = 0;
-	if ((verify_link_type0(i)) && (cache_flag[i] & OUT_OF_CACHE))
-	{			
-		uint8_t ix = 0;
-		vpc_count += cache_vpc[i];
-		do
-		{					
-			do
-			{					
-				l1_cache_code[ix2++] = cache_code[i][ix++];				
-			} while (ix < cache_vpc[i]);
-						
-			uint8_t temp_i = i;
-			i = cache_link[temp_i];
-			
-			vpc_count += cache_vpc[i]; // check size including next cache
-		} while (vpc_count < CACHE_L1_CODE_SIZE);		
-	}
-	else
-	{
-		l1_cache_code[0] = 0x60;		
-	}	
-}
+// Removed: check_cache_links(), ready(), verify_link_type0(), verify_link_type1(), combine_caches()
+// These were all part of the old RAM cache execution system that is no longer used.
+// Flash cache execution uses dispatch_on_pc() and flash_dispatch_return instead.
 
 //============================================================================================================
 void decode_address_c(void)

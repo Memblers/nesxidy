@@ -135,118 +135,13 @@ _rom_spectar:
 	
 
 ;=======================================================	
+; REMOVED: _dispatch_cache_asm, _dispatch_return, _dispatch_table
+; These were part of the old RAM cache execution system.
+; Flash cache execution uses _dispatch_on_pc and _flash_dispatch_return instead.
 	section "data"
-	global _cache_code, _cache_index, _asm_return, _dispatch_return, _dispatch_cache_asm, _dispatch_table
+	global _cache_code, _cache_index
 	zpage _cache_index
 ;-------------------------------------------------------	
-
-_dispatch_cache_asm:
-
-	lda _cache_index
-	asl
-	sta dispatch_location
-	
-	lda _status
-	ora #$04	; hide IRQ/BRK flag
-	pha	
-	
-	lda _a
-	ldx _x	
-	ldy _y
-	plp
-	
-dispatch_location = * + 1
-	jmp (_dispatch_table)	; self-modifying code
-
-;-------------------------------------------------------		
-	section "text"
-	
-_dispatch_return:
-	
-	php	
-	sta _a
-	stx _x
-	sty _y	
-	
-	pla
-	sta _status
-	
-	; save program counter
-	ldx _cache_index
-	lda _cache_exit_pc_lo,x
-	sta _pc
-	lda _cache_exit_pc_hi,x
-	sta _pc+1
-	rts	
-	
-	align 8
-
-_dispatch_table:	
-	word _cache_code + (ASM_CODE_SIZE * 0)
-	word _cache_code + (ASM_CODE_SIZE * 1)
-	word _cache_code + (ASM_CODE_SIZE * 2)
-	word _cache_code + (ASM_CODE_SIZE * 3)
-	word _cache_code + (ASM_CODE_SIZE * 4)
-	word _cache_code + (ASM_CODE_SIZE * 5)
-	word _cache_code + (ASM_CODE_SIZE * 6)
-	word _cache_code + (ASM_CODE_SIZE * 7)
-	word _cache_code + (ASM_CODE_SIZE * 8)
-	word _cache_code + (ASM_CODE_SIZE * 9)
-	word _cache_code + (ASM_CODE_SIZE * 10)
-	word _cache_code + (ASM_CODE_SIZE * 11)
-	word _cache_code + (ASM_CODE_SIZE * 12)
-	word _cache_code + (ASM_CODE_SIZE * 13)
-	word _cache_code + (ASM_CODE_SIZE * 14)
-	word _cache_code + (ASM_CODE_SIZE * 15)
-	word _cache_code + (ASM_CODE_SIZE * 16)
-	word _cache_code + (ASM_CODE_SIZE * 17)
-	word _cache_code + (ASM_CODE_SIZE * 18)
-	word _cache_code + (ASM_CODE_SIZE * 19)
-	word _cache_code + (ASM_CODE_SIZE * 20)
-	word _cache_code + (ASM_CODE_SIZE * 21)
-	word _cache_code + (ASM_CODE_SIZE * 22)
-	word _cache_code + (ASM_CODE_SIZE * 23)
-	word _cache_code + (ASM_CODE_SIZE * 24)
-	word _cache_code + (ASM_CODE_SIZE * 25)
-	word _cache_code + (ASM_CODE_SIZE * 26)
-	word _cache_code + (ASM_CODE_SIZE * 27)
-	word _cache_code + (ASM_CODE_SIZE * 28)
-	word _cache_code + (ASM_CODE_SIZE * 29)
-	word _cache_code + (ASM_CODE_SIZE * 30)
-	word _cache_code + (ASM_CODE_SIZE * 31)
-	word _cache_code + (ASM_CODE_SIZE * 32)
-	word _cache_code + (ASM_CODE_SIZE * 33)
-	word _cache_code + (ASM_CODE_SIZE * 34)
-	word _cache_code + (ASM_CODE_SIZE * 35)
-	word _cache_code + (ASM_CODE_SIZE * 36)
-	word _cache_code + (ASM_CODE_SIZE * 37)
-	word _cache_code + (ASM_CODE_SIZE * 38)
-	word _cache_code + (ASM_CODE_SIZE * 39)
-	word _cache_code + (ASM_CODE_SIZE * 40)
-	word _cache_code + (ASM_CODE_SIZE * 41)
-	word _cache_code + (ASM_CODE_SIZE * 42)
-	word _cache_code + (ASM_CODE_SIZE * 43)
-	word _cache_code + (ASM_CODE_SIZE * 44)
-	word _cache_code + (ASM_CODE_SIZE * 45)
-	word _cache_code + (ASM_CODE_SIZE * 46)
-	word _cache_code + (ASM_CODE_SIZE * 47)
-	word _cache_code + (ASM_CODE_SIZE * 48)
-	word _cache_code + (ASM_CODE_SIZE * 49)
-	word _cache_code + (ASM_CODE_SIZE * 50)
-	word _cache_code + (ASM_CODE_SIZE * 51)
-	word _cache_code + (ASM_CODE_SIZE * 52)
-	word _cache_code + (ASM_CODE_SIZE * 53)
-	word _cache_code + (ASM_CODE_SIZE * 54)
-	word _cache_code + (ASM_CODE_SIZE * 55)
-	word _cache_code + (ASM_CODE_SIZE * 56)
-	word _cache_code + (ASM_CODE_SIZE * 57)
-	word _cache_code + (ASM_CODE_SIZE * 58)
-	word _cache_code + (ASM_CODE_SIZE * 59)
-	word _cache_code + (ASM_CODE_SIZE * 60)
-	word _cache_code + (ASM_CODE_SIZE * 61)
-	word _cache_code + (ASM_CODE_SIZE * 62)
-	word _cache_code + (ASM_CODE_SIZE * 63)
-	
 
 ;=======================================================	
 	section "data"

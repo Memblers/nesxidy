@@ -73,8 +73,7 @@ extern void decode_address_asm();
 extern void decode_address_asm2();
 //__regsused("a/x") extern void decode_address_asm2();
 //__regsused("a/x") extern void decode_address_asm(__reg("a/x") uint16_t encoded_address);
-__regsused("a/x/y") extern void dispatch_cache_asm();
-__regsused("a/x/y") extern void dispatch_return();
+// Removed: dispatch_cache_asm(), dispatch_return() - RAM cache execution (dead code)
 __regsused("a/x/y") extern uint8_t dispatch_on_pc();
 __regsused("a/x/y") extern void flash_dispatch_return();
 
@@ -99,12 +98,9 @@ extern uint8_t flash_cache_pc[];
 extern const uint8_t flash_cache_pc_flags[];
 
 
-void ready();
+// Removed: ready(), check_cache_links(), verify_link_type0(), verify_link_type1(), combine_caches()
+// These were all part of the old RAM cache execution system.
 uint8_t recompile_opcode();
-void check_cache_links();
-uint8_t verify_link_type0(uint8_t ix);
-uint8_t verify_link_type1(uint8_t ix);
-void combine_caches(uint8_t start_with);
 void decode_address_c(void);
 void cache_bit_enable(uint16_t addr);
 uint8_t cache_bit_check(uint16_t addr);

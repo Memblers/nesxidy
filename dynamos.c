@@ -49,6 +49,10 @@ __zpage uint16_t decoded_address;
 __zpage uint16_t encoded_address;
 __zpage uint8_t address_8;
 
+// Debug: track if we've passed initial startup
+__zpage uint8_t startup_complete = 0;
+__zpage uint16_t last_pc_before_reset = 0;
+
 uint32_t cache_branch_long = 0;
 
 extern	uint8_t flash_block_flags[];
@@ -104,9 +108,28 @@ search cache for entrance matching the current program counter
 
 */
 
+// Debug: reboot detection
+volatile uint8_t reboot_detected = 0;
+volatile uint16_t reboot_from_pc = 0;
+volatile uint16_t run_count = 0;
+
 void run_6502(void)
 {		
 	//cache_test();
+	
+	run_count++;
+	
+	// Debug: Detect reboot to $2800 after startup (after 1000 calls)
+	if (pc == 0x2800 && run_count > 1000)
+	{
+		// We've rebooted! Store where we came from
+		reboot_detected = 1;
+		reboot_from_pc = last_pc_before_reset;
+		// Infinite loop
+		for(;;) { __asm("nop"); }
+	}
+	last_pc_before_reset = pc;  // Track PC before each step
+	
 #ifdef DEBUG_OUT
 	static uint8_t print_delay = 0;
 	print_delay++;
@@ -318,9 +341,9 @@ void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 	
 	uint8_t flag_byte;
 	if (flags == RECOMPILED)
-		flag_byte = flash_code_bank | INTERPRETED;  // Bit 7 clear, bit 6 set = execute compiled code
+		flag_byte = flash_code_bank;  // Bit 7 clear = execute compiled code from flash
 	else  // INTERPRETED - this instruction needs to be interpreted
-		flag_byte = flash_code_bank | RECOMPILED;   // Bit 7 set, bit 6 clear = dispatch returns 2 (interpret)
+		flag_byte = RECOMPILED;   // Bit 7 set, bit 6 clear = dispatch returns 2 (interpret)
 	
 	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, flag_byte);
 }
@@ -606,8 +629,6 @@ uint8_t recompile_opcode()
 					// At runtime, the flash cache bank is at $8000, so ROM reads would fail.
 					// Always interpret indx instructions to ensure correct bank switching.
 					enable_interpret();
-					pc += 2;
-					code_index += 2;
 					break;
 					
 					/* Original compiled indx - disabled due to bank conflict:
@@ -642,8 +663,6 @@ uint8_t recompile_opcode()
 					// At runtime, the flash cache bank is at $8000, so ROM reads would fail.
 					// Always interpret indy instructions to ensure correct bank switching.
 					enable_interpret();
-					pc += 2;
-					code_index += 2;
 					break;
 					
 					/* Original compiled indy - disabled due to bank conflict:

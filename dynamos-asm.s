@@ -230,8 +230,8 @@ _flash_dispatch_return:
 	
 not_recompiled:
 	and #INTERPRETED
-	bne needs_interpret   ; If INTERPRETED bit SET, go interpret
-	lda #1 ; not interpreted, needs recompile
+	beq needs_interpret   ; If INTERPRETED bit CLEAR, interpret (was marked for interpretation)
+	lda #1 ; INTERPRETED bit SET = not yet processed, needs recompile
 	rts
 	
 needs_interpret:

@@ -137,69 +137,48 @@ void run_6502(void)
 	uint8_t result = dispatch_on_pc();
 	switch (result)
 	{
-		case 2:
+		case 2:  // interpret
 		{
 			bankswitch_prg(0);
 			interpret_6502();
 			return;
 		}
-		case 0:
+		case 0:  // executed from flash
 		{
 			return;
 		}
-		case 1:
+		case 1:  // recompile needed
 		{			
 		}
 	}
 	
-	matched = 0;
-	cache_search();
-	if (matched == 1)
-	{
-		cache_hits++;
-		ready();
-		return;
-	}
-	
-	// create new cache for this pc
-
+	// Compile directly to flash
 	cache_misses++;
 	
 	flash_cache_index = flash_cache_select();
 	if (flash_cache_index)
 	{
 		flash_cache_index--;
-		flash_enabled = 1;
 	}
 	else
 	{
-		flash_enabled = 0;
+		// No flash available, fall back to interpreter
+		bankswitch_prg(0);
+		interpret_6502();
+		return;
 	}
-
-	cache_index = next_new_cache;		
-	// when cache is full, overwrite the oldest ones
-	if (cache_index-- == 0)
-		cache_index = BLOCK_COUNT-1;		
-			
+	
+	// Save the entry PC before compilation
+	uint16_t entry_pc = pc;
+	
+	// Use cache index 0 as temporary compilation buffer
+	cache_index = 0;
 	code_index = 0;		
 
-	cache_entry_pc_lo[cache_index] = (uint8_t) pc;
-	cache_entry_pc_hi[cache_index] = (uint8_t) (pc >> 8);
+	cache_flag[0] = 0;
 	
-	cache_flag[cache_index] = 0;
-	cache_cycles[cache_index] = 0;	
-	cache_hit_count[cache_index] = 0;
-	
-	//cache_hit_count[cache_index]++;	
-
 	do
 	{
-		#ifdef TRACK_TICKS
-		cache_cycles[cache_index] += ticktable[read6502(pc)];
-		#else
-		cache_cycles[cache_index]++;
-		#endif
-		
 		uint16_t pc_old = pc;
 		uint8_t code_index_old = code_index;
 		
@@ -207,104 +186,82 @@ void run_6502(void)
 		
 		if (code_index > (CODE_SIZE - 6))
 		{
-			cache_flag[cache_index] |= OUT_OF_CACHE;
-			cache_flag[cache_index] &= ~READY_FOR_NEXT;
-		}
-		if (flash_enabled)
-		{
-			setup_flash_address(pc_old, flash_cache_index);
-			if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
-				flash_cache_pc_update(code_index_old, INTERPRETED);
-			else if (code_index)
-				flash_cache_pc_update(code_index_old, RECOMPILED);
+			cache_flag[0] |= OUT_OF_CACHE;
+			cache_flag[0] &= ~READY_FOR_NEXT;
 		}
 		
-	} while (cache_flag[cache_index] & READY_FOR_NEXT);	// need to re-add OUT_OF_CACHE_LOGIC		
+		setup_flash_address(pc_old, flash_cache_index);
+		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
+			flash_cache_pc_update(code_index_old, INTERPRETED);
+		else if (code_index)
+			flash_cache_pc_update(code_index_old, RECOMPILED);
+		
+	} while (cache_flag[0] & READY_FOR_NEXT);
 	
-	cache_vpc[cache_index] = code_index;
+	cache_vpc[0] = code_index;
 	
 	if (code_index)
 	{
-		cache_code[cache_index][code_index++] = 0x4C; //opJMP
-		cache_code[cache_index][code_index++] = (uint8_t) ((uint16_t) &dispatch_return); //opJMP
-		cache_code[cache_index][code_index++] = (uint8_t) (((uint16_t) &dispatch_return) >> 8); //opJMP
+		// Write JMP to flash_dispatch_return at end of code
+		cache_code[0][code_index++] = 0x4C; //opJMP
+		cache_code[0][code_index++] = (uint8_t) ((uint16_t) &flash_dispatch_return);
+		cache_code[0][code_index++] = (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8);
 		
-		//flash_cache_pc_flag_clear((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)), (uint8_t) ~RECOMPILED);	// testing - may be interpreted
-		if (flash_enabled)
-			flash_cache_copy(cache_index, flash_cache_index);
+		// Copy compiled code to flash
+		flash_cache_copy(0, flash_cache_index);
+		
+		// Write exit PC to flash block config area for flash_dispatch_return to use
+		uint16_t exit_pc;
+		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
+		{
+			uint16_t pc_temp = pc;
+			switch (addrmodes[read6502(pc)])
+			{
+				case abso:
+				case absy:
+				case absx:
+				case ind:
+					pc_temp += 3;
+					break;
+				case zp:
+				case zpx:
+				case zpy:
+				case indx:
+				case indy:
+				case imm:
+				case rel:
+					pc_temp += 2;
+					break;
+				case imp:
+				case acc:
+					pc_temp += 1;
+					break;
+				default:
+					break;
+			}
+			exit_pc = pc_temp;
+		}
+		else
+		{
+			exit_pc = pc;
+		}
+		
+		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 0), flash_code_bank, (uint8_t) exit_pc);
+		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 1), flash_code_bank, (uint8_t) (exit_pc >> 8));
+		
+		// Restore PC to entry point and execute from flash
+		pc = entry_pc;
+		
+		result = dispatch_on_pc();
+		// dispatch_on_pc should return 0 (executed from flash)
+		return;
 	}
-		
 	else // code buffer empty
 	{
-		//flash_cache_pc_flag_clear((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)), ~INTERPRETED);	// testing - may be interpreted		
 		bankswitch_prg(0);
 		interpret_6502();
-		cache_entry_pc_hi[cache_index] = 0; // cancel cache
-		cache_entry_pc_lo[cache_index] = 0;
-		return; // get out
+		return;
 	}
-	
-	if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
-	{
-		uint16_t pc_temp = pc;
-		switch (read6502(pc))
-		{
-			case abso:
-			case absy:
-			case absx:
-			case ind:
-			{
-				pc_temp += 3;
-				break;
-			}	
-			
-			case zp:
-			case zpx:
-			case zpy:
-			case indx:
-			case indy:
-			case imm:
-			case rel:
-			{
-				pc_temp += 2;
-				break;
-			}
-			
-			case imp:
-			case acc:
-			{
-				pc_temp += 1;
-				break;
-			}
-			default:
-		}
-		cache_exit_pc_lo[cache_index] = (uint8_t) pc_temp;
-		cache_exit_pc_hi[cache_index] = (uint8_t) (pc_temp >> 8);		
-	}
-	else
-	{
-		cache_exit_pc_lo[cache_index] = (uint8_t) pc;
-		cache_exit_pc_hi[cache_index] = (uint8_t) (pc >> 8 );		
-	}
-	
-	if (flash_enabled)
-	{
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 0), flash_code_bank, cache_exit_pc_lo[cache_index]);
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 1), flash_code_bank, cache_exit_pc_hi[cache_index]);
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 2), flash_code_bank, cache_entry_pc_lo[cache_index]);
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 3), flash_code_bank, cache_entry_pc_hi[cache_index]);
-	}		
-
-	check_cache_links();	
-/*	
-	while (code_index < CODE_SIZE)	// for easier viewing in memory
-		cache_code[cache_index][code_index++] = 0;		
-*/			
-
-	next_new_cache = cache_index;
-
-	ready();
-	return;
 }
 
 //============================================================================================================
@@ -383,14 +340,14 @@ void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx)
 
 void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 {		
-	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t) flash_code_address + code_address);
+	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t) (flash_code_address + code_address));
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t) ((flash_code_address + code_address) >> 8));			
 	
 	uint8_t flag_byte;
 	if (flags == RECOMPILED)
-		flag_byte = flash_code_bank | 0x40;  // Bits 7,6 = 01: execute compiled code
+		flag_byte = flash_code_bank | INTERPRETED;  // Set bit 6 to indicate execute compiled code
 	else  // INTERPRETED
-		flag_byte = flash_code_bank;         // Bits 7,6 = 00: interpret override
+		flag_byte = flash_code_bank;                // Bit 6 clear = interpret override
 	
 	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, flag_byte);
 }

@@ -211,40 +211,9 @@ void run_6502(void)
 		flash_cache_copy(0, flash_cache_index);
 		
 		// Write exit PC to flash block config area for flash_dispatch_return to use
-		uint16_t exit_pc;
-		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
-		{
-			uint16_t pc_temp = pc;
-			switch (addrmodes[read6502(pc)])
-			{
-				case abso:
-				case absy:
-				case absx:
-				case ind:
-					pc_temp += 3;
-					break;
-				case zp:
-				case zpx:
-				case zpy:
-				case indx:
-				case indy:
-				case imm:
-				case rel:
-					pc_temp += 2;
-					break;
-				case imp:
-				case acc:
-					pc_temp += 1;
-					break;
-				default:
-					break;
-			}
-			exit_pc = pc_temp;
-		}
-		else
-		{
-			exit_pc = pc;
-		}
+		// When INTERPRET_NEXT_INSTRUCTION is set, pc points to the instruction that needs
+		// to be interpreted (e.g., JSR), so exit_pc should be pc itself, not pc + instruction_size
+		uint16_t exit_pc = pc;
 		
 		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 0), flash_code_bank, (uint8_t) exit_pc);
 		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 1), flash_code_bank, (uint8_t) (exit_pc >> 8));
@@ -345,9 +314,9 @@ void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 	
 	uint8_t flag_byte;
 	if (flags == RECOMPILED)
-		flag_byte = flash_code_bank | INTERPRETED;  // Set bit 6 to indicate execute compiled code
-	else  // INTERPRETED
-		flag_byte = flash_code_bank;                // Bit 6 clear = interpret override
+		flag_byte = flash_code_bank | INTERPRETED;  // Bit 7 clear, bit 6 set = execute compiled code
+	else  // INTERPRETED - this instruction needs to be interpreted
+		flag_byte = flash_code_bank | RECOMPILED;   // Bit 7 set, bit 6 clear = dispatch returns 2 (interpret)
 	
 	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, flag_byte);
 }

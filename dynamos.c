@@ -9,6 +9,7 @@
 #include "mapper30.h"
 
 __zpage extern uint8_t sp;
+__zpage extern uint8_t a;
 __zpage extern uint16_t pc;
 __zpage uint16_t pc_end;
 __zpage extern uint8_t opcode;
@@ -198,25 +199,33 @@ void run_6502(void)
 		
 	} while (cache_flag[0] & READY_FOR_NEXT);
 	
-	cache_vpc[0] = code_index;
-	
 	if (code_index)
 	{
-		// Write JMP to flash_dispatch_return at end of code
-		cache_code[0][code_index++] = 0x4C; //opJMP
+		// Exit PC is the current pc value (instruction to interpret or continue from)
+		uint16_t exit_pc = pc;
+		
+		// Embed exit PC and JMP to flash_dispatch_return at end of code:
+		// STA _a (zp), PHP, LDA #<exit_pc, STA _pc (zp), LDA #>exit_pc, STA _pc+1 (zp), JMP flash_dispatch_return
+		cache_code[0][code_index++] = 0x85; // STA zero page
+		cache_code[0][code_index++] = (uint8_t) ((uint16_t) &a);
+		cache_code[0][code_index++] = 0x08; // PHP - save status before LDA corrupts flags
+		cache_code[0][code_index++] = 0xA9; // LDA immediate
+		cache_code[0][code_index++] = (uint8_t) exit_pc;
+		cache_code[0][code_index++] = 0x85; // STA zero page
+		cache_code[0][code_index++] = (uint8_t) ((uint16_t) &pc);
+		cache_code[0][code_index++] = 0xA9; // LDA immediate
+		cache_code[0][code_index++] = (uint8_t) (exit_pc >> 8);
+		cache_code[0][code_index++] = 0x85; // STA zero page
+		cache_code[0][code_index++] = (uint8_t) (((uint16_t) &pc) + 1);
+		cache_code[0][code_index++] = 0x4C; // JMP
 		cache_code[0][code_index++] = (uint8_t) ((uint16_t) &flash_dispatch_return);
 		cache_code[0][code_index++] = (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8);
 		
+		// Update cache_vpc after adding epilogue
+		cache_vpc[0] = code_index;
+		
 		// Copy compiled code to flash
 		flash_cache_copy(0, flash_cache_index);
-		
-		// Write exit PC to flash block config area for flash_dispatch_return to use
-		// When INTERPRET_NEXT_INSTRUCTION is set, pc points to the instruction that needs
-		// to be interpreted (e.g., JSR), so exit_pc should be pc itself, not pc + instruction_size
-		uint16_t exit_pc = pc;
-		
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 0), flash_code_bank, (uint8_t) exit_pc);
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 1), flash_code_bank, (uint8_t) (exit_pc >> 8));
 		
 		// Restore PC to entry point and execute from flash
 		pc = entry_pc;
@@ -292,14 +301,12 @@ uint16_t flash_cache_select()
 void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx)
 {
 	uint8_t i;
-	for (i = 0; (i < FLASH_CACHE_BLOCK_SIZE - 6) && (i < cache_vpc[src_idx]); i++)
+	for (i = 0; (i < FLASH_CACHE_BLOCK_SIZE) && (i < cache_vpc[src_idx]); i++)
 	{
 		uint8_t data = cache_code[src_idx][i];
 		flash_byte_program((flash_code_address + i), flash_code_bank, data);
 	}
-	flash_byte_program((flash_code_address + i + 0), flash_code_bank, 0x4C); //opJMP
-	flash_byte_program((flash_code_address + i + 1), flash_code_bank, (uint8_t) ((uint16_t) &flash_dispatch_return)); //opJMP
-	flash_byte_program((flash_code_address + i + 2), flash_code_bank, (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8)); //opJMP
+	// JMP to flash_dispatch_return is now embedded in the block epilogue
 		
 	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
 	flash_byte_program((uint16_t) &flash_block_flags[0] + dest_idx, mapper_prg_bank, flash_block_flags[dest_idx] & ~FLASH_AVAILABLE);

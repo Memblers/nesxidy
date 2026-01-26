@@ -323,27 +323,14 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	jmp $FFFF	; self-modifying	
 	
 _flash_dispatch_return:	
-	php	
-	sta _a
+	; Note: _a, _pc, and status (on stack) are already set by the code block epilogue
 	stx _x
 	sty _y	
 	
 	pla
 	sta _status
 
-	lda _flash_cache_index
-	and #$3F
-	ora #$80
-	sta addr_hi
-	lda #0
-	sta addr_lo
-	ldy #BLOCK_CONFIG_BASE
-	lda (addr_lo),y
-	sta _pc
-	iny
-	lda (addr_lo),y
-	sta _pc+1	
-	lda #0	; PC has advanced
+	lda #0	; return 0 = executed from flash
 	rts	
 	
 not_recompiled:

@@ -441,6 +441,7 @@ uint8_t recompile_opcode()
 		
 		case opJMPi:		
 		case opRTS:
+		case opRTI:
 		{
 			enable_interpret();
 		}
@@ -553,7 +554,9 @@ uint8_t recompile_opcode()
 		
 		case opBRK:
 		{
-			IO8(0x4021) = 0;			
+			// BRK triggers interrupt - must be interpreted
+			IO8(0x4021) = 0;	// debug marker?
+			enable_interpret();
 		}
 
 		default:
@@ -599,6 +602,15 @@ uint8_t recompile_opcode()
 				}
 				case indx:
 				{
+					// Indx pointers can point to ROM in the switchable bank ($8000-$BFFF).
+					// At runtime, the flash cache bank is at $8000, so ROM reads would fail.
+					// Always interpret indx instructions to ensure correct bank switching.
+					enable_interpret();
+					pc += 2;
+					code_index += 2;
+					break;
+					
+					/* Original compiled indx - disabled due to bank conflict:
 					uint8_t address_8 = read6502(pc+1);
 					uint16_t address = address_8;
 					address += (uint16_t) &RAM_BASE[0];							
@@ -622,9 +634,19 @@ uint8_t recompile_opcode()
 						return cache_flag[cache_index];
 					}																				
 					break;
+					*/
 				}
 				case indy:
 				{
+					// Indy pointers can point to ROM in the switchable bank ($8000-$BFFF).
+					// At runtime, the flash cache bank is at $8000, so ROM reads would fail.
+					// Always interpret indy instructions to ensure correct bank switching.
+					enable_interpret();
+					pc += 2;
+					code_index += 2;
+					break;
+					
+					/* Original compiled indy - disabled due to bank conflict:
 					uint8_t address_8 = read6502(pc+1);
 					uint16_t address = address_8;
 					address += (uint16_t) &RAM_BASE[0];							
@@ -648,6 +670,7 @@ uint8_t recompile_opcode()
 						return cache_flag[cache_index];
 					}																				
 					break;
+					*/
 				}
 				
 				case imm:
@@ -687,8 +710,15 @@ void decode_address_c(void)
 	uint8_t msb_compare = encoded_address >> 8;
 	if (msb_compare < 4)
 		decoded_address = (uint16_t) encoded_address + (uint16_t) RAM_BASE;			
-	else if (msb_compare < 0x40)	
+	else if (msb_compare < 0x40)
+	{
+		// ROM access - calculate NES address
 		decoded_address = (uint16_t) (encoded_address - ROM_OFFSET) + (uint16_t) ROM_NAME;
+		// If decoded address is in the switchable bank ($8000-$BFFF), it conflicts with flash cache execution.
+		// Return 0 to force interpretation so the interpreter can switch banks correctly.
+		if ((decoded_address >= 0x8000) && (decoded_address < 0xC000))
+			decoded_address = 0;
+	}
 	else if (msb_compare < 0x48)
 		decoded_address = (encoded_address - 0x4000) + (uint16_t) SCREEN_RAM_BASE;
 	else if (msb_compare < 0x50)

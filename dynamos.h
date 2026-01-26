@@ -113,7 +113,7 @@ void flash_cache_pc_flag_clear(uint16_t emulated_pc, uint8_t flag);
 
 enum 6502op
 {
-	opBRK = 0x38,
+	opBRK = 0x00,
 	opJMP = 0x4C,
 	opJMPi = 0x6C,
 	opJSR = 0x20,
@@ -155,7 +155,8 @@ enum 6502op
 	opSTX_ZPY = 0x96,
 	opSTY_ZPX = 0x94,
 	
-	opNOP = 0xEA
+	opNOP = 0xEA,
+	opRTI = 0x40
 };
 
 enum address_modes { imp, acc, imm, zp, zpx, zpy, rel, abso, absx, absy, ind, indx, indy };

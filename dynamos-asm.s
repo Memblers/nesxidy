@@ -168,7 +168,8 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	sta addr_lo
 	ldy #0
 	lda (addr_lo),y	; get pc_flag
-	bmi not_recompiled
+	beq not_recompiled ; $00 = uninitialized flash, treat as not compiled
+	bmi not_recompiled ; bit 7 SET = not recompiled
 	and #$1F	; bank select
 	sta target_bank
 	;jsr _bankswitch_prg
@@ -194,6 +195,16 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	iny
 	lda (addr_lo),y
 	sta .dispatch_addr + 1
+	
+	; Check for invalid code address ($8000 = uninitialized)
+	; This can happen if flag was written but code address wasn't
+	cmp #$80
+	bne .addr_valid
+	lda .dispatch_addr
+	bne .addr_valid
+	; Address is $8000 - treat as invalid
+	jmp not_recompiled
+.addr_valid:
 	
 	lda target_bank
 	sta $C000
@@ -497,12 +508,12 @@ _opcode_6502_pha_size:	db (_opcode_6502_pha_end - _opcode_6502_pha)
 	section "text"
 	global _opcode_6502_pla, _opcode_6502_pla_size
 ;-------------------------------------------------------
-_opcode_6502_pla:	; verify push/store order..
+_opcode_6502_pla:	; PLA: increment SP first, then read
 	php
 	stx _x
+	inc _sp		; increment SP FIRST
 	ldx _sp
-	lda _RAM_BASE + $100, x
-	inc _sp
+	lda _RAM_BASE + $100, x  ; then read from new SP location
 	ldx _x
 	plp
 	

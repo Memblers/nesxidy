@@ -205,16 +205,23 @@ void run_6502(void)
 		
 		recompile_opcode();
 		
+		// Write this instruction's bytes to flash immediately
+		setup_flash_address(pc_old, flash_cache_index);
+		uint8_t instr_len = code_index - code_index_old;
+		for (uint8_t i = 0; i < instr_len; i++)
+		{
+			flash_byte_program(flash_code_address + code_index_old + i, flash_code_bank, cache_code[0][code_index_old + i]);
+		}
+		
 		if (code_index > (CODE_SIZE - 6))
 		{
 			cache_flag[0] |= OUT_OF_CACHE;
 			cache_flag[0] &= ~READY_FOR_NEXT;
 		}
 		
-		setup_flash_address(pc_old, flash_cache_index);
 		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
 			flash_cache_pc_update(code_index_old, INTERPRETED);
-		else if (code_index)
+		else if (instr_len)
 			flash_cache_pc_update(code_index_old, RECOMPILED);
 		
 	} while (cache_flag[0] & READY_FOR_NEXT);
@@ -224,28 +231,27 @@ void run_6502(void)
 		// Exit PC is the current pc value (instruction to interpret or continue from)
 		uint16_t exit_pc = pc;
 		
-		// Embed exit PC and JMP to flash_dispatch_return at end of code:
-		// STA _a (zp), PHP, LDA #<exit_pc, STA _pc (zp), LDA #>exit_pc, STA _pc+1 (zp), JMP flash_dispatch_return
-		cache_code[0][code_index++] = 0x85; // STA zero page
-		cache_code[0][code_index++] = (uint8_t) ((uint16_t) &a);
-		cache_code[0][code_index++] = 0x08; // PHP - save status before LDA corrupts flags
-		cache_code[0][code_index++] = 0xA9; // LDA immediate
-		cache_code[0][code_index++] = (uint8_t) exit_pc;
-		cache_code[0][code_index++] = 0x85; // STA zero page
-		cache_code[0][code_index++] = (uint8_t) ((uint16_t) &pc);
-		cache_code[0][code_index++] = 0xA9; // LDA immediate
-		cache_code[0][code_index++] = (uint8_t) (exit_pc >> 8);
-		cache_code[0][code_index++] = 0x85; // STA zero page
-		cache_code[0][code_index++] = (uint8_t) (((uint16_t) &pc) + 1);
-		cache_code[0][code_index++] = 0x4C; // JMP
-		cache_code[0][code_index++] = (uint8_t) ((uint16_t) &flash_dispatch_return);
-		cache_code[0][code_index++] = (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8);
+		// Write epilogue directly to flash (code_index is current offset)
+		setup_flash_address(pc, flash_cache_index);  // Get flash address base
+		uint8_t epilogue_start = code_index;
+		flash_byte_program(flash_code_address + epilogue_start + 0, flash_code_bank, 0x85); // STA zero page
+		flash_byte_program(flash_code_address + epilogue_start + 1, flash_code_bank, (uint8_t) ((uint16_t) &a));
+		flash_byte_program(flash_code_address + epilogue_start + 2, flash_code_bank, 0x08); // PHP
+		flash_byte_program(flash_code_address + epilogue_start + 3, flash_code_bank, 0xA9); // LDA immediate
+		flash_byte_program(flash_code_address + epilogue_start + 4, flash_code_bank, (uint8_t) exit_pc);
+		flash_byte_program(flash_code_address + epilogue_start + 5, flash_code_bank, 0x85); // STA zero page
+		flash_byte_program(flash_code_address + epilogue_start + 6, flash_code_bank, (uint8_t) ((uint16_t) &pc));
+		flash_byte_program(flash_code_address + epilogue_start + 7, flash_code_bank, 0xA9); // LDA immediate
+		flash_byte_program(flash_code_address + epilogue_start + 8, flash_code_bank, (uint8_t) (exit_pc >> 8));
+		flash_byte_program(flash_code_address + epilogue_start + 9, flash_code_bank, 0x85); // STA zero page
+		flash_byte_program(flash_code_address + epilogue_start + 10, flash_code_bank, (uint8_t) (((uint16_t) &pc) + 1));
+		flash_byte_program(flash_code_address + epilogue_start + 11, flash_code_bank, 0x4C); // JMP
+		flash_byte_program(flash_code_address + epilogue_start + 12, flash_code_bank, (uint8_t) ((uint16_t) &flash_dispatch_return));
+		flash_byte_program(flash_code_address + epilogue_start + 13, flash_code_bank, (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8));
 		
-		// Update cache_vpc after adding epilogue
-		cache_vpc[0] = code_index;
-		
-		// Copy compiled code to flash
-		flash_cache_copy(0, flash_cache_index);
+		// Mark block as used
+		bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
+		flash_byte_program((uint16_t) &flash_block_flags[0] + flash_cache_index, mapper_prg_bank, flash_block_flags[flash_cache_index] & ~FLASH_AVAILABLE);
 		
 		// Restore PC to entry point and execute from flash
 		pc = entry_pc;

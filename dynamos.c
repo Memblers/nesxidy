@@ -10,6 +10,8 @@
 
 __zpage extern uint8_t sp;
 __zpage extern uint8_t a;
+__zpage extern uint8_t x;
+__zpage extern uint8_t y;
 __zpage extern uint16_t pc;
 __zpage uint16_t pc_end;
 __zpage extern uint8_t opcode;
@@ -20,6 +22,10 @@ __zpage uint32_t cache_hits = 0;
 __zpage uint32_t cache_misses = 0;
 // Removed: cache_links, cache_links_found, cache_links_dropped (RAM cache linking)
 uint32_t cache_branches = 0;
+uint32_t branch_not_compiled = 0;   // target not yet compiled
+uint32_t branch_wrong_bank = 0;     // target in different flash bank
+uint32_t branch_out_of_range = 0;   // native offset > 127 bytes
+uint32_t branch_forward = 0;        // forward branch (can't optimize)
 //static uint16_t cache_index = 0;
 __zpage uint8_t cache_index = BLOCK_COUNT-1;
 //static uint8_t cache_active = 0;
@@ -28,6 +34,7 @@ __zpage uint8_t next_new_cache = 0;
 __zpage uint8_t matched = 0;
 __zpage uint8_t decimal_mode = 0;
 __zpage uint16_t flash_cache_index;
+__zpage uint8_t pc_2b27_count = 0;  // Debug: count when PC = $2B27 (STA $5000)
 uint8_t flash_enabled = 0;
 
 uint8_t l1_cache_code[CACHE_L1_CODE_SIZE];
@@ -54,6 +61,7 @@ __zpage uint8_t startup_complete = 0;
 __zpage uint16_t last_pc_before_reset = 0;
 
 uint32_t cache_branch_long = 0;
+__zpage uint8_t indy_hit_count = 0;  // Debug: count indy case hits
 
 extern	uint8_t flash_block_flags[];
 
@@ -130,6 +138,9 @@ void run_6502(void)
 	}
 	last_pc_before_reset = pc;  // Track PC before each step
 	
+	// Debug: track when we enter IRQ handler
+	if (pc == 0x2B0E) pc_2b27_count++;
+	
 #ifdef DEBUG_OUT
 	static uint8_t print_delay = 0;
 	print_delay++;
@@ -197,6 +208,9 @@ void run_6502(void)
 	code_index = 0;		
 
 	cache_flag[0] = 0;
+	
+	// Set up flash address BEFORE compilation loop so flash_code_bank is valid
+	setup_flash_address(pc, flash_cache_index);
 	
 	do
 	{
@@ -361,8 +375,8 @@ void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
 	uint32_t full_address;
 	//full_address = (block_number * FLASH_CACHE_BLOCK_SIZE);
 	
-	flash_code_bank = (block_number / 0x40) + BANK_CODE ; //(uint32_t) (full_address >> 13) + BANK_CODE; //((full_address / FLASH_BANK_SIZE) + BANK_CODE);
-	flash_code_address = ((block_number % 0x40) << 8) + FLASH_BANK_BASE; //((full_address & FLASH_BANK_MASK) + FLASH_BANK_BASE);
+	flash_code_bank = (block_number / 0x40) + BANK_CODE ; // 64 blocks per 16KB bank (256 bytes each)
+	flash_code_address = ((block_number % 0x40) << 8) + FLASH_BANK_BASE; // block * 256
 	
 	full_address = (emulated_pc << 1);
 	pc_jump_bank = ((emulated_pc >> 13) + BANK_PC);
@@ -392,72 +406,76 @@ uint8_t recompile_opcode()
 		case opBVC:
 		case opBVS:				
 		{
-			#ifdef ENABLE_LINKING
 			op_buffer_1 = read6502(pc+1);
-			uint16_t branch_loc = op_buffer_1;			
-			if (branch_loc & 0x80)
-				branch_loc |= 0xFF00;
-			branch_loc += pc+2;
-			cache_branch_pc_lo[cache_index] = (uint8_t) branch_loc;
-			cache_branch_pc_hi[cache_index] = (uint8_t) (branch_loc >> 8);
 			
-			// allow backwards branch within the cache block
-			
-			branch_loc = op_buffer_1;
-			
-			/*
-			if (branch_loc & 0x80)	// only branch back	// UNSTABLE removed for now
-			{								
-				branch_loc |= 0xFF00;
-				IO8(0x4020) = ((branch_loc + pc) >> 8);
-				if (((branch_loc + pc) >> 8) >= (cache_entry_pc_hi[cache_index]))	// only within the current cache
-				{					
-					IO8(0x4020) = ((branch_loc + pc) & 0xFF);
-					if (((branch_loc + pc) & 0xFF) >= (cache_entry_pc_lo[cache_index]))
-					{						
-						uint8_t temp = op_buffer_1;
-						uint16_t start_pc = ((cache_entry_pc_hi[cache_index] << 8) | cache_entry_pc_lo[cache_index]);
-						temp -= (code_index - ((pc + code_index) - start_pc));
-						cache_branches++;
-						if (temp & 0x80)	// only if branch still reaches
-						{
-							cache_code[cache_index][code_index] = op_buffer_0;
-							cache_code[cache_index][code_index+1] = temp;
-							pc += 2;
-							code_index += 2;									
-							break;
-						}								
-						else
-						{							
-							encoded_address = (branch_loc + pc);
-							if (encoded_address >= ROM_OFFSET)
-							{
-								decoded_address = ((uint16_t) &cache_code[cache_index][code_index+3]) + temp;
-							}
-							else							
-								//decode_address_asm();				
-								decode_address_c();				
-							
-							cache_code[cache_index][code_index] = op_buffer_0 ^ 0x20;	// reverse branch condition (refer to 6502 opcode matrix)
-							cache_code[cache_index][code_index+1] = 3;	// skip next JMP
-							cache_code[cache_index][code_index+2] = 0x4C;							
-							cache_code[cache_index][code_index+3] = (uint8_t) decoded_address;
-							cache_code[cache_index][code_index+4] = (uint8_t) (decoded_address >> 8);
-							pc += 2;
-							code_index += 5;
-							cache_branch_long++;
-							break;							
-						}
-					}							
-				}
-				enable_interpret();						
-			}
-			else
-			*/
-				enable_interpret();	
-			#else
+			// Only try to optimize backward branches
+			int8_t branch_offset = (int8_t) op_buffer_1;
+			if (branch_offset >= 0)
+			{
+				// Forward branch - interpret
 				enable_interpret();
-			#endif // ENABLE_LINKING
+			}
+			
+			// Calculate target PC for backward branch
+			uint16_t target_pc = pc + 2 + branch_offset;
+			
+			// Save current bank state
+			uint8_t saved_bank = mapper_prg_bank;
+			
+			// Look up target's flag
+			uint8_t target_flag_bank = ((target_pc >> 14) + BANK_PC_FLAGS);
+			bankswitch_prg(target_flag_bank);
+			uint8_t target_flag = flash_cache_pc_flags[target_pc & FLASH_BANK_MASK];
+			
+			// Check if target is compiled (bit 7 clear = RECOMPILED)
+			if (target_flag & RECOMPILED)
+			{
+				// Target not compiled - restore and interpret
+				bankswitch_prg(saved_bank);
+				branch_not_compiled++;
+				enable_interpret();
+			}
+			
+			// Check if same flash code bank
+			uint8_t target_code_bank = target_flag & 0x1F;
+			if (target_code_bank != flash_code_bank)
+			{
+				// Different bank - restore and interpret
+				bankswitch_prg(saved_bank);
+				branch_wrong_bank++;
+				enable_interpret();
+			}
+			
+			// Get target's native address
+			uint8_t target_pc_bank = ((target_pc >> 13) + BANK_PC);
+			bankswitch_prg(target_pc_bank);
+			uint16_t target_pc_addr = ((target_pc << 1) & FLASH_BANK_MASK);
+			uint16_t target_native = flash_cache_pc[target_pc_addr] | 
+			                         (flash_cache_pc[target_pc_addr + 1] << 8);
+			
+			// Restore bank state
+			bankswitch_prg(saved_bank);
+			
+			// Calculate native branch offset
+			uint16_t current_native = flash_code_address + code_index + 2;
+			int16_t native_offset = (int16_t)(target_native - current_native);
+			
+			// Check if offset fits in signed byte (-128 to +127)
+			if (native_offset >= -128 && native_offset <= 127)
+			{
+				// Emit native branch!
+				cache_code[cache_index][code_index] = op_buffer_0;
+				cache_code[cache_index][code_index+1] = (uint8_t) native_offset;
+				pc += 2;
+				code_index += 2;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			
+			// Out of range - interpret
+			branch_out_of_range++;
+			enable_interpret();
 		}
 		
 		case opJMP:
@@ -520,8 +538,8 @@ uint8_t recompile_opcode()
 				for (uint8_t i = 0; i < opcode_6502_pha_size; i++)
 					{
 						cache_code[cache_index][code_index+i] = opcode_6502_pha[i];
-					}						
-					pc += 2;
+					}					
+					pc += 1;  // PHA is a 1-byte instruction
 					code_index += opcode_6502_pha_size;
 					cache_flag[cache_index] |= READY_FOR_NEXT;
 					return cache_flag[cache_index];
@@ -540,8 +558,8 @@ uint8_t recompile_opcode()
 				for (uint8_t i = 0; i < opcode_6502_pla_size; i++)
 					{
 						cache_code[cache_index][code_index+i] = opcode_6502_pla[i];
-					}						
-					pc += 2;
+					}					
+					pc += 1;  // PLA is a 1-byte instruction
 					cache_flag[cache_index] |= READY_FOR_NEXT;
 					code_index += opcode_6502_pla_size;
 					return cache_flag[cache_index];
@@ -665,37 +683,8 @@ uint8_t recompile_opcode()
 				}
 				case indy:
 				{
-					// Indy pointers can point to ROM in the switchable bank ($8000-$BFFF).
-					// At runtime, the flash cache bank is at $8000, so ROM reads would fail.
-					// Always interpret indy instructions to ensure correct bank switching.
 					enable_interpret();
 					break;
-					
-					/* Original compiled indy - disabled due to bank conflict:
-					uint8_t address_8 = read6502(pc+1);
-					uint16_t address = address_8;
-					address += (uint16_t) &RAM_BASE[0];							
-					
-					if ((code_index + addr_6502_indy_size + 3) < CODE_SIZE)
-					{	
-						indy_opcode_location = op_buffer_0;
-						indy_address_lo = address;
-						indy_address_hi = address+1;
-						for (uint8_t i = 0; i < addr_6502_indy_size; i++)
-						{
-							cache_code[cache_index][code_index+i] = addr_6502_indy[i];
-						}						
-						pc += 2;
-						code_index += addr_6502_indy_size;
-					}
-					else
-					{
-						cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
-						cache_flag[cache_index] &= ~READY_FOR_NEXT;
-						return cache_flag[cache_index];
-					}																				
-					break;
-					*/
 				}
 				
 				case imm:

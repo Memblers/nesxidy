@@ -81,6 +81,10 @@ _rom_sidetrac:
 	align 8
 _chr_sidetrac:
 	incbin "roms\sidetrac\stl9c-1"
+	align 8
+	global _spr_sidetrac
+_spr_sidetrac:
+	incbin "roms\sidetrac\stl11d"
 	endif
 	
 ;=======================================================	
@@ -210,7 +214,7 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	sta $C000
 	
 	lda _status
-	ora #$04	; hide IRQ/BRK flag
+	ora #$04	; hide IRQ/BRK flag during JIT execution
 	pha	
 
 	lda #$26	
@@ -536,6 +540,87 @@ _opcode_stx_zpy_address = * + 1
 	
 _opcode_stx_zpy_end:
 _opcode_stx_zpy_size:	db (_opcode_stx_zpy_end - _opcode_stx_zpy)
+
+;=======================================================
+	section "zpage"
+	global _indy_ea, _indy_value, _indy_zp, _indy_y, _indy_ptr
+;-------------------------------------------------------
+_indy_ea:		reserve 2
+_indy_value:	reserve 1
+_indy_zp:		reserve 1
+_indy_y:		reserve 1
+_indy_ptr:		reserve 2
+
+;=======================================================
+	section "data"
+	global _sta_indy_handler
+;-------------------------------------------------------
+; STA (zp),Y handler - computes effective address and calls write6502
+; Called via: PHA / LDX #zp / JSR handler / PLA
+; On entry: X = ZP pointer address, Y = Y index (live), A on stack
+_sta_indy_handler:
+	; Save ALL state first - write6502 may corrupt things
+	sta _indy_value		; save A (will get real value from stack later)
+	stx _indy_zp		; save ZP address
+	sty _indy_y			; save Y for address calc
+	
+	; Set up pointer to _RAM_BASE + zp_addr
+	clc
+	txa
+	adc #<_RAM_BASE
+	sta _indy_ptr
+	lda #>_RAM_BASE
+	adc #0
+	sta _indy_ptr + 1
+	
+	; Read pointer from emulated zero page using indirect addressing
+	ldy #0
+	lda (_indy_ptr),y	; low byte of pointer
+	sta _indy_ea
+	iny
+	lda (_indy_ptr),y	; high byte of pointer
+	sta _indy_ea + 1
+	
+	; Add emulated Y to get effective address
+	lda _indy_ea
+	clc
+	adc _indy_y
+	sta _indy_ea
+	bcc .no_carry
+	inc _indy_ea + 1
+.no_carry:
+	
+	; Get value from stack (A was pushed before LDX/JSR)
+	; Stack layout after JSR: [ret_lo @ SP+1] [ret_hi @ SP+2] [saved_A @ SP+3]
+	tsx
+	lda $103,x			; saved A is at SP+3
+	sta _indy_value
+	
+	; Save emulated CPU registers before C call (write6502 may trash them)
+	lda _x
+	pha
+	lda _y
+	pha
+	
+	; Call write6502(_indy_ea, _indy_value) using vbcc calling convention
+	lda _indy_ea
+	sta r0
+	lda _indy_ea + 1
+	sta r1
+	lda _indy_value
+	sta r2
+	jsr _write6502
+	
+	; Restore emulated CPU registers
+	pla
+	sta _y
+	pla
+	sta _x
+	
+	; Restore Y for the emulated code
+	ldy _indy_y
+	
+	rts
 
 ;=======================================================	
 	section "bank3"

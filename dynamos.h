@@ -93,6 +93,11 @@ extern const uint8_t opcode_6502_pla_size;
 extern uint8_t opcode_6502_pha[];
 extern uint8_t opcode_6502_pla[];
 
+// STA (zp),Y native handler
+extern void sta_indy_handler();
+extern uint8_t sta_indy_template[];
+extern const uint8_t sta_indy_template_size;
+extern uint8_t sta_indy_zp_patch;
 
 extern uint8_t flash_cache_pc[];
 extern const uint8_t flash_cache_pc_flags[];

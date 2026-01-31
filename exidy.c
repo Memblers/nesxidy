@@ -22,6 +22,7 @@
 #pragma section bank1
 	extern const unsigned char rom_sidetrac[];
 	extern const unsigned char chr_sidetrac[];
+	extern const unsigned char spr_sidetrac[];
 #pragma section default
 	const uint8_t palette[] = { 0x0F,0x30,0x30,0x28, 0x0F,0x21,0x11,0x01, 0x0F,0x28,0x18,0x08, 0x0F,0x26,0x16,0x06, 0x0F,0x24,0x14,0x04, 0x0F,0x24,0x14,0x04, 0x0F,0x24,0x14,0x04, 0x0F,0x24,0x14,0x04 };	
 #endif
@@ -42,16 +43,94 @@
 extern uint8_t RAM_BASE[];
 extern uint8_t SCREEN_RAM_BASE[];
 extern uint8_t CHARACTER_RAM_BASE[];
+extern uint16_t interpret_count;  // Debug: from fake6502.c
+extern uint8_t write_50xx_count;  // Debug: writes to $50xx from interpreter
+extern uint8_t last_interpreted_opcode;  // Debug: last opcode interpreted
+extern uint8_t indy_hit_count;  // Debug: from dynamos.c
+extern uint8_t sta_indy_interpret_count;  // Debug: from fake6502.c
+extern uint8_t pc_2b27_count;  // Debug: from dynamos.c - count PC=$2B27
+extern uint16_t last_indy_ea;  // Debug: from fake6502.c
+extern uint8_t sta_5000_count;  // Debug: STA to $5000 specifically
 
 __zpage uint8_t interrupt_condition;
 __zpage uint8_t character_ram_updated = 0;
 __zpage uint8_t screen_ram_updated = 0;
-__zpage uint8_t wummel_x_position = 0;
-__zpage uint8_t wummel_y_position = 0;
+
+// Sprite 1 (player/motion object 1)
+__zpage uint8_t sprite1_xpos = 0;
+__zpage uint8_t sprite1_ypos = 0;
+__zpage uint8_t sprite1_write_count = 0;  // Debug counter
+
+// Sprite 2 (enemy/motion object 2) 
+__zpage uint8_t sprite2_xpos = 0;
+__zpage uint8_t sprite2_ypos = 0;
+__zpage uint8_t sprite2_write_count = 0;  // Debug counter
+
+// Sprite control registers
+__zpage uint8_t spriteno = 0;        // $5100: bits 0-3 = sprite1 tile, bits 4-7 = sprite2 tile
+__zpage uint8_t sprite_enable = 0;   // $5101: bit 7 = enable sprite1, bit 6 = enable sprite2
+                                     //        bit 5 = sprite1 set, bit 4 = sprite2 set
+
+__zpage uint8_t irq_count = 0;       // Debug: count IRQs triggered
 
 __zpage uint32_t frame_time;
 __zpage uint8_t audio = 0;
+__zpage uint8_t sprites_converted = 0;
 
+
+// ******************************************************************************************
+
+// Convert a single 16x16 Exidy sprite (32 bytes, 1bpp) to 4 NES 8x8 tiles
+// Exidy format: 16 bytes left column (8 pixels wide, 16 rows), 16 bytes right column
+// NES format: 4 tiles in order: TL, TR, BL, BR (each 16 bytes: 8 bytes plane0, 8 bytes plane1=0)
+void convert_sprite(const uint8_t *src, uint16_t nes_chr_addr)
+{
+	// Top-left tile (rows 0-7, columns 0-7)
+	IO8(0x2006) = nes_chr_addr >> 8;
+	IO8(0x2006) = nes_chr_addr & 0xFF;
+	for (uint8_t row = 0; row < 8; row++)
+		IO8(0x2007) = src[row];  // Left column, rows 0-7
+	for (uint8_t row = 0; row < 8; row++)
+		IO8(0x2007) = 0;  // Plane 1 = 0 (1bpp)
+	
+	// Top-right tile (rows 0-7, columns 8-15)
+	IO8(0x2006) = (nes_chr_addr + 16) >> 8;
+	IO8(0x2006) = (nes_chr_addr + 16) & 0xFF;
+	for (uint8_t row = 0; row < 8; row++)
+		IO8(0x2007) = src[16 + row];  // Right column, rows 0-7
+	for (uint8_t row = 0; row < 8; row++)
+		IO8(0x2007) = 0;  // Plane 1 = 0
+	
+	// Bottom-left tile (rows 8-15, columns 0-7)
+	IO8(0x2006) = (nes_chr_addr + 32) >> 8;
+	IO8(0x2006) = (nes_chr_addr + 32) & 0xFF;
+	for (uint8_t row = 0; row < 8; row++)
+		IO8(0x2007) = src[8 + row];  // Left column, rows 8-15
+	for (uint8_t row = 0; row < 8; row++)
+		IO8(0x2007) = 0;  // Plane 1 = 0
+	
+	// Bottom-right tile (rows 8-15, columns 8-15)
+	IO8(0x2006) = (nes_chr_addr + 48) >> 8;
+	IO8(0x2006) = (nes_chr_addr + 48) & 0xFF;
+	for (uint8_t row = 0; row < 8; row++)
+		IO8(0x2007) = src[24 + row];  // Right column, rows 8-15
+	for (uint8_t row = 0; row < 8; row++)
+		IO8(0x2007) = 0;  // Plane 1 = 0
+}
+
+// Convert all Exidy sprites to NES CHR format
+// Sidetrac has 16 sprites (512 bytes / 32 = 16 sprites)
+// Each 16x16 sprite becomes 4 NES 8x8 tiles
+// Sprites go into CHR starting at tile 0x80 (second half of pattern table 0)
+void convert_sprites(const uint8_t *src)
+{
+	uint16_t nes_addr = 0x0800;  // Start of second half of pattern table 0 (tiles 0x80+)
+	for (uint8_t sprite = 0; sprite < 16; sprite++)
+	{
+		convert_sprite(src + (sprite * 32), nes_addr);
+		nes_addr += 64;  // 4 tiles * 16 bytes each
+	}
+}
 
 // ******************************************************************************************
 
@@ -64,6 +143,7 @@ int main(void)
 #ifdef ENABLE_CHR_ROM
 	bankswitch_prg(1);
 	convert_chr((uint8_t*)chr_sidetrac);
+	convert_sprites((uint8_t*)spr_sidetrac);
 	bankswitch_prg(0);
 #endif
 	IO8(0x201) = 0x01;
@@ -99,7 +179,6 @@ int main(void)
 			frame_time = 0;
 			interrupt_condition |= FLAG_EXIDY_IRQ;			
 			render_video();
-			//irq6502();
 		}
 #else
 		if (clockticks6502 > frame_time)
@@ -107,13 +186,15 @@ int main(void)
 			frame_time += FRAME_LENGTH;
 			interrupt_condition |= FLAG_EXIDY_IRQ;
 			render_video();
-			//irq6502();
 		}	
 #endif	
-		if (!(status & FLAG_INTERRUPT) && (interrupt_condition & FLAG_EXIDY_IRQ))
-		{
-			//irq6502();			
-		}
+		// IRQ triggering disabled for now - I flag management needs work
+		// if (!(status & FLAG_INTERRUPT) && (interrupt_condition & FLAG_EXIDY_IRQ))
+		// {
+		// 	interrupt_condition &= ~FLAG_EXIDY_IRQ;
+		// 	irq_count++;
+		// 	irq6502();			
+		// }
 	}
 	
 	return 0;
@@ -196,14 +277,33 @@ void write6502(uint16_t address, uint8_t value)
 #endif
 	if (address < 0x400)
 		RAM_BASE[address] = value;
-	else if (address == 0x5000)
-		wummel_x_position = (value + 16) ^ 0xFF;
-	else if (address == 0x5040)
-		wummel_y_position = (value + 16) ^ 0xFF;
-	else if (address == 0x5080)
-		IO8(0x207) = value;
-	else if (address == 0x50C0)
-		IO8(0x204) = value;
+	else if ((address & 0xFFC0) == 0x5000)  // $5000-$503F: Sprite 1 X position
+	{
+		sprite1_xpos = value;  // The VALUE written is the position
+		sprite1_write_count++;
+	}
+	else if ((address & 0xFFC0) == 0x5040)  // $5040-$507F: Sprite 1 Y position
+	{
+		sprite1_ypos = value;
+		sprite1_write_count++;
+	}
+	else if ((address & 0xFFC0) == 0x5080)  // $5080-$50BF: Sprite 2 X position
+	{
+		sprite2_xpos = value;
+		sprite2_write_count++;
+	}
+	else if ((address & 0xFFC0) == 0x50C0)  // $50C0-$50FF: Sprite 2 Y position
+	{
+		sprite2_ypos = value;
+		sprite2_write_count++;
+	}
+	else if ((address & 0xFFFC) == 0x5100)  // $5100: Sprite number / $5101: Sprite enable
+	{
+		if ((address & 0x03) == 0)
+			spriteno = value;       // $5100: bits 0-3 = sprite1, bits 4-7 = sprite2
+		else if ((address & 0x03) == 1)
+			sprite_enable = value;  // $5101: bit 7 = enable spr1, bit 6 = enable spr2
+	}
 	else if ((address >= 0x4000) && (address < 0x4800))
 	{		
 		SCREEN_RAM_BASE[address - 0x4000] = value;
@@ -257,8 +357,57 @@ void render_video(void)
 	}
 #endif	
 
-	static const unsigned char object[5] = { 0, 0, 10, 3, 128 };
-	lnAddSpr(object, wummel_x_position, wummel_y_position);
+	// Calculate sprite positions (MAME: sx = 236 - xpos - 4, sy = 244 - ypos - 4)
+	// For NES: adjust coordinates to screen space
+	uint8_t spr1_x = 236 - sprite1_xpos - 4;
+	uint8_t spr1_y = 244 - sprite1_ypos - 4;
+	uint8_t spr2_x = 236 - sprite2_xpos - 4;
+	uint8_t spr2_y = 244 - sprite2_ypos - 4;
+	
+	// Get Exidy sprite tile numbers
+	// Sprite 1: (spriteno & 0x0f) + 16 * sprite_set_1  
+	// Sprite 2: ((spriteno >> 4) & 0x0f) + 32 + 16 * sprite_set_2
+	// Note: Sidetrac only has 16 sprites total, so sprite_set doesn't apply
+	uint8_t spr1_exidy_tile = (spriteno & 0x0F);  // 0-15
+	uint8_t spr2_exidy_tile = ((spriteno >> 4) & 0x0F);  // 0-15
+	
+	// Convert Exidy tile number to NES tile number
+	// Each 16x16 Exidy sprite = 4 NES tiles starting at 0x80 + (exidy_tile * 4)
+	// NES tiles are arranged: TL, TR, BL, BR (offsets 0, 1, 2, 3)
+	uint8_t spr1_nes_base = 0x80 + (spr1_exidy_tile * 4);
+	uint8_t spr2_nes_base = 0x80 + (spr2_exidy_tile * 4);
+	
+	// Draw sprite 2 first (behind sprite 1) - always enabled
+	// Metasprite format: x-offset, y-offset, tile, attributes, ..., 128 (end)
+	// 4 NES sprites in a 2x2 grid: TL(+0,+0), TR(+8,+0), BL(+0,+8), BR(+8,+8)
+	uint8_t spr2_meta[17] = {
+		0, 0, spr2_nes_base + 0, 1,   // TL
+		8, 0, spr2_nes_base + 1, 1,   // TR
+		0, 8, spr2_nes_base + 2, 1,   // BL
+		8, 8, spr2_nes_base + 3, 1,   // BR
+		128                           // End marker
+	};
+	lnAddSpr(spr2_meta, spr2_x, spr2_y);
+	
+	// Draw sprite 1 (player)
+	uint8_t spr1_meta[17] = {
+		0, 0, spr1_nes_base + 0, 0,   // TL
+		8, 0, spr1_nes_base + 1, 0,   // TR
+		0, 8, spr1_nes_base + 2, 0,   // BL
+		8, 8, spr1_nes_base + 3, 0,   // BR
+		128                           // End marker
+	};
+	lnAddSpr(spr1_meta, spr1_x, spr1_y);
+
+	// Debug: Display sprite1 write count as sprite tile at top-left
+	// If counter is incrementing, writes ARE reaching write6502
+	// Debug: Show RTI interpret count (reusing sta_indy_interpret_count)
+	uint8_t rti_count_char = (sta_indy_interpret_count & 0x0F);
+	uint8_t debug_meta[5] = {
+		0, 0, (rti_count_char < 10) ? (rti_count_char + '0') : (rti_count_char - 10 + 'A'), 1,
+		128
+	};
+	lnAddSpr(debug_meta, 120, 8);
 
 	lnSync(0);
 	return;

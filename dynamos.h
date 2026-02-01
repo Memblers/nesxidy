@@ -105,8 +105,8 @@ extern const uint8_t flash_cache_pc_flags[];
 
 // Removed: ready(), check_cache_links(), verify_link_type0(), verify_link_type1(), combine_caches()
 // These were all part of the old RAM cache execution system.
+// Removed: decode_address_c() - now in platform/platform_exidy.c
 uint8_t recompile_opcode();
-void decode_address_c(void);
 void cache_bit_enable(uint16_t addr);
 uint8_t cache_bit_check(uint16_t addr);
 uint16_t flash_cache_select();

@@ -8,6 +8,59 @@
 #include "exidy.h"
 #include "mapper30.h"
 
+// Address mode table - must be in fixed bank (default section at $C000-$FFFF)
+// Cannot use table from bank1 during recompilation since flash banks are active
+const uint8_t addrmodes[256] = {
+/*        |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  |  A  |  B  |  C  |  D  |  E  |  F  |     */
+/* 0 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 0 */
+/* 1 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 1 */
+/* 2 */    abso, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 2 */
+/* 3 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 3 */
+/* 4 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 4 */
+/* 5 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 5 */
+/* 6 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm,  ind, abso, abso, abso, /* 6 */
+/* 7 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 7 */
+/* 8 */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* 8 */
+/* 9 */     rel, indy,  imp, indy,  zpx,  zpx,  zpy,  zpy,  imp, absy,  imp, absy, absx, absx, absy, absy, /* 9 */
+/* A */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* A */
+/* B */     rel, indy,  imp, indy,  zpx,  zpx,  zpy,  zpy,  imp, absy,  imp, absy, absx, absx, absy, absy, /* B */
+/* C */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* C */
+/* D */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* D */
+/* E */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* E */
+/* F */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx  /* F */
+};
+
+// Address translation - must be in fixed bank (default section)
+// Cannot call into bank1 during recompilation since flash banks are active
+static uint16_t translate_address(uint16_t src_addr) {
+    uint8_t msb = src_addr >> 8;
+    
+    if (msb < 0x04) {
+        // RAM: $0000-$03FF -> RAM_BASE
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (msb < 0x40) {
+        // ROM: $0400-$3FFF -> ROM_NAME (with offset)
+        uint16_t nes_addr = (src_addr - ROM_OFFSET) + (uint16_t)ROM_NAME;
+        // If decoded address is in the switchable bank ($8000-$BFFF), it conflicts with flash cache execution.
+        // Return 0 to force interpretation so the interpreter can switch banks correctly.
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;
+        return nes_addr;
+    }
+    else if (msb < 0x48) {
+        // Screen RAM: $4000-$47FF -> SCREEN_RAM_BASE
+        return (src_addr - 0x4000) + (uint16_t)SCREEN_RAM_BASE;
+    }
+    else if (msb < 0x50) {
+        // Character RAM: $4800-$4FFF -> CHARACTER_RAM_BASE
+        return (src_addr - 0x4800) + (uint16_t)CHARACTER_RAM_BASE;
+    }
+    
+    // I/O or unmapped - must interpret
+    return 0;
+}
+
 __zpage extern uint8_t sp;
 __zpage extern uint8_t a;
 __zpage extern uint8_t x;
@@ -73,25 +126,7 @@ uint16_t flash_code_address;
 uint8_t flash_code_bank;
 
 
-const uint8_t addrmodes[256] = {
-/*        |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  |  A  |  B  |  C  |  D  |  E  |  F  |     */
-/* 0 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 0 */
-/* 1 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 1 */
-/* 2 */    abso, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 2 */
-/* 3 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 3 */
-/* 4 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 4 */
-/* 5 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 5 */
-/* 6 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm,  ind, abso, abso, abso, /* 6 */
-/* 7 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 7 */
-/* 8 */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* 8 */
-/* 9 */     rel, indy,  imp, indy,  zpx,  zpx,  zpy,  zpy,  imp, absy,  imp, absy, absx, absx, absy, absy, /* 9 */
-/* A */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* A */
-/* B */     rel, indy,  imp, indy,  zpx,  zpx,  zpy,  zpy,  imp, absy,  imp, absy, absx, absx, absy, absy, /* B */
-/* C */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* C */
-/* D */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* D */
-/* E */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* E */
-/* F */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx  /* F */
-};
+// Removed: local addrmodes[] array - now using cpu_6502_addrmodes from frontend/cpu_6502.c
 
 #pragma section bank3
 uint8_t cache_bit_array[0x2000];
@@ -618,8 +653,8 @@ uint8_t recompile_opcode()
 				{					
 					encoded_address = (uint16_t) ((read6502(pc+1)) | (read6502(pc+2) << 8));					
 					
-					//decode_address_asm();
-					decode_address_c();
+					// Use modular platform for address translation
+					decoded_address = translate_address(encoded_address);
 					
 					if (decoded_address)
 					{
@@ -718,28 +753,7 @@ uint8_t recompile_opcode()
 // These were all part of the old RAM cache execution system that is no longer used.
 // Flash cache execution uses dispatch_on_pc() and flash_dispatch_return instead.
 
-//============================================================================================================
-void decode_address_c(void)
-{
-	uint8_t msb_compare = encoded_address >> 8;
-	if (msb_compare < 4)
-		decoded_address = (uint16_t) encoded_address + (uint16_t) RAM_BASE;			
-	else if (msb_compare < 0x40)
-	{
-		// ROM access - calculate NES address
-		decoded_address = (uint16_t) (encoded_address - ROM_OFFSET) + (uint16_t) ROM_NAME;
-		// If decoded address is in the switchable bank ($8000-$BFFF), it conflicts with flash cache execution.
-		// Return 0 to force interpretation so the interpreter can switch banks correctly.
-		if ((decoded_address >= 0x8000) && (decoded_address < 0xC000))
-			decoded_address = 0;
-	}
-	else if (msb_compare < 0x48)
-		decoded_address = (encoded_address - 0x4000) + (uint16_t) SCREEN_RAM_BASE;
-	else if (msb_compare < 0x50)
-		decoded_address = (encoded_address - 0x4800) + (uint16_t) CHARACTER_RAM_BASE;
-	else
-		decoded_address = 0;	
-}
+// Removed: decode_address_c() - now using platform_exidy.translate_addr() from platform/platform_exidy.c
 
 //============================================================================================================
 void cache_bit_enable(uint16_t addr)

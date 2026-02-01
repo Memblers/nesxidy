@@ -1,0 +1,34 @@
+Reboot detection started
+Will detect when PC_HI becomes $28 after startup
+
+Watching for reboot (PC_HI -> $28 after frame 100)...
+Frame 100...
+
+*** REBOOT DETECTED at Frame 132 ***
+PC_HI changed from $2A to $28
+Full PC = $2800
+
+Stack dump ($0100-$01FF, emulated stack):
+Emulated SP = $00
+  $01FF: $00
+  $01FE: $00
+  $01FD: $00
+  $01FC: $00
+  $01FB: $00
+  $01FA: $00
+  $01F9: $00
+  $01F8: $00
+  $01F7: $00
+  $01F6: $00
+  $01F5: $00
+  $01F4: $00
+  $01F3: $00
+  $01F2: $00
+  $01F1: $00
+  $01F0: $00
+
+CPU state:
+  A = $00
+  X = $00
+  Y = $00
+  Status = $00

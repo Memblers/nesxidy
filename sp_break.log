@@ -1,0 +1,17 @@
+Script starting - Revision 6
+SP break script loaded - Revision 6
+SP break script loaded - Revision 2
+SP=$FF #0 frame=11 NES_PC=$8004 old=$FD
+SP=$FF #0 frame=11 NES_PC=$8067 old=$FF
+SP=$FF #0 frame=168 NES_PC=$80E7 old=$FE
+SP=$FF #0 frame=168 NES_PC=$8067 old=$FF
+SP=$FF #0 frame=856 NES_PC=$80E7 old=$FE
+SP=$FF #0 frame=857 NES_PC=$8067 old=$FF
+SP=$FF #0 frame=881 NES_PC=$80E7 old=$FE
+SP=$FF #0 frame=882 NES_PC=$8067 old=$FF
+SP=$FF #0 frame=884 NES_PC=$80E7 old=$FE
+SP=$FF #0 frame=884 NES_PC=$8067 old=$FF
+SP=$FF #0 frame=886 NES_PC=$80E7 old=$FE
+SP=$FF #0 frame=886 NES_PC=$8067 old=$FF
+SP=$FF #0 frame=888 NES_PC=$80E7 old=$FE
+SP=$FF #0 frame=888 NES_PC=$8067 old=$FF

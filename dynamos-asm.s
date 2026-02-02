@@ -217,8 +217,8 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	ora #$04	; hide IRQ/BRK flag during JIT execution
 	pha	
 
-	lda #$26	
-	sta $4020
+	;lda #$26	
+	;sta $4020
 	
 	lda _a
 	ldx _x	

@@ -1,8 +1,26 @@
 #ifndef DYNAMOS_H
 #define DYNAMOS_H
 
+#include "config.h"
+
 #define	BLOCK_COUNT 8
+
+// Block layout:
+// +0: code_len (1 byte) - if OPT_BLOCK_METADATA
+// +1: native code (variable)
+// +N: epilogue (14 bytes)
+// +N+14: metadata - if OPT_BLOCK_METADATA
+//   exit_pc (2 bytes)
+//   cycle_count (2 bytes) - if OPT_TRACK_CYCLES  
+//   branch_count (1 byte)
+//   branches[] (3 bytes each: offset, target_lo, target_hi)
+#if OPT_BLOCK_METADATA
+#define CODE_SIZE 220       // Leave room for prefix + epilogue + metadata
+#define BLOCK_PREFIX_SIZE 1 // 1 byte for code length
+#else
 #define CODE_SIZE 250
+#define BLOCK_PREFIX_SIZE 0
+#endif
 
 #define CACHE_L1_CODE_SIZE 256
 

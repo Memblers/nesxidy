@@ -6,6 +6,7 @@
 #include "exidy.h"
 #include "dynamos.h"
 #include "mapper30.h"
+#include "core/optimizer.h"
 
 
 // ******************************************************************************************
@@ -156,6 +157,12 @@ int main(void)
 
 	flash_format();
 	
+#ifdef ENABLE_OPTIMIZER
+	// Initialize optimizer with debug thresholds
+	// Requires OPT_MIN_BLOCKS_DEBUG unique blocks before optimizer can run
+	opt_init(OPT_THRESHOLD_DEBUG, OPT_MIN_BLOCKS_DEBUG);
+#endif
+	
 	interrupt_condition = 0;
 
 #ifdef TRACK_TICKS
@@ -164,6 +171,9 @@ int main(void)
 	frame_time = 0;
 #endif	
 	
+	// DEBUG: Frame counter
+	uint16_t frame_count = 0;
+	
 	while (1)
 	{
 		#ifdef INTERPRETER_ONLY
@@ -171,8 +181,19 @@ int main(void)
 		#else
 		run_6502();
 		#endif
-
-	
+		
+#ifdef ENABLE_OPTIMIZER
+		// Check if optimization should run (periodically from main loop)
+		// This catches dispatches even if flash blocks aren't being executed
+		opt_check_trigger();
+#endif
+		
+		// DEBUG: Write frame counter to $6000-$6001
+		volatile uint8_t *debug_ptr = (volatile uint8_t*)0x0100;
+		debug_ptr[0] = (frame_count >> 8) & 0xFF;
+		debug_ptr[1] = frame_count & 0xFF;
+		frame_count++;
+		
 #ifndef TRACK_TICKS		
 		if (frame_time++ > FRAME_LENGTH)
 		{

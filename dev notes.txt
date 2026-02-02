@@ -1,0 +1,3 @@
+in-place patching:
+
+epilogue could start with php / clc / bcc regular_epilogue.  to "take over" and make it continue to a new block, we would patch a bit of the branch target, changing target by 16 bytes different or whatever, and that points to a new 'blank epilogue, which contains a sequence like 'plp / jmp $FFFF'.  or perhaps, plp, followed by more $FF, in case a trampoline is needed into a new bank, code would get filled out as-needed

@@ -7,6 +7,7 @@
 #include "dynamos.h"
 #include "exidy.h"
 #include "mapper30.h"
+#include "core/optimizer.h"
 
 // Address mode table - must be in fixed bank (default section at $C000-$FFFF)
 // Cannot use table from bank1 during recompilation since flash banks are active
@@ -212,6 +213,7 @@ void run_6502(void)
 		}
 		case 0:  // executed from flash
 		{
+			// Optimization now triggered after recompilation, not execution
 			return;
 		}
 		case 1:  // recompile needed
@@ -246,6 +248,13 @@ void run_6502(void)
 	
 	// Set up flash address BEFORE compilation loop so flash_code_bank is valid
 	setup_flash_address(pc, flash_cache_index);
+
+#if OPT_BLOCK_METADATA
+	// Track branches for metadata
+	uint8_t branch_count = 0;
+	uint8_t branch_offsets[16];    // Offset within code where branch operand is
+	uint16_t branch_targets[16];   // Target PC for each branch
+#endif
 	
 	do
 	{
@@ -254,13 +263,30 @@ void run_6502(void)
 		
 		recompile_opcode();
 		
-		// Write this instruction's bytes to flash immediately
-		setup_flash_address(pc_old, flash_cache_index);
 		uint8_t instr_len = code_index - code_index_old;
+
+#if OPT_BLOCK_METADATA
+		// Track branches for metadata
+		uint8_t op = read6502(pc_old);
+		if ((op==0x10||op==0x30||op==0x50||op==0x70||op==0x90||op==0xB0||op==0xD0||op==0xF0) 
+		    && branch_count < 16) {
+			int8_t off = read6502(pc_old + 1);
+			uint16_t target = pc_old + 2 + off;
+			// The branch operand is at code_index_old + 1 (opcode at +0, operand at +1)
+			branch_offsets[branch_count] = code_index_old + 1;
+			branch_targets[branch_count] = target;
+			branch_count++;
+		}
+		// Must call setup_flash_address to update pc_jump_address for flash_cache_pc_update
+		setup_flash_address(pc_old, flash_cache_index);
+#else
+		// Write this instruction's bytes to flash immediately (old behavior)
+		setup_flash_address(pc_old, flash_cache_index);
 		for (uint8_t i = 0; i < instr_len; i++)
 		{
 			flash_byte_program(flash_code_address + code_index_old + i, flash_code_bank, cache_code[0][code_index_old + i]);
 		}
+#endif
 		
 		if (code_index > (CODE_SIZE - 6))
 		{
@@ -280,6 +306,56 @@ void run_6502(void)
 		// Exit PC is the current pc value (instruction to interpret or continue from)
 		uint16_t exit_pc = pc;
 		
+#if OPT_BLOCK_METADATA
+		setup_flash_address(entry_pc, flash_cache_index);  // Get flash address base
+		
+		// --- Write everything to flash at once with prefix and metadata ---
+		uint8_t flash_offset = 0;
+		
+		// 1. Write code length prefix
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, code_index);
+		
+		// 2. Write compiled code
+		for (uint8_t i = 0; i < code_index; i++) {
+			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, cache_code[0][i]);
+		}
+		
+		// 3. Write epilogue (14 bytes)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA zp
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&a));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x08); // PHP
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)exit_pc);
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA zp
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&pc));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(exit_pc >> 8));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA zp
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&pc) + 1));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&flash_dispatch_return));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8));
+		
+		// 4. Write metadata: exit_pc
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)exit_pc);
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(exit_pc >> 8));
+		
+#if OPT_TRACK_CYCLES
+		// 5. Write cycle count (TODO: implement actual cycle tracking)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0);
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0);
+#endif
+		
+		// 6. Write branch info
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, branch_count);
+		for (uint8_t i = 0; i < branch_count; i++) {
+			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, branch_offsets[i]);
+			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)branch_targets[i]);
+			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(branch_targets[i] >> 8));
+		}
+		
+#else
+		// --- Old behavior: epilogue only, no prefix ---
 		// Write epilogue directly to flash (code_index is current offset)
 		setup_flash_address(pc, flash_cache_index);  // Get flash address base
 		uint8_t epilogue_start = code_index;
@@ -297,16 +373,31 @@ void run_6502(void)
 		flash_byte_program(flash_code_address + epilogue_start + 11, flash_code_bank, 0x4C); // JMP
 		flash_byte_program(flash_code_address + epilogue_start + 12, flash_code_bank, (uint8_t) ((uint16_t) &flash_dispatch_return));
 		flash_byte_program(flash_code_address + epilogue_start + 13, flash_code_bank, (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8));
+#endif
 		
 		// Mark block as used
 		bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
 		flash_byte_program((uint16_t) &flash_block_flags[0] + flash_cache_index, mapper_prg_bank, flash_block_flags[flash_cache_index] & ~FLASH_AVAILABLE);
+		
+#ifdef ENABLE_OPTIMIZER
+		// Notify optimizer that a new unique block was compiled
+		opt_notify_block_compiled();
+		
+		// Mark the sector as in-use since we just compiled code to it
+		// DEBUG: Write marker to show this code path is reached
+		volatile uint8_t *debug_ptr = (volatile uint8_t*)0x0100;
+		debug_ptr[9] = 0x88;  // Unique marker for this code path
+		
+		opt_mark_sector_in_use(flash_code_bank);
+#endif
 		
 		// Restore PC to entry point and execute from flash
 		pc = entry_pc;
 		
 		result = dispatch_on_pc();
 		// dispatch_on_pc should return 0 (executed from flash)
+		
+		// Optimizer trigger check moved to main loop in exidy.c
 		return;
 	}
 	else // code buffer empty
@@ -390,9 +481,12 @@ void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx)
 //============================================================================================================
 
 void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
-{		
-	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t) (flash_code_address + code_address));
-	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t) ((flash_code_address + code_address) >> 8));			
+{
+	// With metadata, code starts at offset 1 (after length prefix)
+	uint16_t native_addr = flash_code_address + code_address + BLOCK_PREFIX_SIZE;
+	
+	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t)native_addr);
+	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t)(native_addr >> 8));			
 	
 	uint8_t flag_byte;
 	if (flags == RECOMPILED)

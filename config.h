@@ -11,7 +11,10 @@
 //#define INTERPRETER_ONLY
 
 // Master optimizer toggle - comment out to disable entire optimizer system
-//#define ENABLE_OPTIMIZER   // DISABLED: Trying new approach
+//#define ENABLE_OPTIMIZER   // DISABLED: v1 sector evacuation approach
+
+// V2 optimizer - in-place branch patching (no sector evacuation)
+#define ENABLE_OPTIMIZER_V2
 
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)

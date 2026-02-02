@@ -8,6 +8,9 @@
 #include "exidy.h"
 #include "mapper30.h"
 #include "core/optimizer.h"
+#ifdef ENABLE_OPTIMIZER_V2
+#include "core/optimizer_v2_simple.h"
+#endif
 
 // Address mode table - must be in fixed bank (default section at $C000-$FFFF)
 // Cannot use table from bank1 during recompilation since flash banks are active
@@ -297,7 +300,16 @@ void run_6502(void)
 		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
 			flash_cache_pc_update(code_index_old, INTERPRETED);
 		else if (instr_len)
+		{
 			flash_cache_pc_update(code_index_old, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+			// V2: Check if any pending branches target this PC
+			uint8_t saved_bank = mapper_prg_bank;
+			bankswitch_prg(1);
+			opt2_notify_block_compiled(pc_old, flash_code_address + code_index_old, flash_code_bank);
+			bankswitch_prg(saved_bank);
+#endif
+		}
 		
 	} while (cache_flag[0] & READY_FOR_NEXT);
 	
@@ -384,12 +396,10 @@ void run_6502(void)
 		opt_notify_block_compiled();
 		
 		// Mark the sector as in-use since we just compiled code to it
-		// DEBUG: Write marker to show this code path is reached
-		volatile uint8_t *debug_ptr = (volatile uint8_t*)0x0100;
-		debug_ptr[9] = 0x88;  // Unique marker for this code path
-		
 		opt_mark_sector_in_use(flash_code_bank);
 #endif
+
+		// V2 notify is now called per-instruction in the compile loop above
 		
 		// Restore PC to entry point and execute from flash
 		pc = entry_pc;
@@ -517,6 +527,15 @@ void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
 
 //============================================================================================================
 
+#ifdef ENABLE_OPTIMIZER_V2
+// Invert branch conditions for the v2 optimizer pattern
+// BPL(10)->BMI(30), BMI(30)->BPL(10), BVC(50)->BVS(70), BVS(70)->BVC(50)
+// BCC(90)->BCS(B0), BCS(B0)->BCC(90), BNE(D0)->BEQ(F0), BEQ(F0)->BNE(D0)
+static uint8_t invert_branch(uint8_t opcode) {
+    return opcode ^ 0x20;  // XOR with 0x20 inverts branch condition
+}
+#endif
+
 uint8_t recompile_opcode()
 {
 	uint8_t op_buffer_0;
@@ -559,26 +578,132 @@ uint8_t recompile_opcode()
 			// Check if target is compiled (bit 7 clear = RECOMPILED)
 			if (target_flag & RECOMPILED)
 			{
+#ifdef ENABLE_OPTIMIZER_V2
+				// V2: Three-path branch pattern (21 bytes)
+				// Save flash address NOW before any pc_old updates
+				uint16_t pattern_flash_address = flash_code_address;
+				uint8_t pattern_flash_bank = flash_code_bank;
+				uint8_t pattern_code_index = code_index;
+				
+				bankswitch_prg(saved_bank);
+				branch_not_compiled++;
+				
+				// Check space: need 21 bytes + epilogue room
+				if ((code_index + 21 + 14) >= CODE_SIZE)
+				{
+					enable_interpret();
+					// Fall through - not enough space for 21-byte pattern
+				}
+				else
+				{
+				// Pattern:
+				//   +0:  Bxx_inv $13   ; 2B - skip 19 bytes to +21 if NOT taken
+				//   +2:  Bxx $03       ; 2B - original opcode (unconditional!) -> slow at +7
+				//                      ;      PATCH to $00 -> fast at +4
+				//   +4:  JMP $FFFF     ; 3B - fast path (PATCH operand to native addr)
+				//   +7:  STA _a        ; 2B - slow path epilogue
+				//   +9:  PHP           ; 1B
+				//   +10: LDA #<target  ; 2B
+				//   +12: STA _pc       ; 2B
+				//   +14: LDA #>target  ; 2B
+				//   +16: STA _pc+1     ; 2B
+				//   +18: JMP dispatch  ; 3B - to dispatcher
+				//   +21: [continues]   ; path 1 - branch not taken
+				//
+				// Path 1: Branch NOT taken - inverted branch jumps over everything
+				// Path 2: Branch taken, target unknown - second branch to slow path
+				// Path 3: Branch taken, target known - patched to fast JMP
+				
+				// +0: Inverted branch $13 (skip 19 bytes to +21)
+				cache_code[cache_index][code_index+0] = invert_branch(op_buffer_0);
+				cache_code[cache_index][code_index+1] = 19;  // Skip to +21
+				
+				// +2: Original branch $03 (to slow path at +7) - PATCHABLE to $00
+				cache_code[cache_index][code_index+2] = op_buffer_0;  // original opcode
+				cache_code[cache_index][code_index+3] = 3;  // offset to slow path
+				
+				// +4: JMP $FFFF - fast path (operand PATCHABLE)
+				cache_code[cache_index][code_index+4] = 0x4C;  // JMP
+				cache_code[cache_index][code_index+5] = 0xFF;  // Low byte
+				cache_code[cache_index][code_index+6] = 0xFF;  // High byte
+				
+				// +7: STA _a
+				cache_code[cache_index][code_index+7] = 0x85;  // STA zp
+				cache_code[cache_index][code_index+8] = (uint8_t)((uint16_t)&a);
+				
+				// +9: PHP
+				cache_code[cache_index][code_index+9] = 0x08;  // PHP
+				
+				// +10: LDA #<target_pc
+				cache_code[cache_index][code_index+10] = 0xA9;  // LDA immediate
+				cache_code[cache_index][code_index+11] = target_pc & 0xFF;
+				
+				// +12: STA _pc
+				cache_code[cache_index][code_index+12] = 0x85;  // STA zp
+				cache_code[cache_index][code_index+13] = (uint8_t)((uint16_t)&pc);
+				
+				// +14: LDA #>target_pc
+				cache_code[cache_index][code_index+14] = 0xA9;  // LDA immediate
+				cache_code[cache_index][code_index+15] = (target_pc >> 8) & 0xFF;
+				
+				// +16: STA _pc+1
+				cache_code[cache_index][code_index+16] = 0x85;  // STA zp
+				cache_code[cache_index][code_index+17] = (uint8_t)(((uint16_t)&pc) + 1);
+				
+				// +18: JMP flash_dispatch_return
+				cache_code[cache_index][code_index+18] = 0x4C;  // JMP
+				cache_code[cache_index][code_index+19] = (uint8_t)((uint16_t)&flash_dispatch_return);
+				cache_code[cache_index][code_index+20] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+				
+				// Record pending patch:
+				// - Branch offset at +3 (patch $03 -> $00)
+				// - JMP operand at +5 (patch $FFFF -> native)
+				// Use saved addresses from when pattern was emitted
+				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
+				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
+				// Function is in bank1, bankswitch before JSR
+				bankswitch_prg(1);
+				opt2_record_pending_branch(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc);
+				bankswitch_prg(saved_bank);  // Restore current bank
+				
+				// Update PC table to point to this pattern
+				// (required when OPT_BLOCK_METADATA is 0)
+				setup_flash_address(pc, flash_cache_index);
+				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+				
+				pc += 2;
+				code_index += 21;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+				}  // end else (enough space for 21-byte pattern)
+#else
 				// Target not compiled - restore and interpret
 				bankswitch_prg(saved_bank);
 				branch_not_compiled++;
 				enable_interpret();
+				// Fall through to emit interpreted branch
+#endif
 			}
-			
-			// Check if same flash code bank
-			uint8_t target_code_bank = target_flag & 0x1F;
-			if (target_code_bank != flash_code_bank)
+			else
 			{
-				// Different bank - restore and interpret
-				bankswitch_prg(saved_bank);
-				branch_wrong_bank++;
-				enable_interpret();
-			}
-			
-			// Get target's native address
-			uint8_t target_pc_bank = ((target_pc >> 13) + BANK_PC);
-			bankswitch_prg(target_pc_bank);
-			uint16_t target_pc_addr = ((target_pc << 1) & FLASH_BANK_MASK);
+				// Target IS compiled - check if same flash code bank
+				uint8_t target_code_bank = target_flag & 0x1F;
+				if (target_code_bank != flash_code_bank)
+				{
+					// Different bank - cannot direct jump, must interpret
+					bankswitch_prg(saved_bank);
+					branch_wrong_bank++;
+					enable_interpret();
+					// Fall through to emit interpreted branch - don't try to optimize!
+				}
+				else
+				{
+				
+				// Get target's native address
+				uint8_t target_pc_bank = ((target_pc >> 13) + BANK_PC);
+				bankswitch_prg(target_pc_bank);
+				uint16_t target_pc_addr = ((target_pc << 1) & FLASH_BANK_MASK);
 			uint16_t target_native = flash_cache_pc[target_pc_addr] | 
 			                         (flash_cache_pc[target_pc_addr + 1] << 8);
 			
@@ -602,10 +727,35 @@ uint8_t recompile_opcode()
 				return cache_flag[cache_index];
 			}
 			
-			// Out of range - interpret
+			// Out of range - just interpret (both V1 and V2)
 			branch_out_of_range++;
 			enable_interpret();
-		}
+
+#if 1  // 5-byte pattern - re-enabled with space check fix
+			// V2: Out of range - use inverted branch + JMP pattern
+			// Check space: need 5 bytes + epilogue
+			if ((code_index + 5 + 14) < CODE_SIZE)
+			{
+				// Emit: inverted_branch +3 (skip over JMP)
+				cache_code[cache_index][code_index] = invert_branch(op_buffer_0);
+				cache_code[cache_index][code_index+1] = 3;
+				
+				// Emit: JMP target_native (target is compiled, we know address)
+				cache_code[cache_index][code_index+2] = 0x4C;  // JMP
+				cache_code[cache_index][code_index+3] = target_native & 0xFF;
+				cache_code[cache_index][code_index+4] = (target_native >> 8) & 0xFF;
+				
+				pc += 2;
+				code_index += 5;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			// else: not enough space, fall through to interpreted epilogue
+#endif
+				}  // end else (same code bank)
+			}  // end else (target IS compiled)
+		}  // end case branches
 		
 		case opJMP:
 		case opJSR:

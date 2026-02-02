@@ -383,7 +383,7 @@ SECTIONS
   init:   {*(init)}  >b31 AT>out
   data:   {*(data)} >wram AT>out  
 
-  /* fill program bank */
+  /* fill program bank - then vectors at $FFFA */
   fill: { .=.+0x10000-6-ADDR(init)-SIZEOF(init)-SIZEOF(data);} >b31 AT>out
   vectors:{ *(vectors)} >b31 AT>out
 

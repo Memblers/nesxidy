@@ -159,6 +159,21 @@ void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t
 }
 
 //============================================================================
+// API: Sweep pending patches - re-check if any can now be resolved
+//============================================================================
+
+void opt2_sweep_pending_patches(void) {
+    // This is called periodically (every 8 blocks) to re-scan pending patches
+    // In case targets have been compiled since they were recorded.
+    // We don't re-check here because targets are notified immediately as they compile.
+    // But this function exists for future expansion (e.g., triggering compilation
+    // of pending targets, or batch processing).
+    
+    // For now, just a no-op that could be expanded later.
+    // All patch resolution happens in opt2_notify_block_compiled().
+}
+
+//============================================================================
 // API: Get statistics (for debugging)
 //============================================================================
 

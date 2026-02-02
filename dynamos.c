@@ -401,6 +401,19 @@ void run_6502(void)
 
 		// V2 notify is now called per-instruction in the compile loop above
 		
+#ifdef ENABLE_OPTIMIZER_V2
+		// Periodic sweep: after every 8 blocks, check if any pending patches can now be resolved
+		static uint8_t blocks_compiled = 0;
+		if (++blocks_compiled >= 8) {
+			blocks_compiled = 0;
+			bankswitch_prg(1);
+			// Sweep: re-check all pending branches in case targets got compiled
+			// This will re-scan and potentially apply any patches whose targets are now ready
+			opt2_sweep_pending_patches();
+			bankswitch_prg(mapper_prg_bank);
+		}
+#endif
+		
 		// Restore PC to entry point and execute from flash
 		pc = entry_pc;
 		
@@ -760,68 +773,11 @@ uint8_t recompile_opcode()
 		case opJMP:
 		case opJSR:
 		{
-			uint8_t op_jsr = op_buffer_0;  // Save opcode
-			uint16_t target_jsr = read6502(pc+1) | (read6502(pc+2) << 8);
-			
-			// Try to optimize JSR/JMP
-			uint8_t saved_bank_jsr = mapper_prg_bank;
-			
-			// Look up target's flag
-			uint8_t target_flag_bank_jsr = ((target_jsr >> 14) + BANK_PC_FLAGS);
-			bankswitch_prg(target_flag_bank_jsr);
-			uint8_t target_flag_jsr = flash_cache_pc_flags[target_jsr & FLASH_BANK_MASK];
-			
-			// Check if target is compiled (bit 7 clear = RECOMPILED)
-			if (!(target_flag_jsr & RECOMPILED))
-			{
-				// Target not compiled - interpret
-				bankswitch_prg(saved_bank_jsr);
-				cache_branch_pc_lo[cache_index] = read6502(pc+1);
-				cache_branch_pc_hi[cache_index] = read6502(pc+2);
-				enable_interpret();
-			}
-			else
-			{
-				// Target IS compiled
-				uint8_t target_code_bank_jsr = target_flag_jsr & 0x1F;
-				if (target_code_bank_jsr != flash_code_bank)
-				{
-					// Different bank - interpret
-					bankswitch_prg(saved_bank_jsr);
-					cache_branch_pc_lo[cache_index] = read6502(pc+1);
-					cache_branch_pc_hi[cache_index] = read6502(pc+2);
-					enable_interpret();
-				}
-				else if ((code_index + 3 + 14) >= CODE_SIZE)
-				{
-					// Not enough space - interpret
-					bankswitch_prg(saved_bank_jsr);
-					cache_branch_pc_lo[cache_index] = read6502(pc+1);
-					cache_branch_pc_hi[cache_index] = read6502(pc+2);
-					enable_interpret();
-				}
-				else
-				{
-					// Target compiled, same bank, and we have space
-					// Emit native JSR/JMP with native address
-					uint8_t target_pc_bank_jsr = ((target_jsr >> 13) + BANK_PC);
-					bankswitch_prg(target_pc_bank_jsr);
-					uint16_t target_pc_addr_jsr = ((target_jsr << 1) & FLASH_BANK_MASK);
-					uint16_t target_native_jsr = flash_cache_pc[target_pc_addr_jsr] | 
-					                              (flash_cache_pc[target_pc_addr_jsr + 1] << 8);
-					bankswitch_prg(saved_bank_jsr);
-					
-					// Emit: JSR/JMP native_address (3 bytes)
-					cache_code[cache_index][code_index] = op_jsr;
-					cache_code[cache_index][code_index+1] = target_native_jsr & 0xFF;
-					cache_code[cache_index][code_index+2] = (target_native_jsr >> 8) & 0xFF;
-					
-					pc += 3;
-					code_index += 3;
-					cache_flag[cache_index] |= READY_FOR_NEXT;
-					return cache_flag[cache_index];
-				}
-			}
+			cache_branch_pc_lo[cache_index] = read6502(pc+1);
+			cache_branch_pc_hi[cache_index] = read6502(pc+2);
+			enable_interpret();
+			// TODO: JSR/JMP optimization caused corruption - need to debug flag logic or addressing
+			// Temporarily disabled until proper fix available
 		}
 		
 		case opJMPi:		

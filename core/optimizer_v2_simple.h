@@ -20,6 +20,10 @@ void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operan
 // native_bank: bank containing the compiled block
 void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t native_bank);
 
+// Periodic sweep to check pending patches (called every 8 blocks)
+// Currently just a placeholder for future expansion
+void opt2_sweep_pending_patches(void);
+
 // Get statistics for debugging
 void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t *pending);
 

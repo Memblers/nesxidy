@@ -45,10 +45,11 @@ extern uint8_t mapper_prg_bank;
 //============================================================================
 
 typedef struct {
-    uint16_t branch_offset_addr;  // Address of branch offset byte (patch $03 -> $00)
+    uint16_t branch_offset_addr;  // Address of branch offset byte
     uint16_t jmp_operand_addr;    // Address of JMP operand in flash (low byte)
     uint8_t  patch_bank;          // Bank containing the code
     uint16_t target_pc;           // 6502 PC this branch wants to reach
+    uint8_t branch_patch_value;   // Value to patch branch offset to
 } pending_patch_t;
 
 static pending_patch_t pending_patches[MAX_PENDING_PATCHES];
@@ -78,7 +79,7 @@ extern void flash_byte_program(uint16_t addr, uint8_t bank, uint8_t data);
 // API: Record a pending branch patch
 //============================================================================
 
-void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operand_addr, uint8_t code_bank, uint16_t target_pc) {
+void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operand_addr, uint8_t code_bank, uint16_t target_pc, uint8_t branch_patch_value) {
     stats.total_branches++;
     
     if (pending_count >= MAX_PENDING_PATCHES) {
@@ -90,6 +91,7 @@ void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operan
     pending_patches[pending_count].jmp_operand_addr = jmp_operand_addr;
     pending_patches[pending_count].patch_bank = code_bank;
     pending_patches[pending_count].target_pc = target_pc;
+    pending_patches[pending_count].branch_patch_value = branch_patch_value;
     pending_count++;
     stats.pending_patches++;
 }
@@ -131,11 +133,11 @@ void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t
             }
             
             // Two patches needed:
-            // 1. Branch offset: $03 -> $00 (clears bits 0,1 to jump to fast path)
+            // 1. Branch offset to branch_patch_value
             // 2. JMP operand: $FFFF -> native_addr
             
-            // Patch 1: Branch offset $03 -> $00
-            flash_byte_program(pending_patches[i].branch_offset_addr, pending_patches[i].patch_bank, 0x00);
+            // Patch 1: Branch offset
+            flash_byte_program(pending_patches[i].branch_offset_addr, pending_patches[i].patch_bank, pending_patches[i].branch_patch_value);
             
             // Patch 2: JMP operand (2 bytes: low, high)
             // $FFFF -> $target requires clearing bits (always possible)

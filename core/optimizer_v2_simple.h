@@ -8,11 +8,12 @@
 #include <stdint.h>
 
 // Record a pending branch that needs patching when target is compiled
-// branch_offset_addr: flash address of branch offset byte (patch $03 -> $00)
+// branch_offset_addr: flash address of branch offset byte
 // jmp_operand_addr: flash address of JMP operand (low byte)
 // code_bank: bank containing the code
 // target_pc: 6502 PC the branch wants to reach
-void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operand_addr, uint8_t code_bank, uint16_t target_pc);
+// branch_patch_value: value to patch the branch offset to
+void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operand_addr, uint8_t code_bank, uint16_t target_pc, uint8_t branch_patch_value);
 
 // Called when a block is compiled - resolves any pending patches to this block
 // block_pc: 6502 PC of the block that was just compiled

@@ -1,3 +1,6 @@
 in-place patching:
 
 epilogue could start with php / clc / bcc regular_epilogue.  to "take over" and make it continue to a new block, we would patch a bit of the branch target, changing target by 16 bytes different or whatever, and that points to a new 'blank epilogue, which contains a sequence like 'plp / jmp $FFFF'.  or perhaps, plp, followed by more $FF, in case a trampoline is needed into a new bank, code would get filled out as-needed
+
+
+invert the branch condition, then branch over a JMP $FFF0 instruction.  $FFF0 contains a trampoline that JMPs to flash dispatch return.  when the branch target is recompiled, the JMP $FFF0 operand can be patched, by writing only the 12-upper bits of the address, so the jump target must be aligned on a 16-byte boundary.  this could jump directly to another code block if it starts at that boundary, or it could jump to a proper 16-bit addressed JMP that is provided within the block.

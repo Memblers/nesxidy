@@ -569,15 +569,17 @@ uint8_t recompile_opcode()
 		{
 			op_buffer_1 = read6502(pc+1);
 			
-			// Only try to optimize backward branches
+			// Only optimize backward branches for now
+			// Forward branches can corrupt memory - needs investigation
 			int8_t branch_offset = (int8_t) op_buffer_1;
 			if (branch_offset >= 0)
 			{
-				// Forward branch - interpret
+				// Forward branch - interpret (don't optimize for now)
 				enable_interpret();
 			}
-			
-			// Calculate target PC for backward branch
+			else
+			{
+			// Backward branch - can optimize if target compiled
 			uint16_t target_pc = pc + 2 + branch_offset;
 			
 			// Save current bank state
@@ -676,7 +678,7 @@ uint8_t recompile_opcode()
 				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
 				// Function is in bank1, bankswitch before JSR
 				bankswitch_prg(1);
-				opt2_record_pending_branch(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc);
+				opt2_record_pending_branch(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
 				bankswitch_prg(saved_bank);  // Restore current bank
 				
 				// Update PC table to point to this pattern
@@ -766,18 +768,54 @@ uint8_t recompile_opcode()
 			}
 			// else: not enough space, fall through to interpreted epilogue
 #endif
-				}  // end else (same code bank)
-			}  // end else (target IS compiled)
-		}  // end case branches
+				}  // end else (same bank)
+			}  // end else (target is compiled)
+			}  // end else (backward branch)
+		}
 		
 		case opJMP:
+		{
+			uint16_t target_pc = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
+			
+			// Emit patchable pattern
+			if (code_index + 6 < CODE_SIZE) {
+				uint16_t epilogue_address = flash_code_address + code_index + 6;
+				uint16_t fast_path_address = flash_code_address + code_index + 2;
+				
+				// JMP epilogue_address
+				cache_code[cache_index][code_index] = 0x4C;
+				cache_code[cache_index][code_index+1] = epilogue_address & 0xFF;
+				cache_code[cache_index][code_index+2] = (epilogue_address >> 8) & 0xFF;
+				
+				// JMP $FFFF
+				cache_code[cache_index][code_index+3] = 0x4C;
+				cache_code[cache_index][code_index+4] = 0xFF;
+				cache_code[cache_index][code_index+5] = 0xFF;
+				
+				// Record pending
+				uint16_t jmp1_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 1;
+				uint16_t jmp2_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 4;
+				uint8_t saved_bank = mapper_prg_bank;
+				bankswitch_prg(1);
+				opt2_record_pending_branch(jmp1_operand_addr, jmp2_operand_addr, flash_code_bank, target_pc, fast_path_address & 0xFF);
+				bankswitch_prg(saved_bank);
+				
+				pc = target_pc;
+				code_index += 6;
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // JMP ends the block
+				return cache_flag[cache_index];
+			} else {
+				enable_interpret();
+			}
+			break;
+		}
+		
 		case opJSR:
 		{
 			cache_branch_pc_lo[cache_index] = read6502(pc+1);
 			cache_branch_pc_hi[cache_index] = read6502(pc+2);
 			enable_interpret();
-			// TODO: JSR/JMP optimization caused corruption - need to debug flag logic or addressing
-			// Temporarily disabled until proper fix available
+			break;
 		}
 		
 		case opJMPi:		

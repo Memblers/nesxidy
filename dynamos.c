@@ -844,36 +844,39 @@ uint8_t recompile_opcode()
 		{
 			uint16_t target_pc = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
 			
-			// Emit patchable JMP pattern (8 bytes):
+			// Emit patchable JMP pattern (9 bytes):
 			//   +0: PHP           ; 1B - save status flags
-			//   +1: CLC           ; 1B - clear carry (for guaranteed BCC behavior)
-			//   +2: BCC +3        ; 2B - always taken → epilogue at +8
-			//                     ;      PATCH to +0 → fast JMP at +4
-			//   +4: PLP           ; 1B - restore flags (fast path)
-			//   +5: JMP $FFFF     ; 3B - fast path, PATCH to target native addr
-			//   +8: [epilogue]    ; standard epilogue follows
+			//   +1: CLC           ; 1B - clear carry
+			//   +2: BCC +2        ; 2B - always taken → PLP at +6 (slow path)
+			//                     ;      PATCH to +0 → PLP at +4 (fast path)
+			//   +4: PLP           ; 1B - fast path: restore flags
+			//   +5: JMP $FFFF     ; 3B - fast path: PATCH to target native addr
+			//   +8: PLP           ; 1B - slow path: restore flags (clean stack for epilogue)
+			//   +9: [epilogue]    ; standard epilogue follows
 			//
-			// Flags are preserved (PHP/PLP wrap the carry-clear). Both patches
-			// are flash-safe (bit-clear only):
-			//   BCC offset: 3 (0b11) → 0 (0b00)
+			// Both paths restore flags via PLP before continuing.
+			// Both patches are flash-safe (bit-clear only):
+			//   BCC offset: 2 (0b10) → 0 (0b00)
 			//   JMP operand: $FFFF → target
-			if (code_index + 8 < CODE_SIZE) {
+			if (code_index + 9 < CODE_SIZE) {
 				// +0: PHP
 				cache_code[cache_index][code_index] = 0x08;
 				// +1: CLC
 				cache_code[cache_index][code_index+1] = 0x18;
-				// +2: BCC +3 (always taken → epilogue at +8)
+				// +2: BCC +2 (always taken → slow PLP at +6)
 				cache_code[cache_index][code_index+2] = 0x90;
-				cache_code[cache_index][code_index+3] = 3;
-				// +4: PLP (restore flags on fast path)
+				cache_code[cache_index][code_index+3] = 2;
+				// +4: PLP (fast path: restore flags)
 				cache_code[cache_index][code_index+4] = 0x28;
 				// +5: JMP $FFFF (fast path, patchable)
 				cache_code[cache_index][code_index+5] = 0x4C;
 				cache_code[cache_index][code_index+6] = 0xFF;
 				cache_code[cache_index][code_index+7] = 0xFF;
+				// +8: PLP (slow path: restore flags before epilogue)
+				cache_code[cache_index][code_index+8] = 0x28;
 				
 				// Record pending patch:
-				// - BCC operand at +3: patch 3→0 (bit-clear ✓)
+				// - BCC operand at +3: patch 2→0 (bit-clear ✓)
 				// - JMP operand at +6: patch $FFFF→target (bit-clear ✓)
 				uint16_t bcc_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 3;
 				uint16_t jmp_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 6;
@@ -884,7 +887,7 @@ uint8_t recompile_opcode()
 				bankswitch_prg(cur_bank2);
 				
 				pc = target_pc;
-				code_index += 8;
+				code_index += 9;
 				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // JMP ends the block
 				return cache_flag[cache_index];
 			} else {

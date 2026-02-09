@@ -5,8 +5,9 @@
 
 //#define DEBUG_OUT 1
 
-//#define TRACK_TICKS	//disable this to stop tracking clock cycles
+//#define TRACK_TICKS	//disable this to stop tracking run clock cycles
 
+// Normal build (linking + optimizer enabled)
 #define ENABLE_LINKING
 //#define INTERPRETER_ONLY
 
@@ -15,6 +16,11 @@
 
 // V2 optimizer - in-place branch patching (no sector evacuation)
 #define ENABLE_OPTIMIZER_V2
+
+// Patchable epilogue - block chaining via patchable epilogues (requires V2)
+#ifdef ENABLE_OPTIMIZER_V2
+#define ENABLE_PATCHABLE_EPILOGUE
+#endif
 
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)

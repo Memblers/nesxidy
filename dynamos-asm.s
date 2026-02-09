@@ -75,6 +75,7 @@ _SCREEN_RAM_BASE: reserve $400
 	if (GAME_NUMBER == 0)
 	align 8
 _rom_sidetrac:	
+	;incbin "cpu_6502_test.bin"
 	incbin "roms\sidetrac\stl8a-1"
 	incbin "roms\sidetrac\stl7a-2"
 	incbin "roms\sidetrac\stl6a-2"	
@@ -132,6 +133,19 @@ _rom_spectar:
 	endif
 
 
+;=======================================================
+	section "bank1"
+	global _rom_cpu6502test
+;-------------------------------------------------------
+	if (GAME_NUMBER == 4)
+	align 8
+_rom_cpu6502test:
+	incbin "cpu_6502_test.bin"
+	endif
+
+endif
+
+
 ;=======================================================	
 	zpage	_status, _a, _x, _y, _pc
 	
@@ -146,6 +160,12 @@ _rom_spectar:
 	global _cache_code, _cache_index
 	zpage _cache_index
 ;-------------------------------------------------------	
+
+;=======================================================	
+	section "trampoline"
+;-------------------------------------------------------	
+_haltwait:
+	jmp _flash_dispatch_return
 
 ;=======================================================	
 	section "data"

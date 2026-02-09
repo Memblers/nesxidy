@@ -8,18 +8,44 @@
 // Block layout:
 // +0: code_len (1 byte) - if OPT_BLOCK_METADATA
 // +1: native code (variable)
-// +N: epilogue (14 bytes)
-// +N+14: metadata - if OPT_BLOCK_METADATA
+// +N: epilogue (14 or 21 bytes)
+// +N+14/21: metadata - if OPT_BLOCK_METADATA
 //   exit_pc (2 bytes)
 //   cycle_count (2 bytes) - if OPT_TRACK_CYCLES  
 //   branch_count (1 byte)
 //   branches[] (3 bytes each: offset, target_lo, target_hi)
-#if OPT_BLOCK_METADATA
-#define CODE_SIZE 220       // Leave room for prefix + epilogue + metadata
-#define BLOCK_PREFIX_SIZE 1 // 1 byte for code length
+//
+// Patchable epilogue layout (21 bytes, ENABLE_PATCHABLE_EPILOGUE):
+//   +0: PHP           ; 1B  save flags
+//   +1: CLC           ; 1B
+//   +2: BCC +4        ; 2B  always-taken → regular at +8. PATCH to +0 → fast at +4
+//   +4: PLP           ; 1B  fast path: restore flags
+//   +5: JMP $FFFF     ; 3B  fast path: PATCH operand → next block native addr
+//   +8: STA _a        ; 2B  regular path
+//  +10: LDA #<exit_pc ; 2B
+//  +12: STA _pc       ; 2B
+//  +14: LDA #>exit_pc ; 2B
+//  +16: STA _pc+1     ; 2B
+//  +18: JMP dispatch  ; 3B
+//
+// Patching: BCC offset 4→0 (clear bits ✓), JMP $FFFF→$XXYY (clear bits ✓)
+// Fast path cost: PHP+CLC+BCC+PLP+JMP = 15 cycles (vs ~130 for full dispatch)
+//
+// Byte 255 of each block stores the epilogue start offset (0..~229).
+// $FF = no patchable epilogue.  Used by opt2_scan_and_patch_epilogues().
+
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+#define EPILOGUE_SIZE 21
 #else
-#define CODE_SIZE 250
+#define EPILOGUE_SIZE 14
+#endif
+
+#if OPT_BLOCK_METADATA
+#define BLOCK_PREFIX_SIZE 1 // 1 byte for code length
+#define CODE_SIZE (256 - BLOCK_PREFIX_SIZE - EPILOGUE_SIZE - 16) // room for prefix + epilogue + metadata
+#else
 #define BLOCK_PREFIX_SIZE 0
+#define CODE_SIZE (256 - EPILOGUE_SIZE - 6) // room for epilogue + safety margin
 #endif
 
 #define CACHE_L1_CODE_SIZE 256

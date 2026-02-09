@@ -303,11 +303,8 @@ void run_6502(void)
 		{
 			flash_cache_pc_update(code_index_old, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
-			// V2: Check if any pending branches target this PC
-			uint8_t saved_bank = mapper_prg_bank;
-			bankswitch_prg(1);
-			opt2_notify_block_compiled(pc_old, flash_code_address + code_index_old, flash_code_bank);
-			bankswitch_prg(saved_bank);
+			// V2: Check if any pending branches/epilogues target this PC
+			opt2_notify_block_compiled(pc_old, flash_code_address + code_index_old + BLOCK_PREFIX_SIZE, flash_code_bank);
 #endif
 		}
 		
@@ -332,7 +329,36 @@ void run_6502(void)
 			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, cache_code[0][i]);
 		}
 		
-		// 3. Write epilogue (14 bytes)
+		// 3. Write epilogue
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+		uint8_t epilogue_flash_offset = flash_offset;  // save for byte 255 marker
+		// Patchable epilogue (21 bytes)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x08); // PHP
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x18); // CLC
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x90); // BCC
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 4);    // offset → regular at +8
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x28); // PLP (fast)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP (fast)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF); // JMP lo (PATCHABLE)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF); // JMP hi (PATCHABLE)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _a (regular)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&a));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #<exit_pc
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)exit_pc);
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _pc
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&pc));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #>exit_pc
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(exit_pc >> 8));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _pc+1
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&pc) + 1));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP dispatch_return
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&flash_dispatch_return));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8));
+		// Epilogue chaining is handled by opt2_scan_and_patch_epilogues() — no queue needed
+		// Write epilogue start offset to byte 255 so scanner can find it directly
+		flash_byte_program(flash_code_address + 255, flash_code_bank, epilogue_flash_offset);
+#else
+		// Standard epilogue (14 bytes)
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA zp
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&a));
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x08); // PHP
@@ -347,6 +373,7 @@ void run_6502(void)
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&flash_dispatch_return));
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8));
+#endif  // ENABLE_PATCHABLE_EPILOGUE
 		
 		// 4. Write metadata: exit_pc
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)exit_pc);
@@ -368,24 +395,61 @@ void run_6502(void)
 		
 #else
 		// --- Old behavior: epilogue only, no prefix ---
-		// Write epilogue directly to flash (code_index is current offset)
+		// Build epilogue into cache_code buffer, then write everything to flash at once
 		setup_flash_address(pc, flash_cache_index);  // Get flash address base
 		uint8_t epilogue_start = code_index;
-		flash_byte_program(flash_code_address + epilogue_start + 0, flash_code_bank, 0x85); // STA zero page
-		flash_byte_program(flash_code_address + epilogue_start + 1, flash_code_bank, (uint8_t) ((uint16_t) &a));
-		flash_byte_program(flash_code_address + epilogue_start + 2, flash_code_bank, 0x08); // PHP
-		flash_byte_program(flash_code_address + epilogue_start + 3, flash_code_bank, 0xA9); // LDA immediate
-		flash_byte_program(flash_code_address + epilogue_start + 4, flash_code_bank, (uint8_t) exit_pc);
-		flash_byte_program(flash_code_address + epilogue_start + 5, flash_code_bank, 0x85); // STA zero page
-		flash_byte_program(flash_code_address + epilogue_start + 6, flash_code_bank, (uint8_t) ((uint16_t) &pc));
-		flash_byte_program(flash_code_address + epilogue_start + 7, flash_code_bank, 0xA9); // LDA immediate
-		flash_byte_program(flash_code_address + epilogue_start + 8, flash_code_bank, (uint8_t) (exit_pc >> 8));
-		flash_byte_program(flash_code_address + epilogue_start + 9, flash_code_bank, 0x85); // STA zero page
-		flash_byte_program(flash_code_address + epilogue_start + 10, flash_code_bank, (uint8_t) (((uint16_t) &pc) + 1));
-		flash_byte_program(flash_code_address + epilogue_start + 11, flash_code_bank, 0x4C); // JMP
-		flash_byte_program(flash_code_address + epilogue_start + 12, flash_code_bank, (uint8_t) ((uint16_t) &flash_dispatch_return));
-		flash_byte_program(flash_code_address + epilogue_start + 13, flash_code_bank, (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8));
+
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+		// Patchable epilogue (21 bytes) — built in buffer, written by loop below
+		cache_code[0][code_index++] = 0x08;  // PHP
+		cache_code[0][code_index++] = 0x18;  // CLC
+		cache_code[0][code_index++] = 0x90;  // BCC
+		cache_code[0][code_index++] = 4;     // offset → regular path at +8
+		cache_code[0][code_index++] = 0x28;  // PLP (fast path)
+		cache_code[0][code_index++] = 0x4C;  // JMP (fast path)
+		cache_code[0][code_index++] = 0xFF;  // JMP lo (PATCHABLE)
+		cache_code[0][code_index++] = 0xFF;  // JMP hi (PATCHABLE)
+		cache_code[0][code_index++] = 0x85;  // STA _a (regular path)
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);
+		cache_code[0][code_index++] = 0xA9;  // LDA #<exit_pc
+		cache_code[0][code_index++] = (uint8_t)exit_pc;
+		cache_code[0][code_index++] = 0x85;  // STA _pc
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&pc);
+		cache_code[0][code_index++] = 0xA9;  // LDA #>exit_pc
+		cache_code[0][code_index++] = (uint8_t)(exit_pc >> 8);
+		cache_code[0][code_index++] = 0x85;  // STA _pc+1
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
+		cache_code[0][code_index++] = 0x4C;  // JMP dispatch_return
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&flash_dispatch_return);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+#else
+		// Standard epilogue (14 bytes) — built in buffer, written by loop below
+		cache_code[0][code_index++] = 0x85;  // STA _a
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);
+		cache_code[0][code_index++] = 0x08;  // PHP
+		cache_code[0][code_index++] = 0xA9;  // LDA #<exit_pc
+		cache_code[0][code_index++] = (uint8_t)exit_pc;
+		cache_code[0][code_index++] = 0x85;  // STA _pc
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&pc);
+		cache_code[0][code_index++] = 0xA9;  // LDA #>exit_pc
+		cache_code[0][code_index++] = (uint8_t)(exit_pc >> 8);
+		cache_code[0][code_index++] = 0x85;  // STA _pc+1
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
+		cache_code[0][code_index++] = 0x4C;  // JMP dispatch_return
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&flash_dispatch_return);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+#endif  // ENABLE_PATCHABLE_EPILOGUE
+
+		// Write epilogue to flash
+		for (uint8_t i = epilogue_start; i < code_index; i++) {
+			flash_byte_program(flash_code_address + i, flash_code_bank, cache_code[0][i]);
+		}
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+		// Write epilogue start offset to byte 255 so scanner can find it directly
+		flash_byte_program(flash_code_address + 255, flash_code_bank, epilogue_start);
 #endif
+		// Epilogue chaining is handled by opt2_scan_and_patch_epilogues() — no queue needed
+#endif  // OPT_BLOCK_METADATA
 		
 		// Mark block as used
 		bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
@@ -402,15 +466,17 @@ void run_6502(void)
 		// V2 notify is now called per-instruction in the compile loop above
 		
 #ifdef ENABLE_OPTIMIZER_V2
-		// Periodic sweep: after every 8 blocks, check if any pending patches can now be resolved
+		// Periodic sweep: after every 8 blocks, resolve pending branch patches
+		// and scan flash for patchable epilogues that can now be chained
 		static uint8_t blocks_compiled = 0;
 		if (++blocks_compiled >= 8) {
 			blocks_compiled = 0;
-			bankswitch_prg(1);
-			// Sweep: re-check all pending branches in case targets got compiled
-			// This will re-scan and potentially apply any patches whose targets are now ready
+			// Sweep pending branch patches
 			opt2_sweep_pending_patches();
-			bankswitch_prg(mapper_prg_bank);
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+			// Scan all flash blocks for epilogues that can now be chained
+			opt2_scan_and_patch_epilogues();
+#endif
 		}
 #endif
 		
@@ -676,10 +742,11 @@ uint8_t recompile_opcode()
 				// Use saved addresses from when pattern was emitted
 				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
 				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
-				// Function is in bank1, bankswitch before JSR
+				// opt2_record_pending_branch is in bank1
+				uint8_t cur_bank = mapper_prg_bank;
 				bankswitch_prg(1);
 				opt2_record_pending_branch(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
-				bankswitch_prg(saved_bank);  // Restore current bank
+				bankswitch_prg(cur_bank);
 				
 				// Update PC table to point to this pattern
 				// (required when OPT_BLOCK_METADATA is 0)
@@ -777,28 +844,37 @@ uint8_t recompile_opcode()
 		{
 			uint16_t target_pc = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
 			
-			// Emit patchable pattern
+			// Emit patchable JMP pattern (6 bytes):
+			//   +0: CLC           ; 1B - guarantee carry clear
+			//   +1: BCC +3        ; 2B - always taken → epilogue at +6
+			//                     ;      PATCH to +0 → fast JMP at +3
+			//   +3: JMP $FFFF     ; 3B - fast path, PATCH to target native addr
+			//   +6: [epilogue]    ; standard epilogue follows
+			//
+			// Both patches are flash-safe (bit-clear only):
+			//   BCC offset: 3 (0b11) → 0 (0b00)
+			//   JMP operand: $FFFF → target
 			if (code_index + 6 < CODE_SIZE) {
-				uint16_t epilogue_address = flash_code_address + code_index + 6;
-				uint16_t fast_path_address = flash_code_address + code_index + 2;
-				
-				// JMP epilogue_address
-				cache_code[cache_index][code_index] = 0x4C;
-				cache_code[cache_index][code_index+1] = epilogue_address & 0xFF;
-				cache_code[cache_index][code_index+2] = (epilogue_address >> 8) & 0xFF;
-				
-				// JMP $FFFF
+				// +0: CLC
+				cache_code[cache_index][code_index] = 0x18;
+				// +1: BCC +3 (always taken → epilogue at +6)
+				cache_code[cache_index][code_index+1] = 0x90;
+				cache_code[cache_index][code_index+2] = 3;
+				// +3: JMP $FFFF (fast path, patchable)
 				cache_code[cache_index][code_index+3] = 0x4C;
 				cache_code[cache_index][code_index+4] = 0xFF;
 				cache_code[cache_index][code_index+5] = 0xFF;
 				
-				// Record pending
-				uint16_t jmp1_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 1;
-				uint16_t jmp2_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 4;
-				uint8_t saved_bank = mapper_prg_bank;
+				// Record pending patch:
+				// - BCC operand at +2: patch 3→0 (bit-clear ✓)
+				// - JMP operand at +4: patch $FFFF→target (bit-clear ✓)
+				uint16_t bcc_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 2;
+				uint16_t jmp_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 4;
+				// opt2_record_pending_branch is in bank1
+				uint8_t cur_bank2 = mapper_prg_bank;
 				bankswitch_prg(1);
-				opt2_record_pending_branch(jmp1_operand_addr, jmp2_operand_addr, flash_code_bank, target_pc, fast_path_address & 0xFF);
-				bankswitch_prg(saved_bank);
+				opt2_record_pending_branch(bcc_operand_addr, jmp_operand_addr, flash_code_bank, target_pc, 0);
+				bankswitch_prg(cur_bank2);
 				
 				pc = target_pc;
 				code_index += 6;
@@ -966,9 +1042,7 @@ uint8_t recompile_opcode()
 					break;
 				}						
 				
-				case zp:
-				case zpx:
-				case zpy:												
+				case zp:				
 				{															
 					cache_code[cache_index][code_index] |= 0x08; // change ZP to ABS (refer to 6502 opcode matrix) - note: except for STX ZP,Y and STY ZP,X !! (interpreted for now)
 					uint16_t address = read6502(pc+1);
@@ -979,6 +1053,13 @@ uint8_t recompile_opcode()
 					code_index += 3;
 					break;
 				}
+				case zpx:
+				case zpy:
+				{
+					enable_interpret();
+					break;
+				}
+
 				case indx:
 				{
 					// Indx pointers can point to ROM in the switchable bank ($8000-$BFFF).

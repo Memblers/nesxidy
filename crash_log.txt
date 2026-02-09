@@ -1,5 +1,0 @@
-=== Crash Logger Started ===
-Monitoring flash $8000-$BFFF...
-Progress: 100K execs, PC=$92B6
-Progress: 200K execs, PC=$83FA
-Progress: 300K execs, PC=$92A5

@@ -6,6 +6,7 @@
 #define OPTIMIZER_V2_SIMPLE_H
 
 #include <stdint.h>
+#include "../config.h"
 
 // Record a pending branch that needs patching when target is compiled
 // branch_offset_addr: flash address of branch offset byte
@@ -21,9 +22,15 @@ void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operan
 // native_bank: bank containing the compiled block
 void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t native_bank);
 
-// Periodic sweep to check pending patches (called every 8 blocks)
-// Currently just a placeholder for future expansion
+// Periodic sweep to re-check pending branch patches against PC flags table
 void opt2_sweep_pending_patches(void);
+
+// Scan all used flash blocks for patchable epilogues that can now be chained.
+// Finds epilogues by byte signature, reads embedded exit_pc, checks if compiled,
+// and patches in-place. No queue needed — works retroactively on all blocks.
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+void opt2_scan_and_patch_epilogues(void);
+#endif
 
 // Get statistics for debugging
 void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t *pending);

@@ -6,6 +6,7 @@
 
 #ifndef TRACK_TICKS
 #define FRAME_LENGTH	(const uint16_t) ((705562 / 59.996811) / 4)	// estimate number of instructions
+//#define FRAME_LENGTH	(const uint16_t) ((705562 / 59.996811) / 4)	// estimate number of instructions
 #else
 #define FRAME_LENGTH	(const uint16_t) (705562 / 59.996811)
 #endif
@@ -53,6 +54,12 @@
 #ifdef GAME_TARG_TEST_ROM
 	#define ROM_OFFSET 0x1800
 	//#define ROM_NAME rom_targtest
+#endif
+
+// CPU 6502 Test
+#ifdef GAME_CPU_6502_TEST
+#define ROM_OFFSET 0x2800
+#define ROM_NAME rom_cpu6502test
 #endif
 
 // ******************************************************************************************

@@ -383,11 +383,29 @@ SECTIONS
   init:   {*(init)}  >b31 AT>out
   data:   {*(data)} >wram AT>out  
 
-  /* fill program bank - then vectors at $FFFA */
-  fill: { .=.+0x10000-6-ADDR(init)-SIZEOF(init)-SIZEOF(data);} >b31 AT>out
-  vectors:{ *(vectors)} >b31 AT>out
+  /* 1. Pad up to $FFF0 */
+  /* We use 0x10000 (end of memory) - 16 bytes (trampoline + vectors) */
+  fill: { 
+      . = . + (0x10000 - 16 - ADDR(init) - SIZEOF(init) - SIZEOF(data));
+  } >b31 AT>out
 
+  /* 2. Your trampoline segment at $FFF0 */
+  trampoline: { 
+      *(trampoline) 
+  } >b31 AT>out
 
+  /* 3. Pad the gap between trampoline and vectors */
+  /* This pads from the end of your trampoline code up to $FFFA */
+  fill_vectors: {
+      . = . + (16 - 6 - SIZEOF(trampoline));
+  } >b31 AT>out
+
+  /* 4. The Vectors at $FFFA */
+  vectors: { 
+      *(vectors) 
+  } >b31 AT>out
+
+  
   zpage (NOLOAD) : {*(zpage) *(zp1) *(zp2)} >zero
   nesram (NOLOAD): {*(nesram)} >ram
   bss (NOLOAD): {*(bss)} >wram  

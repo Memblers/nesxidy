@@ -85,6 +85,18 @@
 #define	BANK_PC			19
 #define BANK_PC_FLAGS	27
 
+// Cache persistence signature
+// Stored in bank 3 after the block flags array (960 bytes = $3C0).
+// Signature sits at offset $3D0 within bank 3 (address $83D0).
+// Layout: 4-byte magic + 4-byte ROM hash = 8 bytes total.
+#define CACHE_SIG_OFFSET        0x3D0
+#define CACHE_SIG_ADDRESS       (FLASH_BANK_BASE + CACHE_SIG_OFFSET)
+#define CACHE_SIG_MAGIC_0       0x44   // 'D'
+#define CACHE_SIG_MAGIC_1       0x4D   // 'M'
+#define CACHE_SIG_MAGIC_2       0x53   // 'S'
+#define CACHE_SIG_MAGIC_3       0x01   // version 1
+#define CACHE_SIG_SIZE          8      // 4 magic + 4 ROM hash
+
 #pragma section bank1
 extern const unsigned char rom_sidetrac[];
 extern const unsigned char rom_targ[];

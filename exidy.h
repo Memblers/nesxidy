@@ -2,6 +2,8 @@
 #ifndef EXIDY_H
 #define EXIDY_H
 
+#include "config.h"
+
 // ******************************************************************************************
 
 #ifndef TRACK_TICKS
@@ -85,6 +87,12 @@ void convert_chr(uint8_t *source);
 uint8_t read6502(uint16_t address);
 void write6502(uint16_t address, uint8_t value);
 void flash_format(void);
+
+#ifdef ENABLE_CACHE_PERSIST
+void cache_write_signature(void);
+uint8_t cache_check_signature(void);
+void flash_init_persist(void);
+#endif
 
 #endif
 #pragma section default

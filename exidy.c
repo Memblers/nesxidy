@@ -165,7 +165,11 @@ int main(void)
 	lnPPUCTRL &= ~0x08;
 	lnPPUMASK = 0x3A;
 
+#ifdef ENABLE_CACHE_PERSIST
+	flash_init_persist();
+#else
 	flash_format();
+#endif
 	
 #ifdef ENABLE_OPTIMIZER
 	// Initialize optimizer with debug thresholds
@@ -366,7 +370,13 @@ uint8_t nes_gamepad(void)
 
 // ******************************************************************************************
 
-void render_video(void)
+// ==========================================================================
+// render_video — moved to bank 2 to save fixed-bank space.
+// Called once per frame; only touches fixed-bank LazyNES calls and WRAM.
+// ==========================================================================
+#pragma section bank2
+
+void render_video_b2(void)
 {		
 	if (screen_ram_updated)
 	{		
@@ -444,6 +454,18 @@ void render_video(void)
 	return;
 }
 
+#pragma section default
+
+// Fixed-bank trampoline: saves current bank, switches to bank 2, calls
+// render_video_b2(), then restores the previous bank.
+void render_video(void)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	render_video_b2();
+	bankswitch_prg(saved_bank);
+}
+
 // ******************************************************************************************
 
 void convert_chr(uint8_t *source)
@@ -513,7 +535,14 @@ void convert_chr(uint8_t *source)
 
 
 // ******************************************************************************************
-void flash_format(void)
+// ==========================================================================
+// flash_format — moved to bank 2 to save fixed-bank space.
+// Startup-only.  Calls flash_sector_erase() which lives in WRAM and
+// manages its own bank switching internally.
+// ==========================================================================
+#pragma section bank2
+
+static void flash_format_b2(void)
 {	
 	for (uint8_t bank = 3; bank < 31; bank++)
 	{		
@@ -523,6 +552,93 @@ void flash_format(void)
 		}
 	}
 }
+
+#pragma section default
+
+void flash_format(void)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	flash_format_b2();
+	bankswitch_prg(saved_bank);
+}
+
+// ******************************************************************************************
+
+#ifdef ENABLE_CACHE_PERSIST
+
+// Compute a 4-byte hash from the source ROM to detect game changes.
+// Reads the reset vector ($FFFC-$FFFD), IRQ vector ($FFFE-$FFFF),
+// and first two ROM bytes to form a simple fingerprint.
+static void cache_compute_rom_hash(uint8_t *hash)
+{
+	hash[0] = read6502(0xFFFC);  // reset vector lo
+	hash[1] = read6502(0xFFFD);  // reset vector hi
+	hash[2] = read6502(0xFFFE);  // IRQ vector lo
+	hash[3] = read6502(0xFFFF);  // IRQ vector hi
+}
+
+// Write the cache signature + ROM hash to flash (bank 3, offset $3D0).
+// Must be called AFTER flash_format() since erase sets all bytes to $FF.
+void cache_write_signature(void)
+{
+	uint8_t rom_hash[4];
+	cache_compute_rom_hash(rom_hash);
+	
+	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
+	flash_byte_program(CACHE_SIG_ADDRESS + 0, BANK_FLASH_BLOCK_FLAGS, CACHE_SIG_MAGIC_0);
+	flash_byte_program(CACHE_SIG_ADDRESS + 1, BANK_FLASH_BLOCK_FLAGS, CACHE_SIG_MAGIC_1);
+	flash_byte_program(CACHE_SIG_ADDRESS + 2, BANK_FLASH_BLOCK_FLAGS, CACHE_SIG_MAGIC_2);
+	flash_byte_program(CACHE_SIG_ADDRESS + 3, BANK_FLASH_BLOCK_FLAGS, CACHE_SIG_MAGIC_3);
+	flash_byte_program(CACHE_SIG_ADDRESS + 4, BANK_FLASH_BLOCK_FLAGS, rom_hash[0]);
+	flash_byte_program(CACHE_SIG_ADDRESS + 5, BANK_FLASH_BLOCK_FLAGS, rom_hash[1]);
+	flash_byte_program(CACHE_SIG_ADDRESS + 6, BANK_FLASH_BLOCK_FLAGS, rom_hash[2]);
+	flash_byte_program(CACHE_SIG_ADDRESS + 7, BANK_FLASH_BLOCK_FLAGS, rom_hash[3]);
+}
+
+// Check if a valid cache signature exists in flash.
+// Returns 1 if signature matches (magic + ROM hash), 0 otherwise.
+uint8_t cache_check_signature(void)
+{
+	uint8_t rom_hash[4];
+	cache_compute_rom_hash(rom_hash);
+	
+	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
+	
+	// Check magic bytes
+	volatile uint8_t *sig = (volatile uint8_t *)CACHE_SIG_ADDRESS;
+	if (sig[0] != CACHE_SIG_MAGIC_0) return 0;
+	if (sig[1] != CACHE_SIG_MAGIC_1) return 0;
+	if (sig[2] != CACHE_SIG_MAGIC_2) return 0;
+	if (sig[3] != CACHE_SIG_MAGIC_3) return 0;
+	
+	// Check ROM hash
+	if (sig[4] != rom_hash[0]) return 0;
+	if (sig[5] != rom_hash[1]) return 0;
+	if (sig[6] != rom_hash[2]) return 0;
+	if (sig[7] != rom_hash[3]) return 0;
+	
+	return 1;  // Valid cache
+}
+
+// Initialize flash cache with persistence support.
+// If a valid signature is found, skip the expensive full erase.
+// Otherwise, format flash and write a new signature.
+void flash_init_persist(void)
+{
+	if (cache_check_signature())
+	{
+		// Valid cache found — skip flash_format() entirely.
+		// All block flags, PC tables, and compiled code are still intact.
+		return;
+	}
+	
+	// No valid cache (first boot, different ROM, or corrupted) — full erase
+	flash_format();
+	cache_write_signature();
+}
+
+#endif // ENABLE_CACHE_PERSIST
 
 // ******************************************************************************************
 

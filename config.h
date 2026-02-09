@@ -22,6 +22,11 @@
 #define ENABLE_PATCHABLE_EPILOGUE
 #endif
 
+// Cache persistence - skip flash_format() at boot if valid cache signature found
+// Reuses previously compiled blocks, eliminating cold-start recompilation cost.
+// Signature includes ROM hash to invalidate when game ROM changes.
+#define ENABLE_CACHE_PERSIST
+
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)
 #define OPT_TRACK_CYCLES     0    // Track emulated cycles per block (requires OPT_BLOCK_METADATA)

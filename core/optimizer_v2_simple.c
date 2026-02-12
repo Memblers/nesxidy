@@ -39,15 +39,20 @@ extern uint8_t flash_block_flags[];
 extern uint8_t flash_cache_pc[];
 extern const uint8_t flash_cache_pc_flags[];
 
-// Functions that call bankswitch_prg() MUST be in the fixed bank ($C000-$FFFF)
-// or WRAM — NOT bank1.  bankswitch changes $8000-$BFFF, so code there would
-// be swapped out from under the CPU.
-//
+// WRAM helper: reads one byte from an arbitrary bank and restores the
+// caller's bank mapping before returning.  Lives in WRAM ($6000-$7FFF)
+// so it is always reachable.  Code in switchable banks ($8000-$BFFF)
+// MUST use this instead of bankswitch_prg() — calling bankswitch_prg()
+// from a switchable bank causes the RTS to return into the wrong bank.
+extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+
 // Layout:
-//   bank1  — opt2_record_pending_branch, opt2_notify_block_compiled,
-//            opt2_get_stats, opt2_reset  (none of these bankswitch)
-//   text   — opt2_sweep_pending_patches, opt2_scan_and_patch_epilogues
-//            (these DO bankswitch, so they live in the always-mapped fixed bank)
+//   bank1  — opt2_record_pending_branch, opt2_get_stats, opt2_reset
+//            (none of these bankswitch)
+//   bank2  — opt2_sweep_pending_patches_b2, opt2_scan_and_patch_epilogues_b2
+//            (use peek_bank_byte for cross-bank reads; NEVER call bankswitch_prg)
+//   default — trampolines: opt2_sweep_pending_patches, opt2_scan_and_patch_epilogues
+//            (switch to bank 2, call _b2 impl, restore caller's bank)
 
 // Alignment for direct patching (must be power of 2)
 #define PATCH_ALIGNMENT 16
@@ -94,17 +99,16 @@ void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operan
 }
 
 //============================================================================
-// All functions below are in the fixed bank ($C000-$FFFF, section "text")
-// which is always mapped regardless of which bank is in $8000-$BFFF.
-// opt2_notify is a no-op stub but must be callable from any bank context.
-// opt2_sweep and opt2_scan call bankswitch_prg() and MUST be here.
+// Functions below need cross-bank reads and MUST live in a safe location.
+// The _b2 implementations run from bank 2 and use peek_bank_byte() (WRAM)
+// for all cross-bank reads.  They NEVER call bankswitch_prg() directly.
+// Fixed-bank trampolines handle the bank2 entry/exit.
 //============================================================================
-#pragma section default
 
 //============================================================================
-// API: Notify that a block was compiled
-// Lightweight stub — actual patch resolution deferred to sweep.
+// opt2_notify_block_compiled — no-op stub, must be callable from any context.
 //============================================================================
+#pragma section default
 
 void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t native_bank) {
     (void)block_pc; (void)native_addr; (void)native_bank;
@@ -112,32 +116,59 @@ void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t
 
 
 //============================================================================
-// API: Sweep pending patches - re-check if any can now be resolved
+// Bank 2 implementations
+// CRITICAL: NEVER call bankswitch_prg() from these functions!
+// bankswitch_prg() is in the fixed bank — its RTS returns to $8xxx which
+// is now mapped to the WRONG bank.  Use peek_bank_byte() (WRAM helper)
+// for all cross-bank reads.  flash_byte_program() is safe because it
+// lives in WRAM and restores mapper_prg_bank (which stays == 2).
 //============================================================================
+#pragma section bank2
 
-void opt2_sweep_pending_patches(void) {
+static void opt2_sweep_pending_patches_b2(void) {
     uint8_t i = 0;
     while (i < pending_count) {
         uint16_t tpc = pp_target_pc[i];
         
-        // Check if target is compiled
-        bankswitch_prg((tpc >> 14) + BANK_PC_FLAGS);
-        uint8_t flag = flash_cache_pc_flags[tpc & FLASH_BANK_MASK];
+        // Check if target is compiled (peek from PC_FLAGS bank)
+        uint8_t flag = peek_bank_byte(
+            (tpc >> 14) + BANK_PC_FLAGS,
+            (uint16_t)&flash_cache_pc_flags[tpc & FLASH_BANK_MASK]);
         
         if ((flag & RECOMPILED) || (flag & 0x1F) != pp_bank[i]) {
             i++;
             continue;
         }
         
-        // Read native address
-        bankswitch_prg((tpc >> 13) + BANK_PC);
+        // Read native address (peek from PC bank)
         uint16_t pa = (tpc << 1) & FLASH_BANK_MASK;
-        uint16_t na = flash_cache_pc[pa] | (flash_cache_pc[pa+1] << 8);
+        uint8_t pc_bank = (tpc >> 13) + BANK_PC;
+        uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pa])
+                    | (peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pa+1]) << 8);
         
-        // Validate patch site
-        bankswitch_prg(pp_bank[i]);
-        if (*(volatile uint8_t*)pp_jmp_addr[i] != 0xFF ||
-            *(volatile uint8_t*)(pp_jmp_addr[i]+1) != 0xFF) {
+        // Don't patch unconditional self-loops (opJMP and epilogue patterns).
+        // These use CLC+BCC (always taken), so patching them to jump back into
+        // the same block creates a tight infinite native loop that never returns
+        // to the dispatcher, blocking NMI/interrupt handling.
+        // Conditional branches (21-byte Bxx pattern) are fine — they'll exit
+        // the loop when the condition changes.
+        // Discriminator: opJMP has jmp_addr - branch_addr == 3 (PLP between BCC and JMP),
+        //                Bxx has jmp_addr - branch_addr == 2 (JMP right after branch byte).
+        {
+            uint16_t gap = pp_jmp_addr[i] - pp_branch_addr[i];
+            if (gap == 3) {  // unconditional (opJMP / epilogue pattern)
+                uint16_t blk_base = pp_jmp_addr[i] & 0xFF00;
+                if (na >= blk_base && na < blk_base + 256) {
+                    i++;
+                    continue;
+                }
+            }
+        }
+        
+        // Validate patch site (peek from code bank)
+        uint8_t jmp_lo = peek_bank_byte(pp_bank[i], pp_jmp_addr[i]);
+        uint8_t jmp_hi = peek_bank_byte(pp_bank[i], pp_jmp_addr[i]+1);
+        if (jmp_lo != 0xFF || jmp_hi != 0xFF) {
             --pending_count;
             pp_branch_addr[i] = pp_branch_addr[pending_count];
             pp_jmp_addr[i] = pp_jmp_addr[pending_count];
@@ -148,7 +179,9 @@ void opt2_sweep_pending_patches(void) {
             continue;
         }
         
-        // Patch
+        // Patch — flash_byte_program lives in WRAM, handles its own bankswitching.
+        // mapper_prg_bank is still 2 (set by trampoline), so flash_byte_program
+        // restores to bank 2 when done.
         flash_byte_program(pp_branch_addr[i], pp_bank[i], pp_patch_val[i]);
         flash_byte_program(pp_jmp_addr[i], pp_bank[i], na & 0xFF);
         flash_byte_program(pp_jmp_addr[i]+1, pp_bank[i], (na >> 8) & 0xFF);
@@ -163,23 +196,10 @@ void opt2_sweep_pending_patches(void) {
     }
 }
 
-//============================================================================
-// API: Scan flash blocks and patch any unresolved patchable epilogues
-//
-// Each block stores its epilogue start offset at byte 255.  We read that
-// byte directly (no pattern scanning), verify the JMP operand is still
-// $FFFF, read the embedded exit_pc, and patch if the target is compiled
-// in the same bank.
-//
-// Byte 255 == $FF means no epilogue recorded (block may be empty or
-// non-patchable).  Valid offsets are 0..234 (CODE_SIZE max).
-//============================================================================
-
 #ifdef ENABLE_PATCHABLE_EPILOGUE
-// Batch size per call — keeps function compact and spreads work over frames
 #define EPILOGUE_SCAN_BATCH 32
 
-void opt2_scan_and_patch_epilogues(void) {
+static void opt2_scan_and_patch_epilogues_b2(void) {
     static uint16_t cursor = 0;
     uint8_t remaining = EPILOGUE_SCAN_BATCH;
     
@@ -189,38 +209,57 @@ void opt2_scan_and_patch_epilogues(void) {
         
         uint16_t block = cursor++;
         
-        // Check if block is in use
-        bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
-        if (flash_block_flags[block] & FLASH_AVAILABLE)
+        // Check if block is in use (peek from block-flags bank)
+        uint8_t bflag = peek_bank_byte(
+            BANK_FLASH_BLOCK_FLAGS,
+            (uint16_t)&flash_block_flags[block]);
+        if (bflag & FLASH_AVAILABLE)
             continue;
         
         // Compute block's flash address and bank
         uint8_t code_bank = (block >> 6) + BANK_CODE;
         uint16_t code_base = ((block & 0x3F) << 8) + FLASH_BANK_BASE;
         
-        // Read epilogue offset from byte 255
-        bankswitch_prg(code_bank);
-        volatile uint8_t *base = (volatile uint8_t *)code_base;
+        // Read epilogue offset and signature from code bank (via peek)
+        uint8_t off = peek_bank_byte(code_bank, code_base + 255);
+        uint8_t valid = 1;
+        uint16_t exit_pc = 0;
+        if (off == 0xFF) { valid = 0; }
+        else {
+            uint8_t jmp_lo = peek_bank_byte(code_bank, code_base + off + 6);
+            uint8_t jmp_hi = peek_bank_byte(code_bank, code_base + off + 7);
+            if (jmp_lo != 0xFF || jmp_hi != 0xFF) { valid = 0; }
+            else {
+                // Read exit_pc from embedded LDA immediates
+                exit_pc = peek_bank_byte(code_bank, code_base + off + 11)
+                        | ((uint16_t)peek_bank_byte(code_bank, code_base + off + 15) << 8);
+            }
+        }
+        if (!valid) continue;
         
-        uint8_t off = base[255];
-        if (off == 0xFF) continue;
-        if (base[off+6] != 0xFF || base[off+7] != 0xFF) continue;
-        
-        // Read exit_pc from embedded LDA immediates
-        uint16_t exit_pc = base[off+11] | ((uint16_t)base[off+15] << 8);
-        
-        // Check if exit_pc is compiled
-        bankswitch_prg((exit_pc >> 14) + BANK_PC_FLAGS);
-        uint8_t flag = flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK];
+        // Check if exit_pc is compiled (peek from PC_FLAGS bank)
+        uint8_t flag = peek_bank_byte(
+            (exit_pc >> 14) + BANK_PC_FLAGS,
+            (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
         if (flag & RECOMPILED) continue;
         if ((flag & 0x1F) != code_bank) continue;
         
-        // Read native address
-        bankswitch_prg((exit_pc >> 13) + BANK_PC);
+        // Read native address (peek from PC bank)
         uint16_t pc_addr = (exit_pc << 1) & FLASH_BANK_MASK;
-        uint16_t na = flash_cache_pc[pc_addr] | (flash_cache_pc[pc_addr+1] << 8);
+        uint8_t pc_bank = (exit_pc >> 13) + BANK_PC;
+        uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr])
+                    | (peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr+1]) << 8);
         
-        // Patch
+        // Don't patch self-loops: the patchable epilogue's fast path is
+        // unconditional (CLC+BCC always taken), so patching it to jump back
+        // into the same block creates a tight infinite loop that never returns
+        // to the dispatcher (preventing interrupt handling and timing updates).
+        // Let self-referencing blocks go through the regular path instead.
+        if (na >= code_base && na < code_base + 256) continue;
+        
+        // Patch — flash_byte_program lives in WRAM, handles its own bankswitching.
+        // mapper_prg_bank is still 2 (set by trampoline), so flash_byte_program
+        // restores to bank 2 when done.
         flash_byte_program(code_base + off + 3, code_bank, 0);
         flash_byte_program(code_base + off + 6, code_bank, na & 0xFF);
         flash_byte_program(code_base + off + 7, code_bank, (na >> 8) & 0xFF);
@@ -228,6 +267,29 @@ void opt2_scan_and_patch_epilogues(void) {
     }
 }
 #endif  // ENABLE_PATCHABLE_EPILOGUE
+
+//============================================================================
+// Fixed-bank trampolines: switch to bank 2, call implementation, restore bank
+//============================================================================
+#pragma section default
+
+void opt2_sweep_pending_patches(void) {
+    uint8_t saved_bank = mapper_prg_bank;
+    bankswitch_prg(2);
+    opt2_sweep_pending_patches_b2();
+    bankswitch_prg(saved_bank);
+}
+
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+void opt2_scan_and_patch_epilogues(void) {
+    uint8_t saved_bank = mapper_prg_bank;
+    bankswitch_prg(2);
+    opt2_scan_and_patch_epilogues_b2();
+    bankswitch_prg(saved_bank);
+}
+#endif  // ENABLE_PATCHABLE_EPILOGUE
+
+
 
 //============================================================================
 // API: Get statistics (for debugging)

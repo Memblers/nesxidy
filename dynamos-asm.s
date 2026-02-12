@@ -147,7 +147,7 @@ endif
 
 
 ;=======================================================	
-	zpage	_status, _a, _x, _y, _pc
+	zpage	_status, _a, _x, _y, _pc, _sp
 	
 ;=======================================================	
 	
@@ -169,7 +169,7 @@ _haltwait:
 
 ;=======================================================	
 	section "data"
-	global _dispatch_on_pc, _flash_cache_index, _flash_dispatch_return
+	global _dispatch_on_pc, _flash_cache_index, _flash_dispatch_return, _flash_dispatch_return_no_regs
 	zpage addr_lo, addr_hi, target_bank, temp, temp2
 ;-------------------------------------------------------
 _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
@@ -257,11 +257,46 @@ _flash_dispatch_return:
 	stx _x
 	sty _y	
 	
+_flash_dispatch_return_no_regs:
+	; Entry point when _a, _x, _y are already saved (used by native JSR)
 	pla
 	sta _status
 
 	lda #0	; return 0 = executed from flash
 	rts	
+
+;-------------------------------------------------------
+; Native JSR trampoline (WRAM)
+; Called via hardware JSR from the native JSR template.
+; Loops: dispatch_on_pc → run compiled block → check if subroutine returned.
+; Returns via RTS when emulated SP >= saved SP (subroutine did RTS).
+; If a block needs recompile/interpret, bails — _pc is set to wherever
+; execution stopped; the caller template falls through to return to C.
+;
+; On entry:  _pc = target, _sp = post-push SP, _native_jsr_saved_sp = pre-push SP
+; On exit:   A = 0 if subroutine completed, non-zero if needs C
+;-------------------------------------------------------
+	global _native_jsr_trampoline
+_native_jsr_trampoline:
+.njsr_loop:
+	jsr _dispatch_on_pc		; dispatch current _pc block
+	; A = 0: block ran from flash
+	; A = 1: needs recompile
+	; A = 2: needs interpret
+	bne .njsr_exit			; non-zero → can't handle natively, bail to C
+	
+	; Block executed. Check if subroutine returned.
+	; If emulated SP >= saved_sp, the RTS has popped back to (or past) entry level.
+	lda _sp
+	cmp _native_jsr_saved_sp
+	bcc .njsr_loop			; SP < saved_sp → still in subroutine, dispatch next block
+	
+.njsr_exit:
+	; Exit to C. JMP (not RTS) because we can't return to flash —
+	; dispatch_on_pc may have switched the bank.
+	; flash_dispatch_return_no_regs pops the template's PHP, returns 0
+	; to the outer dispatch_on_pc's JSR .dispatch_addr_instruction.
+	jmp _flash_dispatch_return_no_regs
 	
 not_recompiled:
 	and #INTERPRETED
@@ -545,6 +580,136 @@ _opcode_6502_pla_end:
 _opcode_6502_pla_size:	db (_opcode_6502_pla_end - _opcode_6502_pla)
 
 ;=======================================================
+	section "text"
+	global _opcode_6502_jsr, _opcode_6502_jsr_size
+	global _opcode_6502_jsr_ret_hi, _opcode_6502_jsr_ret_lo
+	global _opcode_6502_jsr_tgt_lo, _opcode_6502_jsr_tgt_hi
+;-------------------------------------------------------
+; Native JSR template (34 bytes)
+; Pushes return address (pc+2) onto emulated stack, sets _pc to target,
+; exits via flash_dispatch_return_no_regs.
+; Caller must patch 4 bytes after copy:
+;   _opcode_6502_jsr_ret_hi  = offset of return addr high byte
+;   _opcode_6502_jsr_ret_lo  = offset of return addr low byte
+;   _opcode_6502_jsr_tgt_lo  = offset of target addr low byte
+;   _opcode_6502_jsr_tgt_hi  = offset of target addr high byte
+_opcode_6502_jsr:
+	php							; +0  save flags
+	sta _a						; +1  save A
+	stx _x						; +3  save X
+	sty _y						; +5  save Y
+	ldx _sp						; +7  load emulated SP
+_opcode_6502_jsr_ret_hi_loc:
+	lda #$FF					; +9  LDA #>(return_addr) - PATCH
+	sta _RAM_BASE + $100, x		; +11 push high byte
+	dex							; +14
+_opcode_6502_jsr_ret_lo_loc:
+	lda #$FF					; +15 LDA #<(return_addr) - PATCH
+	sta _RAM_BASE + $100, x		; +17 push low byte
+	dex							; +20
+	stx _sp						; +21 save updated SP
+_opcode_6502_jsr_tgt_lo_loc:
+	lda #$FF					; +23 LDA #<target - PATCH
+	sta _pc						; +25
+_opcode_6502_jsr_tgt_hi_loc:
+	lda #$FF					; +27 LDA #>target - PATCH
+	sta _pc+1					; +29
+	jmp _flash_dispatch_return_no_regs	; +31
+
+_opcode_6502_jsr_end:
+_opcode_6502_jsr_size:	db (_opcode_6502_jsr_end - _opcode_6502_jsr)
+; Patch offsets (byte index within template of the immediate operand)
+_opcode_6502_jsr_ret_hi: db (_opcode_6502_jsr_ret_hi_loc - _opcode_6502_jsr + 1)
+_opcode_6502_jsr_ret_lo: db (_opcode_6502_jsr_ret_lo_loc - _opcode_6502_jsr + 1)
+_opcode_6502_jsr_tgt_lo: db (_opcode_6502_jsr_tgt_lo_loc - _opcode_6502_jsr + 1)
+_opcode_6502_jsr_tgt_hi: db (_opcode_6502_jsr_tgt_hi_loc - _opcode_6502_jsr + 1)
+
+;=======================================================
+	section "text"
+	global _opcode_6502_njsr, _opcode_6502_njsr_size
+	global _opcode_6502_njsr_ret_hi, _opcode_6502_njsr_ret_lo
+	global _opcode_6502_njsr_tgt_lo, _opcode_6502_njsr_tgt_hi
+;-------------------------------------------------------
+; Native JSR template (37 bytes)
+; Same stack-push convention as emulated JSR, but instead of exiting to C,
+; JMPs to native_jsr_trampoline which loops through the subroutine's
+; compiled blocks entirely in WRAM. Trampoline exits via JMP to
+; flash_dispatch_return_no_regs (never returns to flash — avoids bank issues).
+;
+; The trampoline returns A=0 (subroutine completed) or A=non-zero (needs C).
+; Either way, _pc is already set to the correct continuation address.
+;
+; Caller must patch 4 bytes after copy (same patch offsets as emulated):
+;   _opcode_6502_njsr_ret_hi  = offset of return addr high byte
+;   _opcode_6502_njsr_ret_lo  = offset of return addr low byte
+;   _opcode_6502_njsr_tgt_lo  = offset of target addr low byte
+;   _opcode_6502_njsr_tgt_hi  = offset of target addr high byte
+_opcode_6502_njsr:
+	php							; +0  save flags (popped by flash_dispatch_return_no_regs)
+	sta _a						; +1  save A
+	stx _x						; +3  save X
+	sty _y						; +5  save Y
+	ldx _sp						; +7  load emulated SP
+	stx _native_jsr_saved_sp	; +9  save pre-push SP for trampoline (3 bytes - abs addr)
+_opcode_6502_njsr_ret_hi_loc:
+	lda #$FF					; +12 LDA #>(return_addr) - PATCH
+	sta _RAM_BASE + $100, x		; +14 push high byte
+	dex							; +17
+_opcode_6502_njsr_ret_lo_loc:
+	lda #$FF					; +18 LDA #<(return_addr) - PATCH
+	sta _RAM_BASE + $100, x		; +20 push low byte
+	dex							; +23
+	stx _sp						; +24 save updated SP
+_opcode_6502_njsr_tgt_lo_loc:
+	lda #$FF					; +26 LDA #<target - PATCH
+	sta _pc						; +28
+_opcode_6502_njsr_tgt_hi_loc:
+	lda #$FF					; +30 LDA #>target - PATCH
+	sta _pc+1					; +32
+	jmp _native_jsr_trampoline	; +34 trampoline loops then exits to C via WRAM
+	
+_opcode_6502_njsr_end:
+_opcode_6502_njsr_size:	db (_opcode_6502_njsr_end - _opcode_6502_njsr)
+; Patch offsets (byte index within template of the immediate operand)
+_opcode_6502_njsr_ret_hi: db (_opcode_6502_njsr_ret_hi_loc - _opcode_6502_njsr + 1)
+_opcode_6502_njsr_ret_lo: db (_opcode_6502_njsr_ret_lo_loc - _opcode_6502_njsr + 1)
+_opcode_6502_njsr_tgt_lo: db (_opcode_6502_njsr_tgt_lo_loc - _opcode_6502_njsr + 1)
+_opcode_6502_njsr_tgt_hi: db (_opcode_6502_njsr_tgt_hi_loc - _opcode_6502_njsr + 1)
+
+;=======================================================
+	section "text"
+	global _opcode_6502_nrts, _opcode_6502_nrts_size
+;-------------------------------------------------------
+; Native RTS template (32 bytes)
+; Pops return address from emulated stack, adds 1 (6502 convention),
+; stores to _pc, exits via flash_dispatch_return_no_regs.
+; No patching needed — this is pure fixed code.
+;
+; 6502 RTS: pull lo, pull hi, PC = (hi:lo) + 1.
+; pull16 reads (sp+1) as lo, (sp+2) as hi, then sp += 2.
+_opcode_6502_nrts:
+	php							; +0  save flags
+	sta _a						; +1  save A (clobbered by stack read)
+	stx _x						; +3  save X (clobbered by SP indexing)
+	sty _y						; +5  save Y
+	ldx _sp						; +7  load emulated SP
+	inx							; +9  sp+1
+	lda _RAM_BASE + $100, x		; +10 read lo byte
+	sta _pc						; +13
+	inx							; +15 sp+2
+	lda _RAM_BASE + $100, x		; +16 read hi byte
+	sta _pc+1					; +19
+	stx _sp						; +21 save updated SP
+	inc _pc						; +23 add 1 (RTS convention)
+	bne .nrts_no_carry			; +25
+	inc _pc+1					; +27
+.nrts_no_carry:
+	jmp _flash_dispatch_return_no_regs	; +29 exit (pops PHP, returns 0)
+
+_opcode_6502_nrts_end:
+_opcode_6502_nrts_size:	db (_opcode_6502_nrts_end - _opcode_6502_nrts)
+
+;=======================================================
 	section "data"
 	global _opcode_stx_zpy, _opcode_stx_zpy_size
 ;-------------------------------------------------------	; to add
@@ -570,6 +735,12 @@ _indy_value:	reserve 1
 _indy_zp:		reserve 1
 _indy_y:		reserve 1
 _indy_ptr:		reserve 2
+
+;=======================================================
+	section "zpage"
+	global _native_jsr_saved_sp
+;-------------------------------------------------------
+_native_jsr_saved_sp:	reserve 1
 
 ;=======================================================
 	section "data"
@@ -640,6 +811,43 @@ _sta_indy_handler:
 	; Restore Y for the emulated code
 	ldy _indy_y
 	
+	rts
+
+;=======================================================
+	section "data"
+	global _peek_bank_byte
+;-------------------------------------------------------
+; peek_bank_byte(uint8_t bank, uint16_t addr) -> uint8_t
+;
+; Reads a single byte from an arbitrary bank without corrupting the
+; caller's bank mapping.  Lives in WRAM so it is always reachable,
+; even when the switchable bank ($8000-$BFFF) has been changed.
+;
+; VBCC 6502 calling convention (2-byte register slots):
+;   r0 = bank       (8-bit, first arg — uses slot 0: r0=$00, r1=$01 unused)
+;   r2 = addr lo    (16-bit second arg, slot 1: r2=$02 low, r3=$03 high)
+;   r3 = addr hi
+;   return r0       (8-bit)
+;
+; Side effect: temporarily maps the target bank at $8000, then
+;              restores the previous mapper_prg_bank before returning.
+;
+_peek_bank_byte:
+	lda r0				; target bank
+	ora _mapper_chr_bank
+	sta $C000			; switch to target bank
+	lda r2
+	sta .peek_addr		; self-mod: set address low
+	lda r3
+	sta .peek_addr+1	; self-mod: set address high
+.peek_addr = * + 1
+	lda $FFFF			; read byte from target bank (self-mod address)
+	pha					; save the byte
+	lda _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000			; restore caller's bank
+	pla
+	sta r0				; return value
 	rts
 
 ;=======================================================	

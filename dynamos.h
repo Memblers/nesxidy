@@ -132,6 +132,7 @@ extern void decode_address_asm2();
 // Removed: dispatch_cache_asm(), dispatch_return() - RAM cache execution (dead code)
 __regsused("a/x/y") extern uint8_t dispatch_on_pc();
 __regsused("a/x/y") extern void flash_dispatch_return();
+__regsused("a/x/y") extern void flash_dispatch_return_no_regs();
 
 
 extern uint8_t addr_6502_indy[];
@@ -148,6 +149,28 @@ extern const uint8_t opcode_6502_pha_size;
 extern const uint8_t opcode_6502_pla_size;
 extern uint8_t opcode_6502_pha[];
 extern uint8_t opcode_6502_pla[];
+
+// Native JSR template and patch offsets
+extern const uint8_t opcode_6502_jsr_size;
+extern uint8_t opcode_6502_jsr[];
+extern const uint8_t opcode_6502_jsr_ret_hi;
+extern const uint8_t opcode_6502_jsr_ret_lo;
+extern const uint8_t opcode_6502_jsr_tgt_lo;
+extern const uint8_t opcode_6502_jsr_tgt_hi;
+
+// Native JSR template (trampoline mode) and patch offsets
+extern const uint8_t opcode_6502_njsr_size;
+extern uint8_t opcode_6502_njsr[];
+extern const uint8_t opcode_6502_njsr_ret_hi;
+extern const uint8_t opcode_6502_njsr_ret_lo;
+extern const uint8_t opcode_6502_njsr_tgt_lo;
+extern const uint8_t opcode_6502_njsr_tgt_hi;
+extern void native_jsr_trampoline();
+extern uint8_t native_jsr_saved_sp;
+
+// Native RTS template
+extern const uint8_t opcode_6502_nrts_size;
+extern uint8_t opcode_6502_nrts[];
 
 // STA (zp),Y native handler
 extern void sta_indy_handler();

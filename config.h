@@ -25,7 +25,12 @@
 // Cache persistence - skip flash_format() at boot if valid cache signature found
 // Reuses previously compiled blocks, eliminating cold-start recompilation cost.
 // Signature includes ROM hash to invalidate when game ROM changes.
-#define ENABLE_CACHE_PERSIST
+//#define ENABLE_CACHE_PERSIST
+
+// Native JSR mode - JSR calls a trampoline that runs subroutine blocks in a
+// tight native loop until RTS, avoiding C round-trips for each block dispatch.
+// When disabled, JSR uses standard 6502 emulation (push return addr, exit to C).
+//#define ENABLE_NATIVE_JSR
 
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)

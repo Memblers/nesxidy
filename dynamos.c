@@ -12,9 +12,10 @@
 #include "core/optimizer_v2_simple.h"
 #endif
 
-// Address mode table - must be in fixed bank (default section at $C000-$FFFF)
-// Cannot use table from bank1 during recompilation since flash banks are active
-const uint8_t addrmodes[256] = {
+// Address mode table - must be in accessible memory during recompilation.
+// Stored in WRAM (data section) which is always accessible regardless of bank switching.
+#pragma section data
+uint8_t addrmodes[256] = {
 /*        |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  |  A  |  B  |  C  |  D  |  E  |  F  |     */
 /* 0 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 0 */
 /* 1 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 1 */
@@ -33,6 +34,7 @@ const uint8_t addrmodes[256] = {
 /* E */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* E */
 /* F */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx  /* F */
 };
+#pragma section default
 
 // Address translation - must be in fixed bank (default section)
 // Cannot call into bank1 during recompilation since flash banks are active
@@ -899,16 +901,97 @@ uint8_t recompile_opcode()
 		
 		case opJSR:
 		{
-			cache_branch_pc_lo[cache_index] = read6502(pc+1);
-			cache_branch_pc_hi[cache_index] = read6502(pc+2);
 			enable_interpret();
+			break;
+			// JSR: push return address onto emulated stack, set _pc to target.
+			//
+			// Two modes:
+			//   Emulated JSR: pushes return addr, sets _pc, exits to C dispatcher.
+			//     C dispatches subroutine blocks one at a time through run_6502() loop.
+			//
+			//   Native JSR (ENABLE_NATIVE_JSR): same push/set, but JSRs to a WRAM
+			//     trampoline that loops through subroutine blocks natively until RTS.
+			//     Falls back to C if any block needs recompile/interpret.
+			//
+			// 6502 JSR convention: pushes (pc+2) hi then lo (address of last byte of JSR).
+			// RTS pops lo then hi, adds 1, jumps there -> lands on pc+3.
+			
+			uint16_t target = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
+			uint16_t return_addr = pc + 2;  // 6502 convention: push PC+2 (addr of last byte)
+			
+#ifdef ENABLE_NATIVE_JSR
+			// Native JSR mode: use trampoline template
+			if ((code_index + opcode_6502_njsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				// Copy native JSR template
+				for (uint8_t i = 0; i < opcode_6502_njsr_size; i++)
+					cache_code[cache_index][code_index+i] = opcode_6502_njsr[i];
+				
+				// Patch the 4 runtime values
+				cache_code[cache_index][code_index + opcode_6502_njsr_ret_hi] = (uint8_t)(return_addr >> 8);
+				cache_code[cache_index][code_index + opcode_6502_njsr_ret_lo] = (uint8_t)(return_addr);
+				cache_code[cache_index][code_index + opcode_6502_njsr_tgt_lo] = (uint8_t)(target);
+				cache_code[cache_index][code_index + opcode_6502_njsr_tgt_hi] = (uint8_t)(target >> 8);
+				
+				pc += 3;  // Advance past JSR instruction
+				code_index += opcode_6502_njsr_size;
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // End block at JSR
+				return cache_flag[cache_index];
+			}
+#else
+			// Emulated JSR mode: standard template
+			if ((code_index + opcode_6502_jsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				// Copy JSR template
+				for (uint8_t i = 0; i < opcode_6502_jsr_size; i++)
+					cache_code[cache_index][code_index+i] = opcode_6502_jsr[i];
+				
+				// Patch the 4 runtime values
+				cache_code[cache_index][code_index + opcode_6502_jsr_ret_hi] = (uint8_t)(return_addr >> 8);
+				cache_code[cache_index][code_index + opcode_6502_jsr_ret_lo] = (uint8_t)(return_addr);
+				cache_code[cache_index][code_index + opcode_6502_jsr_tgt_lo] = (uint8_t)(target);
+				cache_code[cache_index][code_index + opcode_6502_jsr_tgt_hi] = (uint8_t)(target >> 8);
+				
+				pc += 3;  // Advance past JSR instruction
+				code_index += opcode_6502_jsr_size;
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // End block at JSR
+				return cache_flag[cache_index];
+			}
+#endif
+			else
+			{
+				// Not enough space -- fall back to interpreter
+				cache_branch_pc_lo[cache_index] = read6502(pc+1);
+				cache_branch_pc_hi[cache_index] = read6502(pc+2);
+				enable_interpret();
+			}
 			break;
 		}
 		
 		case opJMPi:		
-		case opRTS:
 		case opRTI:
 		{
+			enable_interpret();
+		}
+		
+		case opRTS:
+		{
+			enable_interpret();
+			break;
+#ifdef ENABLE_NATIVE_JSR
+			// Native RTS: pop return addr from emulated stack, add 1, set _pc.
+			// No patching needed — pure fixed template.
+			if ((code_index + opcode_6502_nrts_size) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_nrts_size; i++)
+					cache_code[cache_index][code_index+i] = opcode_6502_nrts[i];
+				
+				pc += 1;  // Advance past RTS instruction
+				code_index += opcode_6502_nrts_size;
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // End block at RTS
+				return cache_flag[cache_index];
+			}
+#endif
 			enable_interpret();
 		}
 		

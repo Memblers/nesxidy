@@ -32,6 +32,13 @@
 // When disabled, JSR uses standard 6502 emulation (push return addr, exit to C).
 //#define ENABLE_NATIVE_JSR
 
+// Zero page index wrapping - when enabled, zpx/zpy instructions are interpreted
+// to preserve correct 6502 behavior where (zp_addr + index) wraps within $00-$FF.
+// When disabled (default), zpx/zpy are compiled as absolute indexed (absx/absy),
+// which is faster but won't wrap at the zero page boundary.
+// Most games don't rely on ZP index wrapping, so leaving this off is usually safe.
+//#define ENABLE_ZP_INDEX_WRAP
+
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)
 #define OPT_TRACK_CYCLES     0    // Track emulated cycles per block (requires OPT_BLOCK_METADATA)

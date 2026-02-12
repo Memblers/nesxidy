@@ -1150,7 +1150,23 @@ uint8_t recompile_opcode()
 				case zpx:
 				case zpy:
 				{
+#ifdef ENABLE_ZP_INDEX_WRAP
+					// Interpret to preserve correct 6502 ZP index wrapping:
+					// (zp_addr + X/Y) & 0xFF stays within zero page
 					enable_interpret();
+#else
+					// Remap zpx→absx / zpy→absy (opcode |= 0x08, same as zp→abs)
+					// Assumes program doesn't rely on ZP index wrap-around.
+					// Note: STX zpy (0x96) and STY zpx (0x94) have no abs,X/Y
+					// equivalent and are handled by explicit cases above.
+					cache_code[cache_index][code_index] |= 0x08;
+					uint16_t address = read6502(pc+1);
+					address += (uint16_t) &RAM_BASE[0];
+					cache_code[cache_index][code_index+1] = (uint8_t) address;
+					cache_code[cache_index][code_index+2] = (uint8_t) (address >> 8);
+					pc += 2;
+					code_index += 3;
+#endif
 					break;
 				}
 

@@ -1,5 +1,10 @@
 #pragma section text0
 
+#include "config.h"
+#ifdef ENABLE_STATIC_ANALYSIS
+#include "core/static_analysis.h"
+#endif
+
 /* Fake6502 CPU emulator core v1.1 *******************
  * (c)2011 Mike Chambers (miker00lz@gmail.com)       *
  *****************************************************
@@ -982,6 +987,7 @@ static void (*const optable[256])() = {
 };
 
 #ifdef TRACK_TICKS
+#pragma section rodata0
 //const uint32_t ticktable[256] = {
 const uint8_t ticktable[256] = {
 /*        |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  |  A  |  B  |  C  |  D  |  E  |  F  |     */
@@ -1002,6 +1008,7 @@ const uint8_t ticktable[256] = {
 /* E */      2,    6,    2,    8,    3,    3,    5,    5,    2,    2,    2,    2,    4,    4,    6,    6,  /* E */
 /* F */      2,    5,    2,    8,    4,    4,    6,    6,    2,    4,    2,    7,    4,    4,    7,    7   /* F */
 };
+#pragma section text0
 #endif
 
 
@@ -1083,6 +1090,14 @@ void interpret_6502() {
 
     (*addrtable[opcode])();
     (*optable[opcode])();
+
+#ifdef ENABLE_STATIC_ANALYSIS
+    // When JMP indirect ($6C) resolves a target, record it for the
+    // static analysis pass on next reset.  pc is now the resolved target.
+    if (opcode == 0x6C)
+        sa_record_indirect_target(pc, SA_TYPE_JMP_IND);
+#endif
+
 #ifdef TRACK_TICKS
     clockticks6502 += ticktable[opcode];
     if (penaltyop && penaltyaddr) clockticks6502++;

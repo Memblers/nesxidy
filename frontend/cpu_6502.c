@@ -28,6 +28,7 @@
 #define indx 11
 #define indy 12
 
+#pragma section rodata1
 // Addressing mode table - exported for dynamos.c to use
 // This is THE canonical table, dynamos.c should use this one
 const uint8_t cpu_6502_addrmodes[256] = {
@@ -50,6 +51,7 @@ const uint8_t cpu_6502_addrmodes[256] = {
 /* F */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx  /* F */
 };
 
+#pragma section bank1
 #undef imp
 #undef acc
 #undef imm

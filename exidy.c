@@ -7,6 +7,9 @@
 #include "dynamos.h"
 #include "mapper30.h"
 #include "core/optimizer.h"
+#ifdef ENABLE_STATIC_ANALYSIS
+#include "core/static_analysis.h"
+#endif
 
 
 // ******************************************************************************************
@@ -176,6 +179,12 @@ int main(void)
 	// Requires OPT_MIN_BLOCKS_DEBUG unique blocks before optimizer can run
 	opt_init(OPT_THRESHOLD_DEBUG, OPT_MIN_BLOCKS_DEBUG);
 #endif
+
+#ifdef ENABLE_STATIC_ANALYSIS
+	// Run one-time static analysis pass: BFS walk of ROM + batch compile.
+	// Must run after flash_format() and before the main loop.
+	sa_run();
+#endif
 	
 	interrupt_condition = 0;
 
@@ -250,22 +259,22 @@ uint8_t read6502(uint16_t address)
 		return RAM_BASE[address];	
 	if (address < 0x4000)
 	{
+		uint8_t saved_bank = mapper_prg_bank;
 		bankswitch_prg(1);
 		uint8_t temp = ROM_NAME[address - ROM_OFFSET];
-		bankswitch_prg(0);
+		bankswitch_prg(saved_bank);
 		return temp;
-		return ROM_NAME[address - ROM_OFFSET];
 	}
 	if (address < 0x4800)
 		return SCREEN_RAM_BASE[address - 0x4000];
 #ifdef ENABLE_CHR_ROM
 	if (address < 0x5000)
 	{
+		uint8_t saved_bank = mapper_prg_bank;
 		bankswitch_prg(1);
 		uint8_t temp = CHR_NAME[address - CHR_OFFSET];
-		bankswitch_prg(0);
-		return temp;		
-		return CHR_NAME[address - CHR_OFFSET];
+		bankswitch_prg(saved_bank);
+		return temp;
 	}
 #else	
 	if (address < 0x5000)
@@ -288,12 +297,12 @@ uint8_t read6502(uint16_t address)
 		//return 0xC0;
 
 	if (address >= 0xFF00)
-	{		
+	{
+		uint8_t saved_bank = mapper_prg_bank;
 		bankswitch_prg(1);
 		uint8_t temp = ROM_NAME[(address & 0x3FFF) - ROM_OFFSET];
-		bankswitch_prg(0);
+		bankswitch_prg(saved_bank);
 		return temp;
-		return ROM_NAME[(address & 0x3FFF) - ROM_OFFSET];
 	}
 	return IO8(address); // OK, just read whatever then	
 	
@@ -542,12 +551,25 @@ void convert_chr(uint8_t *source)
 // ==========================================================================
 #pragma section bank2
 
+#ifdef ENABLE_STATIC_ANALYSIS
+// Extern refs for SA_SECTOR_FIRST/LAST macros (defined in static_analysis.c)
+extern uint8_t sa_code_bitmap[];
+extern uint8_t sa_indirect_list[];
+#endif
+
 static void flash_format_b2(void)
 {	
 	for (uint8_t bank = 3; bank < 31; bank++)
 	{		
 		for (uint16_t sector = 0x8000; sector < 0xC000; sector += 0x1000)
 		{
+#ifdef ENABLE_STATIC_ANALYSIS
+			// Protect the static-analysis sectors in bank 3.
+			// SA bitmap, header, and indirect list are placed by the linker
+			// in bank 3.  Skip erasing those sectors so persisted data survives.
+			if (bank == 3 && sector >= SA_SECTOR_FIRST && sector <= SA_SECTOR_LAST)
+				continue;
+#endif
 			flash_sector_erase(sector, bank);			
 		}
 	}

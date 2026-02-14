@@ -651,12 +651,17 @@ uint8_t recompile_opcode()
 		{
 			op_buffer_1 = read6502(pc+1);
 			
-			// Only optimize backward branches for now
-			// Forward branches can corrupt memory - needs investigation
 			int8_t branch_offset = (int8_t) op_buffer_1;
 			if (branch_offset >= 0)
 			{
-				// Forward branch - interpret (don't optimize for now)
+				// Forward branch
+				uint16_t target_pc = pc + 2 + branch_offset;
+
+				// TODO: V2 patchable forward branch pattern.
+				// Disabled to save fixed-bank space.  The 21-byte inline
+				// pattern works correctly but adds ~260 bytes to b31.
+				// Re-enable once bank0 helper or bank2 trampoline is in place.
+				branch_forward++;
 				enable_interpret();
 			}
 			else

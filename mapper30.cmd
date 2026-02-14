@@ -224,6 +224,13 @@ SECTIONS
 	text0: { .=0x8000; *(text0) } >b0 AT>out
 	rodata0: { *(rodata0) } >b0 AT>out
         bank0: { *(bank0) } >b0 AT>out
+	init:   {*(init)}  >b0 AT>out
+	data:   {
+		*(data)
+	} >wram AT>out  /* VMA in WRAM ($6000+), load image in ROM output */
+	data_b0_skip: {
+		. = . + SIZEOF(data);
+	} >b0  /* Advance b0 cursor past data so fill0 pads correctly */
 	fill0: { .=0xC000; } >b0 AT>out
 
 	text1: { .=0x8000; *(text1) } >b1 AT>out
@@ -376,17 +383,15 @@ SECTIONS
         bank30: { *(bank30) } >b30 AT>out
 	fill30: { .=0xC000; } >b30 AT>out
   
-  text:   {*(text)} >b31 AT>out
+  text:   { . = 0xC000; *(text)} >b31 AT>out
   .dtors: { *(.dtors) } >b31 AT>out
   .ctors: { *(.ctors) } >b31 AT>out
   rodata: {*(rodata)}  >b31 AT>out
-  init:   {*(init)}  >b31 AT>out
-  data:   {*(data)} >wram AT>out  
 
   /* 1. Pad up to $FFF0 */
-  /* We use 0x10000 (end of memory) - 16 bytes (trampoline + vectors) */
+  /* Calculate padding to reach $FFF0 (trampoline location) */
   fill: { 
-      . = . + (0x10000 - 16 - ADDR(init) - SIZEOF(init) - SIZEOF(data));
+      . = 0xFFF0;
   } >b31 AT>out
 
   /* 2. Your trampoline segment at $FFF0 */
@@ -408,16 +413,14 @@ SECTIONS
   
   zpage (NOLOAD) : {*(zpage) *(zp1) *(zp2)} >zero
   nesram (NOLOAD): {*(nesram)} >ram
-  bss (NOLOAD): {*(bss)} >wram  
+  bss (NOLOAD): {*(bss)} >wram
 
-  __DS = ADDR(data);
-  __DE = ADDR(data) + SIZEOF(data);
-  __DC = LOADADDR(data)-0x88000;
-/*
+  /* vbcc's startup copies data from __DC (ROM) to __DS..__DE (WRAM).
+     Bank 0 is mapped at $8000-$BFFF at reset (mapper 30 register = 0),
+     so __DC is directly accessible without any bank switching. */
   __DS = ADDR(data);
   __DE = ADDR(data) + SIZEOF(data);
   __DC = LOADADDR(data);
-*/
 
   __STACK = 0x8000;
 

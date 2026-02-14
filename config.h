@@ -49,3 +49,43 @@
 //#define GAME_TARG_TEST_ROM
 //#define GAME_SPECTAR
 
+// --- Static analysis pass ---
+// Run a one-time BFS walk of the guest ROM at power-on to discover all
+// reachable code, then batch-compile discovered entry points before
+// starting execution.  Results are persisted in flash bank 3 so that
+// subsequent resets benefit from runtime-discovered indirect-jump targets.
+#define ENABLE_STATIC_ANALYSIS
+
+// After the walk, compile every discovered entry point (JSR targets first,
+// then remaining code in address order).  Gated separately so the walker
+// can be tested without the compile pass.
+// #define ENABLE_STATIC_COMPILE      // TODO: enable once fixed-bank space is freed
+
+// --- Pointer swizzling (per-game) ---
+// Replace Exidy high-byte immediates (LDA #$4x) with NES-translated values
+// at compile time, eliminating the runtime decode_address_asm call from
+// every subsequent (zp),Y use of the swizzled pointer.
+#ifdef GAME_SIDE_TRACK
+#define ENABLE_POINTER_SWIZZLE
+//#define ENABLE_POINTER_READBACK_GUARD
+#endif
+
+// Valid ROM address range for the static walker (game-dependent).
+// The walker will not follow control flow outside this range.
+#ifdef GAME_SIDE_TRACK
+#define ROM_ADDR_MIN  0x2800
+#define ROM_ADDR_MAX  0x3FFF
+#endif
+#ifdef GAME_TARG
+#define ROM_ADDR_MIN  0x1800
+#define ROM_ADDR_MAX  0x3FFF
+#endif
+#ifdef GAME_TARG_TEST_ROM
+#define ROM_ADDR_MIN  0x1800
+#define ROM_ADDR_MAX  0x3FFF
+#endif
+#ifdef GAME_SPECTAR
+#define ROM_ADDR_MIN  0x1000
+#define ROM_ADDR_MAX  0x3FFF
+#endif
+

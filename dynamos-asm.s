@@ -504,7 +504,29 @@ _indy_opcode:	; insert opcode
 _indy_operand:
 	db _decoded_address	; (decoded_address),y
 	rts
-	
+
+;=======================================================
+	section "data"
+	global _sta_indy_template, _sta_indy_template_size, _sta_indy_zp_patch
+;-------------------------------------------------------
+; STA ($zp),Y template — routes through write6502() for full correctness.
+; Compile-time: patch byte at _sta_indy_zp_patch with the ZP pointer address.
+; Runtime: saves state, calls _sta_indy_handler (which calls write6502),
+;          restores X from _x (handler saves it), restores A & flags.
+; - RELOCATABLE CODE - INTERNAL ACCESS ONLY -
+_sta_indy_template:
+	php				; save flags
+	pha				; save A (value to store) — handler reads from stack
+_sta_indy_zp_patch = * + 1
+	ldx #$FF			; patched: ZP pointer address
+	jsr _sta_indy_handler		; compute effective addr, call write6502
+	ldx _x				; restore real X (handler saved _x but trashed real X)
+	pla				; restore A
+	plp				; restore flags
+_sta_indy_template_end:
+
+_sta_indy_template_size: db (_sta_indy_template_end - _sta_indy_template)
+
 ;=======================================================
 	section "data"
 	global _addr_6502_indx, _addr_6502_indx_size, _indx_address_lo, _indx_address_hi, _indx_opcode_location

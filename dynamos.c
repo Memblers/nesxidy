@@ -576,6 +576,20 @@ void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 	// With metadata, code starts at offset 1 (after length prefix)
 	uint16_t native_addr = flash_code_address + code_address + BLOCK_PREFIX_SIZE;
 	
+	// Guard against flash AND corruption: flash can only clear bits (1→0).
+	// If this PC was already programmed as RECOMPILED (bit 7 clear, non-zero),
+	// reprogramming would AND the old and new values, corrupting both the
+	// native address and the bank/flag byte.  This happens when the same
+	// emulated PC appears in two different compiled blocks (e.g. a conditional
+	// branch merges into a shared instruction).  Skip the update — the
+	// existing entry is still valid.
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(pc_jump_flag_bank);
+	uint8_t current_flag = flash_cache_pc_flags[pc_jump_flag_address];
+	bankswitch_prg(saved_bank);
+	if (current_flag != 0xFF && !(current_flag & RECOMPILED))
+		return;  // already a valid RECOMPILED entry — don't corrupt it
+	
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t)native_addr);
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t)(native_addr >> 8));			
 	
@@ -1206,7 +1220,38 @@ uint8_t recompile_opcode()
 				}
 				case indy:
 				{
-					enable_interpret();
+					// Read-type indy opcodes (LDA, AND, ORA, EOR, ADC, SBC, CMP)
+					// can't be compiled: the ZP pointer may target ROM, which the
+					// address_decoding_table maps to bank1 ($8000-$BFFF).  At runtime
+					// the flash cache bank is mapped there, so the read would return
+					// compiled JIT bytes instead of ROM data.
+					// Only STA ($zp),Y ($91) is safe — writes target screen/char/RAM
+					// which all live in NES internal RAM or WRAM, never the bank window.
+					if (op_buffer_0 != 0x91)
+					{
+						enable_interpret();
+						break;
+					}
+
+					uint8_t zp_addr = read6502(pc+1);
+
+					if ((code_index + sta_indy_template_size + 3) < CODE_SIZE)
+					{
+						// Patch the ZP pointer address into the template, then copy
+						sta_indy_zp_patch = zp_addr;
+						for (uint8_t i = 0; i < sta_indy_template_size; i++)
+						{
+							cache_code[cache_index][code_index+i] = sta_indy_template[i];
+						}
+						pc += 2;
+						code_index += sta_indy_template_size;
+					}
+					else
+					{
+						cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
+						cache_flag[cache_index] &= ~READY_FOR_NEXT;
+						return cache_flag[cache_index];
+					}
 					break;
 				}
 				

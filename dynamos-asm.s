@@ -497,12 +497,44 @@ _addr_6502_indy_size:	db ( _addr_6502_indy_end - _addr_6502_indy)
 
 ;=======================================================
 	section "data"
-;-------------------------------------------------------	
+;-------------------------------------------------------
+; handle_io_indy — WRAM trampoline for read-type indy opcodes.
+; On entry: A = emulated A, flags = emulated flags, Y = emulated Y.
+; Checks if _decoded_address points into the switchable ROM bank
+; window ($8000-$BFFF).  If so, temporarily maps bank1 (ROM data)
+; before executing the opcode, then restores the flash cache bank.
+; On exit: A/flags reflect the opcode result, Y preserved.
 handle_io_indy:
-_indy_opcode:	; insert opcode
+	pha				; save emulated A
+	php				; save emulated flags
+	lda _decoded_address+1
+	cmp #$80
+	bcc .io_fast			; < $80: RAM/WRAM, no switch needed
+	cmp #$C0
+	bcs .io_fast			; >= $C0: fixed bank, no switch needed
+	; --- slow path: ROM is in the switchable bank window ---
+	lda #1
+	sta $C000			; map bank1 (ROM data)
+	plp				; restore emulated flags
+	pla				; restore emulated A
+	jsr .io_trampoline		; execute opcode (result in A/flags)
+	php				; save result flags
+	pha				; save result A
+	lda target_bank
+	sta $C000			; restore flash cache bank
+	pla				; restore result A
+	plp				; restore result flags
+	rts
+.io_fast:
+	; --- fast path: no bank switch needed ---
+	plp				; restore emulated flags
+	pla				; restore emulated A
+	; fall through
+.io_trampoline:
+_indy_opcode:	; patched with actual opcode
 	nop
 _indy_operand:
-	db _decoded_address	; (decoded_address),y
+	db _decoded_address		; (decoded_address),y
 	rts
 
 ;=======================================================

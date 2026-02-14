@@ -1220,37 +1220,49 @@ uint8_t recompile_opcode()
 				}
 				case indy:
 				{
-					// Read-type indy opcodes (LDA, AND, ORA, EOR, ADC, SBC, CMP)
-					// can't be compiled: the ZP pointer may target ROM, which the
-					// address_decoding_table maps to bank1 ($8000-$BFFF).  At runtime
-					// the flash cache bank is mapped there, so the read would return
-					// compiled JIT bytes instead of ROM data.
-					// Only STA ($zp),Y ($91) is safe — writes target screen/char/RAM
-					// which all live in NES internal RAM or WRAM, never the bank window.
-					if (op_buffer_0 != 0x91)
-					{
-						enable_interpret();
-						break;
-					}
-
 					uint8_t zp_addr = read6502(pc+1);
 
-					if ((code_index + sta_indy_template_size + 3) < CODE_SIZE)
+					if (op_buffer_0 == 0x91)
 					{
-						// Patch the ZP pointer address into the template, then copy
-						sta_indy_zp_patch = zp_addr;
-						for (uint8_t i = 0; i < sta_indy_template_size; i++)
+						// STA ($zp),Y: route through write6502() for side effects
+						if ((code_index + sta_indy_template_size + 3) < CODE_SIZE)
 						{
-							cache_code[cache_index][code_index+i] = sta_indy_template[i];
+							sta_indy_zp_patch = zp_addr;
+							for (uint8_t i = 0; i < sta_indy_template_size; i++)
+								cache_code[cache_index][code_index+i] = sta_indy_template[i];
+							pc += 2;
+							code_index += sta_indy_template_size;
 						}
-						pc += 2;
-						code_index += sta_indy_template_size;
+						else
+						{
+							cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
+							cache_flag[cache_index] &= ~READY_FOR_NEXT;
+							return cache_flag[cache_index];
+						}
 					}
 					else
 					{
-						cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
-						cache_flag[cache_index] &= ~READY_FOR_NEXT;
-						return cache_flag[cache_index];
+						// Read-type indy (LDA, AND, ORA, EOR, ADC, SBC, CMP):
+						// use generic indy template with bank-switch trampoline.
+						// handle_io_indy detects ROM addresses at runtime and
+						// temporarily switches to bank1 for the read.
+						uint16_t address = (uint16_t)zp_addr + (uint16_t)&RAM_BASE[0];
+						if ((code_index + addr_6502_indy_size + 3) < CODE_SIZE)
+						{
+							indy_opcode_location = op_buffer_0;
+							indy_address_lo = address;
+							indy_address_hi = address + 1;
+							for (uint8_t i = 0; i < addr_6502_indy_size; i++)
+								cache_code[cache_index][code_index+i] = addr_6502_indy[i];
+							pc += 2;
+							code_index += addr_6502_indy_size;
+						}
+						else
+						{
+							cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
+							cache_flag[cache_index] &= ~READY_FOR_NEXT;
+							return cache_flag[cache_index];
+						}
 					}
 					break;
 				}

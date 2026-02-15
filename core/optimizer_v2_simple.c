@@ -114,6 +114,21 @@ void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t
     (void)block_pc; (void)native_addr; (void)native_bank;
 }
 
+// Fixed-bank trampoline: bank2 code can safely call this to reach
+// opt2_record_pending_branch (bank1).  Must be in the fixed bank so
+// it's always reachable regardless of which swappable bank is mapped.
+void opt2_record_pending_branch_safe(uint16_t branch_offset_addr,
+                                     uint16_t jmp_operand_addr,
+                                     uint8_t code_bank,
+                                     uint16_t target_pc,
+                                     uint8_t branch_patch_value)
+{
+    uint8_t saved_bank = mapper_prg_bank;
+    bankswitch_prg(1);
+    opt2_record_pending_branch(branch_offset_addr, jmp_operand_addr,
+                               code_bank, target_pc, branch_patch_value);
+    bankswitch_prg(saved_bank);
+}
 
 // -------------------------------------------------------------------------
 // Epilogue scan cursor (fixed-bank / BSS)

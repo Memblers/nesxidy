@@ -724,15 +724,85 @@ static uint8_t recompile_opcode_b2()
 			int8_t branch_offset = (int8_t) op_buffer_1;
 			if (branch_offset >= 0)
 			{
-				// Forward branch
+				// Forward branch — same 21-byte V2 patchable pattern as
+				// backward-unknown.  The not-taken path falls through to +21
+				// and continues the block.  The taken path is patchable:
+				// initially goes to slow dispatch, opt2 patches to direct JMP
+				// once the target is compiled.
 				uint16_t target_pc = pc + 2 + branch_offset;
 
-				// TODO: V2 patchable forward branch pattern.
-				// Disabled to save fixed-bank space.  The 21-byte inline
-				// pattern works correctly but adds ~260 bytes to b31.
-				// Re-enable once bank0 helper or bank2 trampoline is in place.
+#ifdef ENABLE_OPTIMIZER_V2
+				uint16_t pattern_flash_address = flash_code_address;
+				uint8_t pattern_flash_bank = flash_code_bank;
+				uint8_t pattern_code_index = code_index;
+
+				branch_forward++;
+
+				if ((code_index + 21 + 14) >= CODE_SIZE)
+				{
+					enable_interpret();
+				}
+				else
+				{
+				// +0: Inverted branch $13 (skip 19 bytes to +21)
+				cache_code[cache_index][code_index+0] = invert_branch(op_buffer_0);
+				cache_code[cache_index][code_index+1] = 19;
+
+				// +2: Original branch $03 (to slow path at +7) - PATCHABLE to $00
+				cache_code[cache_index][code_index+2] = op_buffer_0;
+				cache_code[cache_index][code_index+3] = 3;
+
+				// +4: JMP $FFFF - fast path (operand PATCHABLE)
+				cache_code[cache_index][code_index+4] = 0x4C;
+				cache_code[cache_index][code_index+5] = 0xFF;
+				cache_code[cache_index][code_index+6] = 0xFF;
+
+				// +7: STA _a (slow path epilogue)
+				cache_code[cache_index][code_index+7] = 0x85;
+				cache_code[cache_index][code_index+8] = (uint8_t)((uint16_t)&a);
+
+				// +9: PHP
+				cache_code[cache_index][code_index+9] = 0x08;
+
+				// +10: LDA #<target_pc
+				cache_code[cache_index][code_index+10] = 0xA9;
+				cache_code[cache_index][code_index+11] = target_pc & 0xFF;
+
+				// +12: STA _pc
+				cache_code[cache_index][code_index+12] = 0x85;
+				cache_code[cache_index][code_index+13] = (uint8_t)((uint16_t)&pc);
+
+				// +14: LDA #>target_pc
+				cache_code[cache_index][code_index+14] = 0xA9;
+				cache_code[cache_index][code_index+15] = (target_pc >> 8) & 0xFF;
+
+				// +16: STA _pc+1
+				cache_code[cache_index][code_index+16] = 0x85;
+				cache_code[cache_index][code_index+17] = (uint8_t)(((uint16_t)&pc) + 1);
+
+				// +18: JMP flash_dispatch_return
+				cache_code[cache_index][code_index+18] = 0x4C;
+				cache_code[cache_index][code_index+19] = (uint8_t)((uint16_t)&flash_dispatch_return);
+				cache_code[cache_index][code_index+20] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+
+				// Record pending patch
+				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
+				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
+				opt2_record_pending_branch_safe(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
+
+				setup_flash_address(pc, flash_cache_index);
+				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+
+				pc += 2;
+				code_index += 21;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+				}
+#else
 				branch_forward++;
 				enable_interpret();
+#endif
 			}
 			else
 			{
@@ -974,8 +1044,6 @@ static uint8_t recompile_opcode_b2()
 		
 		case opJSR:
 		{
-			enable_interpret();
-			break;
 			// JSR: push return address onto emulated stack, set _pc to target.
 			//
 			// Two modes:

@@ -16,6 +16,9 @@
 // branch_patch_value: value to patch the branch offset to
 void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operand_addr, uint8_t code_bank, uint16_t target_pc, uint8_t branch_patch_value);
 
+// Fixed-bank trampoline: safely calls opt2_record_pending_branch from bank2
+void opt2_record_pending_branch_safe(uint16_t branch_offset_addr, uint16_t jmp_operand_addr, uint8_t code_bank, uint16_t target_pc, uint8_t branch_patch_value);
+
 // Called when a block is compiled - resolves any pending patches to this block
 // block_pc: 6502 PC of the block that was just compiled
 // native_addr: flash address where block starts

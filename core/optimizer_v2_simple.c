@@ -76,9 +76,9 @@ static uint8_t pending_count = 0;
 // Statistics
 //============================================================================
 
-static uint16_t stat_total = 0;
-static uint16_t stat_direct = 0;
-static uint16_t stat_pending = 0;
+uint16_t opt2_stat_total = 0;
+uint16_t opt2_stat_direct = 0;
+uint16_t opt2_stat_pending = 0;
 
 //============================================================================
 // The following function does NOT bankswitch, so it can live in bank1.
@@ -87,7 +87,7 @@ static uint16_t stat_pending = 0;
 #pragma section bank1
 
 void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operand_addr, uint8_t code_bank, uint16_t target_pc, uint8_t branch_patch_value) {
-    stat_total++;
+    opt2_stat_total++;
     if (pending_count >= MAX_PENDING_PATCHES) return;
     pp_branch_addr[pending_count] = branch_offset_addr;
     pp_jmp_addr[pending_count] = jmp_operand_addr;
@@ -95,7 +95,7 @@ void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operan
     pp_target_pc[pending_count] = target_pc;
     pp_patch_val[pending_count] = branch_patch_value;
     pending_count++;
-    stat_pending++;
+    opt2_stat_pending++;
 }
 
 //============================================================================
@@ -114,6 +114,13 @@ void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t
     (void)block_pc; (void)native_addr; (void)native_bank;
 }
 
+
+// -------------------------------------------------------------------------
+// Epilogue scan cursor (fixed-bank / BSS)
+// CRITICAL: Must NOT be inside bank2 pragma — static variables there
+// land in flash and are read-only at runtime (writes silently ignored).
+// -------------------------------------------------------------------------
+static uint16_t opt2_epilogue_cursor;
 
 //============================================================================
 // Bank 2 implementations
@@ -175,7 +182,7 @@ static void opt2_sweep_pending_patches_b2(void) {
             pp_bank[i] = pp_bank[pending_count];
             pp_target_pc[i] = pp_target_pc[pending_count];
             pp_patch_val[i] = pp_patch_val[pending_count];
-            stat_pending--;
+            opt2_stat_pending--;
             continue;
         }
         
@@ -185,14 +192,14 @@ static void opt2_sweep_pending_patches_b2(void) {
         flash_byte_program(pp_branch_addr[i], pp_bank[i], pp_patch_val[i]);
         flash_byte_program(pp_jmp_addr[i], pp_bank[i], na & 0xFF);
         flash_byte_program(pp_jmp_addr[i]+1, pp_bank[i], (na >> 8) & 0xFF);
-        stat_direct++;
+        opt2_stat_direct++;
         --pending_count;
         pp_branch_addr[i] = pp_branch_addr[pending_count];
         pp_jmp_addr[i] = pp_jmp_addr[pending_count];
         pp_bank[i] = pp_bank[pending_count];
         pp_target_pc[i] = pp_target_pc[pending_count];
         pp_patch_val[i] = pp_patch_val[pending_count];
-        stat_pending--;
+        opt2_stat_pending--;
     }
 }
 
@@ -200,14 +207,13 @@ static void opt2_sweep_pending_patches_b2(void) {
 #define EPILOGUE_SCAN_BATCH 32
 
 static void opt2_scan_and_patch_epilogues_b2(void) {
-    static uint16_t cursor = 0;
     uint8_t remaining = EPILOGUE_SCAN_BATCH;
     
     while (remaining--) {
-        if (cursor >= FLASH_CACHE_BLOCKS)
-            cursor = 0;
+        if (opt2_epilogue_cursor >= FLASH_CACHE_BLOCKS)
+            opt2_epilogue_cursor = 0;
         
-        uint16_t block = cursor++;
+        uint16_t block = opt2_epilogue_cursor++;
         
         // Check if block is in use (peek from block-flags bank)
         uint8_t bflag = peek_bank_byte(
@@ -263,7 +269,7 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
         flash_byte_program(code_base + off + 3, code_bank, 0);
         flash_byte_program(code_base + off + 6, code_bank, na & 0xFF);
         flash_byte_program(code_base + off + 7, code_bank, (na >> 8) & 0xFF);
-        stat_direct++;
+        opt2_stat_direct++;
     }
 }
 #endif  // ENABLE_PATCHABLE_EPILOGUE
@@ -301,10 +307,10 @@ void opt2_scan_and_patch_epilogues(void) {
 #pragma section bank1
 
 void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t *pending) {
-    *total = stat_total;
-    *direct = stat_direct;
+    *total = opt2_stat_total;
+    *direct = opt2_stat_direct;
     *stub = 0;
-    *pending = stat_pending;
+    *pending = opt2_stat_pending;
 }
 
 //============================================================================
@@ -313,7 +319,7 @@ void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t 
 
 void opt2_reset(void) {
     pending_count = 0;
-    stat_total = 0;
-    stat_direct = 0;
-    stat_pending = 0;
+    opt2_stat_total = 0;
+    opt2_stat_direct = 0;
+    opt2_stat_pending = 0;
 }

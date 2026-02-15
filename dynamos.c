@@ -76,15 +76,15 @@ __zpage uint16_t pc_end;
 __zpage extern uint8_t opcode;
 
 static uint16_t rom_remap_index = 0;
-static uint8_t debug_out[0x80];
 __zpage uint32_t cache_hits = 0;
 __zpage uint32_t cache_misses = 0;
-// Removed: cache_links, cache_links_found, cache_links_dropped (RAM cache linking)
+uint32_t cache_interpret = 0;       // dispatch returned "interpret"
 uint32_t cache_branches = 0;
 uint32_t branch_not_compiled = 0;   // target not yet compiled
 uint32_t branch_wrong_bank = 0;     // target in different flash bank
 uint32_t branch_out_of_range = 0;   // native offset > 127 bytes
 uint32_t branch_forward = 0;        // forward branch (can't optimize)
+uint16_t stats_frame = 0;            // debug stats frame counter
 //static uint16_t cache_index = 0;
 __zpage uint8_t cache_index = BLOCK_COUNT-1;
 //static uint8_t cache_active = 0;
@@ -115,14 +115,97 @@ __zpage uint16_t decoded_address;
 __zpage uint16_t encoded_address;
 __zpage uint8_t address_8;
 
-// Debug: track if we've passed initial startup
-__zpage uint8_t startup_complete = 0;
-__zpage uint16_t last_pc_before_reset = 0;
-
 uint32_t cache_branch_long = 0;
 __zpage uint8_t indy_hit_count = 0;  // Debug: count indy case hits
 
 extern	uint8_t flash_block_flags[];
+
+// -------------------------------------------------------------------------
+// Debug stats dump — writes key counters to a fixed WRAM region ($7F00)
+// so they can be inspected in Mesen's hex editor (WRAM tab, offset $1F00).
+//
+// Layout at $7F00 (all little-endian):
+//   +$00: 4B  cache_hits       (dispatch → ran compiled code)
+//   +$04: 4B  cache_misses     (dispatch → needed recompile)
+//   +$08: 4B  cache_interpret   (dispatch → interpreted)
+//   +$0C: 4B  cache_branches   (branch optimization attempts)
+//   +$10: 4B  branch_not_compiled
+//   +$14: 4B  branch_wrong_bank
+//   +$18: 4B  branch_out_of_range
+//   +$1C: 4B  branch_forward
+//   +$20: 2B  opt2_total       (V2 branch opportunities)
+//   +$22: 2B  opt2_direct      (V2 patches applied)
+//   +$24: 2B  opt2_pending     (V2 patches waiting)
+//   +$26: 2B  blocks_used      (flash cache blocks in use / 960)
+//   +$28: 2B  frame_counter    (incremented each dump)
+//   +$2A: 2B  magic ($DB, $57) (signature to confirm stats are live)
+//   +$2C: 2B  sa_blocks_total  (blocks compiled by static analysis)
+// -------------------------------------------------------------------------
+// Address $7E00 chosen: above BSS end (~$7A20) and below C stack ($8000-$200)
+#define DEBUG_STATS_ADDR  ((volatile uint8_t*)0x7E00)
+
+// Bank 2 implementation — no bankswitch_prg calls allowed.
+// Uses peek_bank_byte (WRAM helper) for cross-bank reads.
+#pragma section bank2
+static void debug_stats_update_b2(void)
+{
+	volatile uint8_t *p = DEBUG_STATS_ADDR;
+
+	// 32-bit counters (little-endian) — all in WRAM/ZP, safe from bank 2
+	*(volatile uint32_t*)(p + 0x00) = cache_hits;
+	*(volatile uint32_t*)(p + 0x04) = cache_misses;
+	*(volatile uint32_t*)(p + 0x08) = cache_interpret;
+	*(volatile uint32_t*)(p + 0x0C) = cache_branches;
+	*(volatile uint32_t*)(p + 0x10) = branch_not_compiled;
+	*(volatile uint32_t*)(p + 0x14) = branch_wrong_bank;
+	*(volatile uint32_t*)(p + 0x18) = branch_out_of_range;
+	*(volatile uint32_t*)(p + 0x1C) = branch_forward;
+
+	// 16-bit opt2 stats — read via peek_bank_byte from bank 1
+#ifdef ENABLE_OPTIMIZER_V2
+	extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+	extern uint16_t opt2_stat_total;
+	extern uint16_t opt2_stat_direct;
+	extern uint16_t opt2_stat_pending;
+	*(volatile uint16_t*)(p + 0x20) = peek_bank_byte(1, (uint16_t)&opt2_stat_total)
+	                                | (peek_bank_byte(1, (uint16_t)&opt2_stat_total + 1) << 8);
+	*(volatile uint16_t*)(p + 0x22) = peek_bank_byte(1, (uint16_t)&opt2_stat_direct)
+	                                | (peek_bank_byte(1, (uint16_t)&opt2_stat_direct + 1) << 8);
+	*(volatile uint16_t*)(p + 0x24) = peek_bank_byte(1, (uint16_t)&opt2_stat_pending)
+	                                | (peek_bank_byte(1, (uint16_t)&opt2_stat_pending + 1) << 8);
+#endif
+
+	// Count flash blocks in use — read via peek_bank_byte from bank 3
+	uint16_t used = 0;
+	for (uint16_t i = 0; i < FLASH_CACHE_BLOCKS; i++) {
+		if (!(peek_bank_byte(BANK_FLASH_BLOCK_FLAGS,
+		                     (uint16_t)&flash_block_flags[0] + i) & FLASH_AVAILABLE))
+			used++;
+	}
+	*(volatile uint16_t*)(p + 0x26) = used;
+
+	// Frame counter (global in BSS/WRAM — static in bank2 flash would be read-only)
+	extern uint16_t stats_frame;
+	*(volatile uint16_t*)(p + 0x28) = stats_frame++;
+
+	// Magic signature
+	p[0x2A] = 0xDB;
+	p[0x2B] = 0x57;
+
+	// SA compile counter
+	extern uint16_t sa_blocks_total;
+	*(volatile uint16_t*)(p + 0x2C) = sa_blocks_total;
+}
+#pragma section default
+
+// Fixed-bank trampoline — switches to bank 2, calls b2 impl, restores bank
+void debug_stats_update(void)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	debug_stats_update_b2();
+	bankswitch_prg(saved_bank);
+}
 
 uint16_t pc_jump_address;
 uint8_t pc_jump_bank;
@@ -157,27 +240,9 @@ search cache for entrance matching the current program counter
 
 */
 
-// Debug: reboot detection
-volatile uint8_t reboot_detected = 0;
-volatile uint16_t reboot_from_pc = 0;
-volatile uint16_t run_count = 0;
-
 void run_6502(void)
 {		
 	//cache_test();
-	
-	run_count++;
-	
-	// Debug: Detect reboot to $2800 after startup (after 1000 calls)
-	if (pc == 0x2800 && run_count > 1000)
-	{
-		// We've rebooted! Store where we came from
-		reboot_detected = 1;
-		reboot_from_pc = last_pc_before_reset;
-		// Infinite loop
-		for(;;) { __asm("nop"); }
-	}
-	last_pc_before_reset = pc;  // Track PC before each step
 	
 	// Debug: track when we enter IRQ handler
 	if (pc == 0x2B0E) pc_2b27_count++;
@@ -212,13 +277,14 @@ void run_6502(void)
 	{
 		case 2:  // interpret
 		{
+			cache_interpret++;
 			bankswitch_prg(0);
 			interpret_6502();
 			return;
 		}
 		case 0:  // executed from flash
 		{
-			// Optimization now triggered after recompilation, not execution
+			cache_hits++;
 			return;
 		}
 		case 1:  // recompile needed
@@ -507,17 +573,6 @@ pc_jump_flag_address = (address & FLASH_BANK_MASK);
 
 //============================================================================================================
 
-void flash_cache_pc_flag_clear(uint16_t emulated_pc, uint8_t flag)
-{
-	lookup_pc_jump_flag(emulated_pc);
-	bankswitch_prg(pc_jump_flag_bank);	
-	uint8_t data = flash_cache_pc_flags[pc_jump_flag_address];
-	data &= flag;
-	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, data);	
-}
-
-//============================================================================================================
-
 uint8_t flash_cache_search(uint16_t emulated_pc)
 {	
 	lookup_pc_jump_flag(emulated_pc);
@@ -553,21 +608,6 @@ uint16_t flash_cache_select()
 	}
 	return 0;
 }	
-
-//============================================================================================================
-void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx)
-{
-	uint8_t i;
-	for (i = 0; (i < FLASH_CACHE_BLOCK_SIZE) && (i < cache_vpc[src_idx]); i++)
-	{
-		uint8_t data = cache_code[src_idx][i];
-		flash_byte_program((flash_code_address + i), flash_code_bank, data);
-	}
-	// JMP to flash_dispatch_return is now embedded in the block epilogue
-		
-	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
-	flash_byte_program((uint16_t) &flash_block_flags[0] + dest_idx, mapper_prg_bank, flash_block_flags[dest_idx] & ~FLASH_AVAILABLE);
-}
 
 //============================================================================================================
 

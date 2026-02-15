@@ -190,10 +190,8 @@ void cache_bit_enable(uint16_t addr);
 uint8_t cache_bit_check(uint16_t addr);
 uint16_t flash_cache_select();
 void flash_cache_pc_update(uint8_t code_address, uint8_t flags);
-void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx);
 void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
 uint8_t flash_cache_search(uint16_t emulated_pc);
-void flash_cache_pc_flag_clear(uint16_t emulated_pc, uint8_t flag);
 
 enum 6502op
 {

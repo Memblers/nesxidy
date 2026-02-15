@@ -56,10 +56,9 @@
 // subsequent resets benefit from runtime-discovered indirect-jump targets.
 #define ENABLE_STATIC_ANALYSIS
 
-// After the walk, compile every discovered entry point (JSR targets first,
-// then remaining code in address order).  Gated separately so the walker
-// can be tested without the compile pass.
-// #define ENABLE_STATIC_COMPILE      // TODO: enable once fixed-bank space is freed
+// After the walk, compile every discovered entry point in address order.
+// Gated separately so the walker can be tested without the compile pass.
+#define ENABLE_STATIC_COMPILE
 
 // --- Pointer swizzling (per-game) ---
 // Replace Exidy high-byte immediates (LDA #$4x) with NES-translated values

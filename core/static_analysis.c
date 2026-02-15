@@ -147,6 +147,16 @@ static uint8_t sa_indirect_exists(uint16_t target_pc)
     return 0;
 }
 
+// -------------------------------------------------------------------------
+// BFS queue state (fixed-bank / BSS)
+// CRITICAL: These MUST NOT be in bank2 — static variables in a bank2
+// pragma section land in flash and are read-only at runtime.
+// Placed here in the default section so vbcc puts them in BSS (WRAM).
+// -------------------------------------------------------------------------
+static uint8_t q_head;
+static uint8_t q_tail;
+static uint8_t q_count;
+
 // =========================================================================
 // Bank 2 section — BFS walker, header helpers, queue, opcode helpers
 // =========================================================================
@@ -227,11 +237,9 @@ static void sa_write_header(void)
 // -------------------------------------------------------------------------
 // BFS queue (bank2) — uses cache_code[0] as backing store.
 // Circular queue with head/tail indices.
+// BFS queue uses cache_code[0] as backing store (WRAM).
+// q_head, q_tail, q_count are in BSS (see above, before bank2 pragma).
 // -------------------------------------------------------------------------
-
-static uint8_t q_head;
-static uint8_t q_tail;
-static uint8_t q_count;
 
 #define Q_BUF   ((uint8_t*)cache_code[0])
 
@@ -367,13 +375,10 @@ static void sa_walk_b2(void)
 
             uint8_t len = opcode_length(op);
 
-            // Mark all bytes of this instruction
-            // (first byte already marked by enqueue; mark rest)
-            for (uint8_t b = 1; b < len; b++)
-            {
-                if (cur_pc + b <= ROM_ADDR_MAX)
-                    sa_bitmap_mark(cur_pc + b);
-            }
+            // Operand bytes are NOT marked in the bitmap.
+            // Only instruction head bytes are marked (by sa_enqueue_if_valid
+            // or by the continuation logic after JSR/branch/default).
+            // This ensures sa_compile_b2 only sees entry points.
 
             // Classify control flow
             switch (op)
@@ -452,10 +457,15 @@ next_path:
 
 static void sa_compile_b2(void)
 {
-    // Walk the bitmap in address order.
-    // For each address that's marked as known code, check if it's already
-    // compiled (via PC flags table).  If not, trigger a compile block.
-    uint16_t addr = ROM_ADDR_MIN;
+    // Scan the bitmap starting from pc (set by the caller in sa_run).
+    // Find the next address that is known code but not yet compiled,
+    // set pc to it, and return.  If nothing found, set pc = 0xFFFF.
+    //
+    // The scan cursor is managed by sa_run (fixed bank, guaranteed WRAM)
+    // and passed in/out through pc.  This avoids any static-local-in-bank2
+    // issue where variables land in flash and can't be written at runtime.
+
+    uint16_t addr = pc;
 
     while (addr <= ROM_ADDR_MAX)
     {
@@ -466,43 +476,24 @@ static void sa_compile_b2(void)
             continue;
         }
 
-        // Check if already compiled (peek PC flags)
+        // Check if already processed (compiled or interpreted).
         uint8_t flag = peek_bank_byte(
             (addr >> 14) + BANK_PC_FLAGS,
             (uint16_t)&flash_cache_pc_flags[addr & FLASH_BANK_MASK]);
 
-        if (!(flag & RECOMPILED))
+        if (flag != 0xFF)
         {
-            // Already compiled — skip
             addr++;
             continue;
         }
 
-        // Need to compile.  Allocate a flash block.
-        // flash_cache_select is in the fixed bank — we need to trampoline.
-        // But since we're calling read6502 which also bank-switches, and
-        // recompile_opcode is in the fixed bank, this should work.
-
-        // We need to be in the default bank context for recompile_opcode.
-        // Since sa_compile_b2 is called from the bank2 trampoline, and
-        // recompile_opcode + flash_cache_select are in the fixed bank,
-        // we temporarily switch back.  However, this is tricky because
-        // we're executing from bank2 — we can't just call bankswitch_prg.
-        //
-        // Instead, we'll set up the pc and let the fixed-bank code handle
-        // the actual compilation.  We store the next address to compile
-        // and return to the trampoline which calls the compile function
-        // from the fixed bank.
-
-        // Can't call recompile_opcode from bank2 (it's in default/fixed).
-        // Break out and let the fixed-bank trampoline handle one block
-        // at a time.
+        // Found an uncompiled known-code address.
         pc = addr;
-        return;     // trampoline will handle compilation
+        return;
     }
 
-    // All addresses processed — signal completion
-    pc = 0xFFFF;    // sentinel: no more addresses to compile
+    // All addresses processed
+    pc = 0xFFFF;
 }
 
 #endif // ENABLE_STATIC_COMPILE
@@ -517,14 +508,14 @@ static void sa_compile_b2(void)
 
 #ifdef ENABLE_STATIC_COMPILE
 
+uint16_t sa_blocks_total = 0;
+
 static uint8_t sa_compile_one_block(void)
 {
     flash_cache_index = flash_cache_select();
     if (!flash_cache_index)
         return 0;           // cache full
     flash_cache_index--;
-
-    uint16_t entry_pc = pc;
 
     // Use cache index 0 as temporary compilation buffer (same as run_6502)
     cache_index = 0;
@@ -638,12 +629,18 @@ static uint8_t sa_compile_one_block(void)
 
 #endif // ENABLE_STATIC_COMPILE
 
+#pragma section default
+
 // -------------------------------------------------------------------------
 // Main entry point — fixed-bank trampoline
 // -------------------------------------------------------------------------
 
 void sa_run(void)
 {
+    // Save pc — reset6502() has already set it to the entry point.
+    // The batch compile pass uses pc as scratch, so we must restore it.
+    uint16_t saved_pc = pc;
+
     // Run BFS walker (bank 2) — includes header check and sector erase
     uint8_t saved_bank = mapper_prg_bank;
     bankswitch_prg(2);
@@ -651,45 +648,67 @@ void sa_run(void)
     bankswitch_prg(saved_bank);
 
 #ifdef ENABLE_STATIC_COMPILE
-    // Batch compilation: iterate bitmap from bank2, compile from fixed bank.
-    // sa_compile_b2 sets pc to the next address to compile, or 0xFFFF when done.
-    for (;;)
+    // Batch compilation: scan bitmap from fixed bank, compile each hit.
+    // All bitmap/flag reads use peek_bank_byte (WRAM helper), so this
+    // runs entirely from the fixed bank — no bank2 trampoline needed.
+    for (uint16_t scan_cursor = ROM_ADDR_MIN; scan_cursor <= ROM_ADDR_MAX; scan_cursor++)
     {
-        saved_bank = mapper_prg_bank;
-        bankswitch_prg(2);
-        sa_compile_b2();
-        bankswitch_prg(saved_bank);
+        // Check bitmap: is this address known code?
+        if (sa_bitmap_is_unknown(scan_cursor))
+            continue;
 
-        if (pc == 0xFFFF)
-            break;              // all done
+        // Check PC flags: already compiled or interpreted?
+        uint8_t flag = peek_bank_byte(
+            (scan_cursor >> 14) + BANK_PC_FLAGS,
+            (uint16_t)&flash_cache_pc_flags[scan_cursor & FLASH_BANK_MASK]);
+        if (flag != 0xFF)
+            continue;   // already handled
 
-        // pc is set to the address to compile — do it from fixed bank
+        // Compile this address
+        pc = scan_cursor;
         if (!sa_compile_one_block())
             break;              // cache full
+        sa_blocks_total++;
 
 #ifdef ENABLE_OPTIMIZER_V2
-        // Periodic sweep during batch compile
+        // Periodic sweep: drain pending-branch queue only.
+        // This is safe — each block is fully compiled (code + epilogue +
+        // flags) before we get here.  We MUST drain periodically because
+        // the queue is only 32 entries and batch compile generates many
+        // branches.
+        //
+        // Epilogue scanning is deliberately NOT done here.  The epilogue
+        // scanner patches the BCC offset (4→0) to enable the fast-JMP
+        // path.  During batch compile this caused corrupt graphics —
+        // likely because the scanner's static cursor and batch-size
+        // interact poorly with partially-filled flash banks.  The final
+        // full epilogue sweep after the loop is sufficient.
         static uint8_t sa_blocks_compiled = 0;
         if (++sa_blocks_compiled >= 8)
         {
             sa_blocks_compiled = 0;
             opt2_sweep_pending_patches();
-#ifdef ENABLE_PATCHABLE_EPILOGUE
-            opt2_scan_and_patch_epilogues();
-#endif
         }
 #endif
     }
 
-    // Final sweep to resolve any remaining patches from the batch
+    // Final sweep after all blocks are compiled
 #ifdef ENABLE_OPTIMIZER_V2
     opt2_sweep_pending_patches();
 #ifdef ENABLE_PATCHABLE_EPILOGUE
-    opt2_scan_and_patch_epilogues();
+    // Full epilogue scan — cover ALL compiled blocks, not just one
+    // EPILOGUE_SCAN_BATCH.  FLASH_CACHE_BLOCKS/32 calls to scan them all,
+    // rounded up.
+    for (uint16_t s = 0; s < (FLASH_CACHE_BLOCKS + 31) / 32; s++)
+        opt2_scan_and_patch_epilogues();
 #endif
 #endif
 
 #endif // ENABLE_STATIC_COMPILE
+
+    // Restore pc — reset6502() set it to the game's entry point before
+    // sa_run() was called.  The batch compile pass clobbered it.
+    pc = saved_pc;
 }
 
 // -------------------------------------------------------------------------

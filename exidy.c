@@ -65,6 +65,7 @@ extern uint8_t sta_indy_interpret_count;  // Debug: from fake6502.c
 extern uint8_t pc_2b27_count;  // Debug: from dynamos.c - count PC=$2B27
 extern uint16_t last_indy_ea;  // Debug: from fake6502.c
 extern uint8_t sta_5000_count;  // Debug: STA to $5000 specifically
+extern void debug_stats_update(void);  // Debug: write stats to WRAM $7E00
 
 __zpage uint8_t interrupt_condition;
 __zpage uint8_t character_ram_updated = 0;
@@ -194,9 +195,6 @@ int main(void)
 	frame_time = 0;
 #endif	
 	
-	// DEBUG: Frame counter
-	uint16_t frame_count = 0;
-	
 	while (1)
 	{
 		#ifdef INTERPRETER_ONLY
@@ -211,17 +209,13 @@ int main(void)
 		opt_check_trigger();
 #endif
 		
-		// DEBUG: Write frame counter to $6000-$6001
-		volatile uint8_t *debug_ptr = (volatile uint8_t*)0x0100;
-		debug_ptr[0] = (frame_count >> 8) & 0xFF;
-		debug_ptr[1] = frame_count & 0xFF;
-		frame_count++;
 		
 #ifndef TRACK_TICKS		
 		if (frame_time++ > FRAME_LENGTH)
 		{
 			frame_time = 0;
-			interrupt_condition |= FLAG_EXIDY_IRQ;			
+			interrupt_condition |= FLAG_EXIDY_IRQ;
+			debug_stats_update();
 			render_video();
 		}
 #else
@@ -229,16 +223,19 @@ int main(void)
 		{
 			frame_time += FRAME_LENGTH;
 			interrupt_condition |= FLAG_EXIDY_IRQ;
+			debug_stats_update();
 			render_video();
 		}	
 #endif	
-		// IRQ triggering disabled for now - I flag management needs work
-		// if (!(status & FLAG_INTERRUPT) && (interrupt_condition & FLAG_EXIDY_IRQ))
-		// {
-		// 	interrupt_condition &= ~FLAG_EXIDY_IRQ;
-		// 	irq_count++;
-		// 	irq6502();			
-		// }
+		// Fire emulated IRQ once per frame (if interrupts are enabled).
+		// The Side Track IRQ handler at $2B0E is the game's frame tick —
+		// it updates sprites, runs game logic, and reads $5103 to ack.
+		if (!(status & FLAG_INTERRUPT) && (interrupt_condition & FLAG_EXIDY_IRQ))
+		{
+			interrupt_condition &= ~FLAG_EXIDY_IRQ;
+			irq_count++;
+			irq6502();
+		}
 	}
 	
 	return 0;

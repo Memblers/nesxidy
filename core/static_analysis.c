@@ -55,6 +55,7 @@ extern uint8_t flash_cache_pc[];
 extern const uint8_t flash_cache_pc_flags[];
 __zpage extern uint8_t a;
 extern void flash_dispatch_return(void);
+extern void cross_bank_dispatch(void);
 
 #ifdef ENABLE_OPTIMIZER_V2
 #include "optimizer_v2_simple.h"
@@ -78,13 +79,18 @@ uint8_t sa_header[SA_HEADER_SIZE];
 // Indirect-target list: 3 bytes each (lo, hi, type)
 uint8_t sa_indirect_list[SA_INDIRECT_MAX * 3];
 
+// Subroutine table: 3 bytes each (addr_lo, addr_hi, flags)
+// Populated during BFS walk, flags set during stack-safety analysis.
+uint8_t sa_subroutine_list[SA_SUBROUTINE_MAX * 3];
+
 #pragma section default
 
 // Shorthand macros for the flash addresses of the bank3 variables.
 // These resolve to the linker-assigned addresses at compile time.
-#define SA_BITMAP_BASE   ((uint16_t)&sa_code_bitmap[0])
-#define SA_HEADER_BASE   ((uint16_t)&sa_header[0])
-#define SA_INDIRECT_BASE ((uint16_t)&sa_indirect_list[0])
+#define SA_BITMAP_BASE      ((uint16_t)&sa_code_bitmap[0])
+#define SA_HEADER_BASE      ((uint16_t)&sa_header[0])
+#define SA_INDIRECT_BASE    ((uint16_t)&sa_indirect_list[0])
+#define SA_SUBROUTINE_BASE  ((uint16_t)&sa_subroutine_list[0])
 
 // -------------------------------------------------------------------------
 // Bitmap helpers (fixed bank) — called from sa_record_indirect_target
@@ -160,6 +166,10 @@ static uint8_t q_count;
 // =========================================================================
 // Bank 2 section — BFS walker, header helpers, queue, opcode helpers
 // =========================================================================
+
+// Forward declaration: sa_record_subroutine is in the fixed bank section
+// but called from sa_walk_b2 (bank2).  Bank2 at $8000 can call fixed at $C000+.
+void sa_record_subroutine(uint16_t target);
 
 #pragma section bank2
 
@@ -297,6 +307,11 @@ static void sa_enqueue_if_valid(uint16_t addr)
 }
 
 // -------------------------------------------------------------------------
+// Forward declarations for bank2 static helpers (defined later in file)
+// -------------------------------------------------------------------------
+static uint8_t is_invalid_opcode(uint8_t op);
+
+// -------------------------------------------------------------------------
 // Invalid opcode check (bank2)
 // -------------------------------------------------------------------------
 
@@ -327,9 +342,10 @@ static void sa_walk_b2(void)
     if (!sa_check_header())
     {
         // Erase the SA sectors in bank 3.
+        // Range covers bitmap + header + indirect list + subroutine table.
         {
             uint16_t base = SA_BITMAP_BASE & 0xF000;
-            uint16_t end  = (SA_INDIRECT_BASE + SA_INDIRECT_MAX * 3 - 1) | 0x0FFF;
+            uint16_t end  = (SA_SUBROUTINE_BASE + SA_SUBROUTINE_MAX * 3 - 1) | 0x0FFF;
             for (uint16_t sector = base; sector <= end; sector += 0x1000)
                 flash_sector_erase(sector, BANK_FLASH_BLOCK_FLAGS);
         }
@@ -405,6 +421,7 @@ static void sa_walk_b2(void)
                     uint16_t target = read6502(cur_pc + 1)
                                     | ((uint16_t)read6502(cur_pc + 2) << 8);
                     sa_enqueue_if_valid(target);
+                    sa_record_subroutine(target);
                     // Continue linear walk after JSR (return address = cur_pc+3)
                     cur_pc += 3;
                     if (cur_pc <= ROM_ADDR_MAX)
@@ -549,7 +566,7 @@ static uint8_t sa_compile_one_block(void)
 
         if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
             flash_cache_pc_update(code_index_old, INTERPRETED);
-        else if (instr_len)
+        else if (instr_len || pc != pc_old)
         {
             flash_cache_pc_update(code_index_old, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
@@ -586,9 +603,9 @@ static uint8_t sa_compile_one_block(void)
         cache_code[0][code_index++] = (uint8_t)(exit_pc >> 8);
         cache_code[0][code_index++] = 0x85;     // STA _pc+1
         cache_code[0][code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
-        cache_code[0][code_index++] = 0x4C;     // JMP dispatch_return
-        cache_code[0][code_index++] = (uint8_t)((uint16_t)&flash_dispatch_return);
-        cache_code[0][code_index++] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+        cache_code[0][code_index++] = 0x4C;     // JMP cross_bank_dispatch
+        cache_code[0][code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+        cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 #else
         cache_code[0][code_index++] = 0x85;     // STA _a
         cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);
@@ -601,9 +618,9 @@ static uint8_t sa_compile_one_block(void)
         cache_code[0][code_index++] = (uint8_t)(exit_pc >> 8);
         cache_code[0][code_index++] = 0x85;     // STA _pc+1
         cache_code[0][code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
-        cache_code[0][code_index++] = 0x4C;     // JMP dispatch_return
-        cache_code[0][code_index++] = (uint8_t)((uint16_t)&flash_dispatch_return);
-        cache_code[0][code_index++] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+        cache_code[0][code_index++] = 0x4C;     // JMP cross_bank_dispatch
+        cache_code[0][code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+        cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 #endif
 
         for (uint8_t i = epilogue_start; i < code_index; i++)
@@ -632,6 +649,180 @@ static uint8_t sa_compile_one_block(void)
 #pragma section default
 
 // -------------------------------------------------------------------------
+// Subroutine table helpers (fixed bank) — record JSR targets and analyze
+// stack safety.  These live in the fixed bank ($C000+) and are called
+// from bank2 code (BFS walker) and from sa_run (fixed bank).
+// -------------------------------------------------------------------------
+
+// Opcode length helper (fixed bank copy for stack-safety analysis)
+static uint8_t sa_opcode_length(uint8_t opcode)
+{
+    uint8_t mode = addrmodes[opcode];
+    switch (mode)
+    {
+        case imp: case acc:
+            return 1;
+        case imm: case zp: case zpx: case zpy:
+        case rel: case indx: case indy:
+            return 2;
+        case abso: case absx: case absy: case ind:
+            return 3;
+        default:
+            return 1;
+    }
+}
+
+// Invalid opcode check (fixed bank copy for stack-safety analysis)
+static uint8_t sa_is_invalid_opcode(uint8_t op)
+{
+    uint8_t lo = op & 0x0F;
+    uint8_t hi = op >> 4;
+    if (lo == 0x02 && hi != 0x0A) return 1;
+    if (lo == 0x03 || lo == 0x07 || lo == 0x0F) return 1;
+    if (lo == 0x0B && hi != 0x0A && hi != 0x0C && hi != 0x0E) return 1;
+    return 0;
+}
+
+// Record a JSR target in the subroutine table (if not already present).
+// Called from the JSR case of sa_walk_b2 (bank2 can call fixed bank).
+// Flags byte left as 0xFF — filled by stack-safety analysis after walk.
+void sa_record_subroutine(uint16_t target)
+{
+    uint8_t lo = (uint8_t)target;
+    uint8_t hi = (uint8_t)(target >> 8);
+
+    for (uint16_t i = 0; i < SA_SUBROUTINE_MAX; i++)
+    {
+        uint16_t entry_addr = SA_SUBROUTINE_BASE + i * 3;
+        uint8_t slot_lo = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 0);
+
+        // Empty slot (erased flash) — not found, insert here
+        if (slot_lo == 0xFF)
+        {
+            uint8_t slot_hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+            if (slot_hi == 0xFF)
+            {
+                flash_byte_program(entry_addr + 0, BANK_FLASH_BLOCK_FLAGS, lo);
+                flash_byte_program(entry_addr + 1, BANK_FLASH_BLOCK_FLAGS, hi);
+                return;
+            }
+        }
+
+        // Already recorded?
+        if (slot_lo == lo)
+        {
+            uint8_t slot_hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+            if (slot_hi == hi)
+                return;
+        }
+    }
+    // Table full — silently drop
+}
+
+// -------------------------------------------------------------------------
+// Stack-safety analysis — walks each subroutine body checking for
+// TSX ($BA) or TXS ($9A).  A subroutine without these is "stack-clean"
+// and safe for native JSR/RTS.
+//
+// Simple linear scan from entry to RTS.  Follows JMPs and branches
+// within the ROM range.  Does NOT recurse into nested JSRs (those have
+// their own entries and are analyzed separately).
+// -------------------------------------------------------------------------
+
+static uint8_t sa_analyze_subroutine_safety(uint16_t entry)
+{
+    // Linear scan with a small local stack for branch targets.
+    // 16 pending branch targets should handle any reasonable subroutine.
+    uint16_t pending[16];
+    uint8_t pending_count = 0;
+    uint16_t cur = entry;
+    uint16_t steps = 0;
+
+    for (;;)
+    {
+        while (cur >= ROM_ADDR_MIN && cur <= ROM_ADDR_MAX && steps < 256)
+        {
+            steps++;
+            uint8_t op = read6502(cur);
+
+            // Check for TSX ($BA) or TXS ($9A)
+            if (op == 0xBA || op == 0x9A)
+                return SA_SUB_DIRTY;
+
+            if (sa_is_invalid_opcode(op))
+                break;
+
+            uint8_t len = sa_opcode_length(op);
+
+            switch (op)
+            {
+                case 0x4C:  // JMP abs
+                {
+                    uint16_t t = read6502(cur + 1)
+                               | ((uint16_t)read6502(cur + 2) << 8);
+                    cur = t;
+                    continue;
+                }
+
+                case 0x6C:  // JMP indirect — can't follow
+                case 0x60:  // RTS
+                case 0x40:  // RTI
+                case 0x00:  // BRK
+                    goto next_path;
+
+                case 0x20:  // JSR — skip, continue after
+                    cur += 3;
+                    continue;
+
+                // Conditional branches
+                case 0x10: case 0x30: case 0x50: case 0x70:
+                case 0x90: case 0xB0: case 0xD0: case 0xF0:
+                {
+                    int8_t offset = (int8_t)read6502(cur + 1);
+                    uint16_t bt = cur + 2 + offset;
+                    if (pending_count < 16)
+                        pending[pending_count++] = bt;
+                    cur += 2;
+                    continue;
+                }
+
+                default:
+                    cur += len;
+                    continue;
+            }
+        }
+next_path:
+        if (pending_count == 0)
+            break;
+        cur = pending[--pending_count];
+    }
+
+    return SA_SUB_CLEAN;
+}
+
+// Run stack-safety analysis on all recorded subroutines.
+static void sa_analyze_all_subroutines(void)
+{
+    for (uint16_t i = 0; i < SA_SUBROUTINE_MAX; i++)
+    {
+        uint16_t entry_addr = SA_SUBROUTINE_BASE + i * 3;
+        uint8_t lo = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 0);
+        uint8_t hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+
+        if (lo == 0xFF && hi == 0xFF)
+            break;  // end of list
+
+        uint8_t flags = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 2);
+        if (flags != SA_SUB_EMPTY)
+            continue;   // already analyzed
+
+        uint16_t sub_addr = lo | ((uint16_t)hi << 8);
+        uint8_t result = sa_analyze_subroutine_safety(sub_addr);
+        flash_byte_program(entry_addr + 2, BANK_FLASH_BLOCK_FLAGS, result);
+    }
+}
+
+// -------------------------------------------------------------------------
 // Main entry point — fixed-bank trampoline
 // -------------------------------------------------------------------------
 
@@ -646,6 +837,11 @@ void sa_run(void)
     bankswitch_prg(2);
     sa_walk_b2();
     bankswitch_prg(saved_bank);
+
+    // Analyze stack safety for all discovered subroutines.
+    // Runs from fixed bank; uses peek_bank_byte/flash_byte_program
+    // for flash access and read6502 for ROM reads.
+    sa_analyze_all_subroutines();
 
 #ifdef ENABLE_STATIC_COMPILE
     // Batch compilation: scan bitmap from fixed bank, compile each hit.
@@ -714,6 +910,41 @@ void sa_run(void)
     // Restore pc — reset6502() set it to the game's entry point before
     // sa_run() was called.  The batch compile pass clobbered it.
     pc = saved_pc;
+}
+
+// -------------------------------------------------------------------------
+// Subroutine lookup — check if a JSR target is stack-clean.
+// Lives in the fixed bank so it can be called from recompile_opcode
+// in any bank context.  Returns SA_SUB_CLEAN, SA_SUB_DIRTY, or
+// SA_SUB_EMPTY (not found).
+// -------------------------------------------------------------------------
+
+uint8_t sa_subroutine_lookup(uint16_t target_pc)
+{
+    uint8_t lo = (uint8_t)target_pc;
+    uint8_t hi = (uint8_t)(target_pc >> 8);
+
+    for (uint16_t i = 0; i < SA_SUBROUTINE_MAX; i++)
+    {
+        uint16_t entry_addr = SA_SUBROUTINE_BASE + i * 3;
+        uint8_t slot_lo = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 0);
+
+        // Empty slot — end of populated entries
+        if (slot_lo == 0xFF)
+        {
+            uint8_t slot_hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+            if (slot_hi == 0xFF)
+                return SA_SUB_EMPTY;
+        }
+
+        if (slot_lo == lo)
+        {
+            uint8_t slot_hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+            if (slot_hi == hi)
+                return peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 2);
+        }
+    }
+    return SA_SUB_EMPTY;
 }
 
 // -------------------------------------------------------------------------

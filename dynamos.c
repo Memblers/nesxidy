@@ -8,6 +8,7 @@
 #include "exidy.h"
 #include "mapper30.h"
 #include "core/optimizer.h"
+#include "core/static_analysis.h"
 #ifdef ENABLE_OPTIMIZER_V2
 #include "core/optimizer_v2_simple.h"
 #endif
@@ -367,7 +368,7 @@ void run_6502(void)
 		
 		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
 			flash_cache_pc_update(code_index_old, INTERPRETED);
-		else if (instr_len)
+		else if (instr_len || pc != pc_old)
 		{
 			flash_cache_pc_update(code_index_old, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
@@ -419,9 +420,9 @@ void run_6502(void)
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(exit_pc >> 8));
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _pc+1
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&pc) + 1));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP dispatch_return
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&flash_dispatch_return));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP cross_bank_dispatch
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&cross_bank_dispatch));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8));
 		// Epilogue chaining is handled by opt2_scan_and_patch_epilogues() — no queue needed
 		// Write epilogue start offset to byte 255 so scanner can find it directly
 		flash_byte_program(flash_code_address + 255, flash_code_bank, epilogue_flash_offset);
@@ -439,8 +440,8 @@ void run_6502(void)
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA zp
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&pc) + 1));
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&flash_dispatch_return));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&cross_bank_dispatch));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8));
 #endif  // ENABLE_PATCHABLE_EPILOGUE
 		
 		// 4. Write metadata: exit_pc
@@ -487,9 +488,9 @@ void run_6502(void)
 		cache_code[0][code_index++] = (uint8_t)(exit_pc >> 8);
 		cache_code[0][code_index++] = 0x85;  // STA _pc+1
 		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
-		cache_code[0][code_index++] = 0x4C;  // JMP dispatch_return
-		cache_code[0][code_index++] = (uint8_t)((uint16_t)&flash_dispatch_return);
-		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+		cache_code[0][code_index++] = 0x4C;  // JMP cross_bank_dispatch
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 #else
 		// Standard epilogue (14 bytes) — built in buffer, written by loop below
 		cache_code[0][code_index++] = 0x85;  // STA _a
@@ -503,9 +504,9 @@ void run_6502(void)
 		cache_code[0][code_index++] = (uint8_t)(exit_pc >> 8);
 		cache_code[0][code_index++] = 0x85;  // STA _pc+1
 		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
-		cache_code[0][code_index++] = 0x4C;  // JMP dispatch_return
-		cache_code[0][code_index++] = (uint8_t)((uint16_t)&flash_dispatch_return);
-		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+		cache_code[0][code_index++] = 0x4C;  // JMP cross_bank_dispatch
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 #endif  // ENABLE_PATCHABLE_EPILOGUE
 
 		// Write epilogue to flash
@@ -780,10 +781,10 @@ static uint8_t recompile_opcode_b2()
 				cache_code[cache_index][code_index+16] = 0x85;
 				cache_code[cache_index][code_index+17] = (uint8_t)(((uint16_t)&pc) + 1);
 
-				// +18: JMP flash_dispatch_return
+				// +18: JMP cross_bank_dispatch
 				cache_code[cache_index][code_index+18] = 0x4C;
-				cache_code[cache_index][code_index+19] = (uint8_t)((uint16_t)&flash_dispatch_return);
-				cache_code[cache_index][code_index+20] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+				cache_code[cache_index][code_index+19] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+				cache_code[cache_index][code_index+20] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 
 				// Record pending patch
 				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
@@ -888,10 +889,10 @@ static uint8_t recompile_opcode_b2()
 				cache_code[cache_index][code_index+16] = 0x85;  // STA zp
 				cache_code[cache_index][code_index+17] = (uint8_t)(((uint16_t)&pc) + 1);
 				
-				// +18: JMP flash_dispatch_return
+				// +18: JMP cross_bank_dispatch
 				cache_code[cache_index][code_index+18] = 0x4C;  // JMP
-				cache_code[cache_index][code_index+19] = (uint8_t)((uint16_t)&flash_dispatch_return);
-				cache_code[cache_index][code_index+20] = (uint8_t)(((uint16_t)&flash_dispatch_return) >> 8);
+				cache_code[cache_index][code_index+19] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+				cache_code[cache_index][code_index+20] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 				
 				// Record pending patch:
 				// - Branch offset at +3 (patch $03 -> $00)
@@ -1046,59 +1047,55 @@ static uint8_t recompile_opcode_b2()
 		{
 			// JSR: push return address onto emulated stack, set _pc to target.
 			//
-			// Two modes:
-			//   Emulated JSR: pushes return addr, sets _pc, exits to C dispatcher.
-			//     C dispatches subroutine blocks one at a time through run_6502() loop.
+			// Stack-clean subroutines (no TSX/TXS) use the native JSR template
+			// which loops through subroutine blocks via a WRAM trampoline
+			// without returning to C between each block dispatch.
 			//
-			//   Native JSR (ENABLE_NATIVE_JSR): same push/set, but JSRs to a WRAM
-			//     trampoline that loops through subroutine blocks natively until RTS.
-			//     Falls back to C if any block needs recompile/interpret.
+			// Stack-dirty or unknown subroutines use the emulated JSR template
+			// which exits to the C dispatcher after pushing the return address.
 			//
 			// 6502 JSR convention: pushes (pc+2) hi then lo (address of last byte of JSR).
 			// RTS pops lo then hi, adds 1, jumps there -> lands on pc+3.
 			
 			uint16_t target = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
 			uint16_t return_addr = pc + 2;  // 6502 convention: push PC+2 (addr of last byte)
-			
+
 #ifdef ENABLE_NATIVE_JSR
-			// Native JSR mode: use trampoline template
-			if ((code_index + opcode_6502_njsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			// Check if subroutine is stack-clean — use native trampoline template
+			if (sa_subroutine_lookup(target) == SA_SUB_CLEAN &&
+			    (code_index + opcode_6502_njsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
 			{
-				// Copy native JSR template
 				for (uint8_t i = 0; i < opcode_6502_njsr_size; i++)
 					cache_code[cache_index][code_index+i] = opcode_6502_njsr[i];
 				
-				// Patch the 4 runtime values
 				cache_code[cache_index][code_index + opcode_6502_njsr_ret_hi] = (uint8_t)(return_addr >> 8);
 				cache_code[cache_index][code_index + opcode_6502_njsr_ret_lo] = (uint8_t)(return_addr);
 				cache_code[cache_index][code_index + opcode_6502_njsr_tgt_lo] = (uint8_t)(target);
 				cache_code[cache_index][code_index + opcode_6502_njsr_tgt_hi] = (uint8_t)(target >> 8);
 				
-				pc += 3;  // Advance past JSR instruction
+				pc += 3;
 				code_index += opcode_6502_njsr_size;
-				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // End block at JSR
+				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}
-#else
-			// Emulated JSR mode: standard template
+			else
+#endif
+			// Emulated JSR: standard template (stack-dirty, unknown, or no SA)
 			if ((code_index + opcode_6502_jsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
 			{
-				// Copy JSR template
 				for (uint8_t i = 0; i < opcode_6502_jsr_size; i++)
 					cache_code[cache_index][code_index+i] = opcode_6502_jsr[i];
 				
-				// Patch the 4 runtime values
 				cache_code[cache_index][code_index + opcode_6502_jsr_ret_hi] = (uint8_t)(return_addr >> 8);
 				cache_code[cache_index][code_index + opcode_6502_jsr_ret_lo] = (uint8_t)(return_addr);
 				cache_code[cache_index][code_index + opcode_6502_jsr_tgt_lo] = (uint8_t)(target);
 				cache_code[cache_index][code_index + opcode_6502_jsr_tgt_hi] = (uint8_t)(target >> 8);
 				
-				pc += 3;  // Advance past JSR instruction
+				pc += 3;
 				code_index += opcode_6502_jsr_size;
-				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // End block at JSR
+				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}
-#endif
 			else
 			{
 				// Not enough space -- fall back to interpreter
@@ -1109,31 +1106,30 @@ static uint8_t recompile_opcode_b2()
 			break;
 		}
 		
-		case opJMPi:		
+		case opJMPi:
 		case opRTI:
 		{
 			enable_interpret();
+			break;
 		}
 		
 		case opRTS:
 		{
-			enable_interpret();
-			break;
-#ifdef ENABLE_NATIVE_JSR
-			// Native RTS: pop return addr from emulated stack, add 1, set _pc.
-			// No patching needed — pure fixed template.
-			if ((code_index + opcode_6502_nrts_size) < CODE_SIZE)
+			// Compiled RTS: pop return addr from emulated stack, add 1, set _pc,
+			// exit to dispatcher.  The native JSR trampoline detects the SP
+			// change and knows the subroutine returned.
+			if ((code_index + opcode_6502_nrts_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
 			{
 				for (uint8_t i = 0; i < opcode_6502_nrts_size; i++)
 					cache_code[cache_index][code_index+i] = opcode_6502_nrts[i];
 				
-				pc += 1;  // Advance past RTS instruction
+				pc += 1;
 				code_index += opcode_6502_nrts_size;
-				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // End block at RTS
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}
-#endif
 			enable_interpret();
+			break;
 		}
 		
 		case opTSX:
@@ -1235,9 +1231,8 @@ static uint8_t recompile_opcode_b2()
 
 		case opNOP:
 		{
-			cache_code[cache_index][code_index] = opNOP;
+			// Skip NOP — no code emitted, just advance pc
 			pc += 1;
-			code_index += 1;
 			cache_flag[cache_index] |= READY_FOR_NEXT;
 			return cache_flag[cache_index];
 		}

@@ -133,6 +133,7 @@ extern void decode_address_asm2();
 __regsused("a/x/y") extern uint8_t dispatch_on_pc();
 __regsused("a/x/y") extern void flash_dispatch_return();
 __regsused("a/x/y") extern void flash_dispatch_return_no_regs();
+__regsused("a/x/y") extern void cross_bank_dispatch();
 
 
 extern uint8_t addr_6502_indy[];

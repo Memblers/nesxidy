@@ -599,6 +599,7 @@ void convert_chr(uint8_t *source)
 // Extern refs for SA_SECTOR_FIRST/LAST macros (defined in static_analysis.c)
 extern uint8_t sa_code_bitmap[];
 extern uint8_t sa_indirect_list[];
+extern uint8_t sa_subroutine_list[];
 #endif
 
 static void flash_format_b2(void)

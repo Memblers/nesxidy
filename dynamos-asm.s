@@ -169,6 +169,31 @@ _haltwait:
 
 ;=======================================================	
 	section "data"
+	global _cross_bank_dispatch
+;-------------------------------------------------------
+; Cross-bank dispatch trampoline (fixed bank)
+; Called from patchable epilogue slow path when exit_pc is in a different
+; flash bank.  Instead of returning to C and re-entering dispatch_on_pc,
+; saves regs/status and re-dispatches directly — eliminating the C round-trip.
+;
+; On entry (from epilogue slow path):
+;   _a, _pc already saved by epilogue
+;   X, Y still live from guest code
+;   Stack: [epilogue's PHP] [.dispatch_addr JSR return] [run_6502 return]
+;
+; Pops PHP and the stale .dispatch_addr return, then JMPs to dispatch_on_pc
+; which creates a fresh JSR .dispatch_addr for the next block.
+_cross_bank_dispatch:
+	stx _x				; save X (not saved by epilogue)
+	sty _y				; save Y (not saved by epilogue)
+	pla					; pop epilogue's PHP
+	sta _status
+	pla					; pop stale .dispatch_addr return lo
+	pla					; pop stale .dispatch_addr return hi
+	jmp _dispatch_on_pc	; re-dispatch _pc without C round-trip
+
+;=======================================================	
+	section "data"
 	global _dispatch_on_pc, _flash_cache_index, _flash_dispatch_return, _flash_dispatch_return_no_regs
 	zpage addr_lo, addr_hi, target_bank, temp, temp2
 ;-------------------------------------------------------
@@ -267,11 +292,11 @@ _flash_dispatch_return_no_regs:
 
 ;-------------------------------------------------------
 ; Native JSR trampoline (WRAM)
-; Called via hardware JSR from the native JSR template.
+; Called via JMP from the native JSR template (inside a dispatched block).
 ; Loops: dispatch_on_pc → run compiled block → check if subroutine returned.
 ; Returns via RTS when emulated SP >= saved SP (subroutine did RTS).
-; If a block needs recompile/interpret, bails — _pc is set to wherever
-; execution stopped; the caller template falls through to return to C.
+; The RTS returns to the outer dispatch_on_pc's JSR .dispatch_addr_instruction.
+; If a block needs recompile/interpret, bails with A=non-zero.
 ;
 ; On entry:  _pc = target, _sp = post-push SP, _native_jsr_saved_sp = pre-push SP
 ; On exit:   A = 0 if subroutine completed, non-zero if needs C
@@ -291,12 +316,23 @@ _native_jsr_trampoline:
 	cmp _native_jsr_saved_sp
 	bcc .njsr_loop			; SP < saved_sp → still in subroutine, dispatch next block
 	
+	; Subroutine completed (SP restored). _pc and _status are already
+	; set correctly by the nrts template's inner dispatch. Pop the
+	; njsr template's PHP without clobbering _status, then return 0.
+	pla						; discard njsr's PHP (don't overwrite _status!)
+	lda #0					; return 0 = executed from flash
+	rts						; return to outer dispatch_on_pc's JSR .dispatch_addr_instruction
+	
 .njsr_exit:
-	; Exit to C. JMP (not RTS) because we can't return to flash —
-	; dispatch_on_pc may have switched the bank.
-	; flash_dispatch_return_no_regs pops the template's PHP, returns 0
-	; to the outer dispatch_on_pc's JSR .dispatch_addr_instruction.
-	jmp _flash_dispatch_return_no_regs
+	; Bail to C — subroutine hit something that needs recompile/interpret.
+	; _status was already saved by the last block's epilogue.
+	; Pop njsr's PHP without clobbering _status, return non-zero.
+	pla						; discard njsr's PHP
+	; A still has non-zero result from dispatch_on_pc (1=recompile, 2=interpret)
+	; But dispatch_on_pc already returned here with non-zero A, and we did
+	; lda _sp / cmp which changed A. We need to return non-zero to the caller.
+	lda #1					; return non-zero = needs C handling
+	rts
 	
 not_recompiled:
 	and #INTERPRETED

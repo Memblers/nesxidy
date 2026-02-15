@@ -59,6 +59,27 @@
 #define SA_SIG_MAGIC_3      0x01    // version 1
 
 // -------------------------------------------------------------------------
+// Subroutine table — persisted in flash bank 3.
+// Records every JSR target discovered by the BFS walker, plus a
+// stack-safety flag set after analysis.  Layout per entry (3 bytes):
+//   byte 0: addr_lo
+//   byte 1: addr_hi
+//   byte 2: flags  (0xFF = empty, see SA_SUB_* below)
+//
+// Flash semantics: erased = 0xFF.  A single program operation can
+// clear any combination of bits (1→0).  Entries are written once:
+//   1. Program addr_lo, addr_hi  (marks slot as populated)
+//   2. Program flags byte        (result of stack-safety analysis)
+// -------------------------------------------------------------------------
+#define SA_SUBROUTINE_MAX   128             // 128 entries × 3 bytes = 384 bytes
+
+// Flag values for byte 2 of each subroutine entry.
+// These are written as a whole byte in a single flash program operation.
+#define SA_SUB_EMPTY        0xFF    // erased / unused slot
+#define SA_SUB_CLEAN        0x00    // stack-clean (no TSX/TXS in body)
+#define SA_SUB_DIRTY        0x01    // stack-dirty (has TSX or TXS)
+
+// -------------------------------------------------------------------------
 // BFS walker queue — lives in WRAM during the analysis pass.
 // Reuses flash_compile_buffer (cache_code[0], 256 bytes) as a circular
 // queue of 2-byte PC entries => 128 slots.
@@ -74,10 +95,10 @@
 
 // Start/end sector addresses for protecting SA data during flash_format.
 // Sectors are 4KB aligned ($x000).  sa_code_bitmap is the first SA variable
-// placed in bank3; sa_indirect_list is the last.
-// Usage: declare extern for sa_code_bitmap and sa_indirect_list first.
+// placed in bank3; sa_subroutine_list is the last.
+// Usage: declare extern for sa_code_bitmap and sa_subroutine_list first.
 #define SA_SECTOR_FIRST  ((uint16_t)&sa_code_bitmap[0] & 0xF000)
-#define SA_SECTOR_LAST   (((uint16_t)&sa_indirect_list[0] + SA_INDIRECT_MAX * 3 - 1) & 0xF000)
+#define SA_SECTOR_LAST   (((uint16_t)&sa_subroutine_list[0] + SA_SUBROUTINE_MAX * 3 - 1) & 0xF000)
 
 // -------------------------------------------------------------------------
 // Public API  (all in bank 2)
@@ -93,5 +114,10 @@ void sa_run(void);
 // flash list.  Called from the interpreter when JMP ($xxxx) is executed.
 // Safe to call from any bank (lives in the fixed bank).
 void sa_record_indirect_target(uint16_t target_pc, uint8_t type);
+
+// Check if a JSR target is stack-clean.  Returns SA_SUB_CLEAN,
+// SA_SUB_DIRTY, or SA_SUB_EMPTY (target not found in subroutine table).
+// Lives in the fixed bank — safe to call from recompile_opcode in any bank.
+uint8_t sa_subroutine_lookup(uint16_t target_pc);
 
 #endif // STATIC_ANALYSIS_H

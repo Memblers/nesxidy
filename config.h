@@ -27,10 +27,14 @@
 // Signature includes ROM hash to invalidate when game ROM changes.
 //#define ENABLE_CACHE_PERSIST
 
-// Native JSR mode - JSR calls a trampoline that runs subroutine blocks in a
-// tight native loop until RTS, avoiding C round-trips for each block dispatch.
-// When disabled, JSR uses standard 6502 emulation (push return addr, exit to C).
-//#define ENABLE_NATIVE_JSR
+// Native JSR mode - for stack-clean subroutines (no TSX/TXS), JSR calls a
+// WRAM trampoline that dispatches subroutine blocks in a tight assembly loop
+// until RTS, avoiding C round-trips for each block dispatch.
+// Requires ENABLE_STATIC_ANALYSIS for the subroutine stack-safety table.
+// Disable this if a game misbehaves (e.g. stack tricks the analysis missed).
+#ifdef ENABLE_STATIC_ANALYSIS
+#define ENABLE_NATIVE_JSR
+#endif
 
 // Zero page index wrapping - when enabled, zpx/zpy instructions are interpreted
 // to preserve correct 6502 behavior where (zp_addr + index) wraps within $00-$FF.

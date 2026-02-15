@@ -572,28 +572,41 @@ pc_jump_flag_bank = ((address >> 14) + BANK_PC_FLAGS);\
 pc_jump_flag_address = (address & FLASH_BANK_MASK);
 
 //============================================================================================================
+// ==========================================================================
+// flash_cache_search — moved to bank 2 (appears to be dead code, but kept).
+// Saves ~271 bytes of fixed-bank space.
+// ==========================================================================
+#pragma section bank2
 
-uint8_t flash_cache_search(uint16_t emulated_pc)
+static uint8_t flash_cache_search_b2(uint16_t emulated_pc)
 {	
 	lookup_pc_jump_flag(emulated_pc);
-	bankswitch_prg(pc_jump_flag_bank);
-	uint8_t test = (flash_cache_pc_flags[pc_jump_flag_address] & RECOMPILED);
-	if (test) //(flash_cache_pc_flags[pc_jump_flag_address] & RECOMPILED);	// D7 clear if RECOMPILED
+	uint8_t test = peek_bank_byte(pc_jump_flag_bank, (uint16_t)&flash_cache_pc_flags[pc_jump_flag_address]) & RECOMPILED;
+	if (test)
 		return 0; // not found
 		
 	// run native code, return through flash_dispatch_return
 	uint32_t full_address = (emulated_pc << 1);
 	pc_jump_bank = ((emulated_pc >> 13) + BANK_PC);
 	pc_jump_address = (full_address & FLASH_BANK_MASK);
-	bankswitch_prg(pc_jump_bank);
 	
-	//const uint16_t *run_label = (uint16_t *) &run_again[0];
 	IO8(0x4020) = 0x25;
-	uint16_t code_addr = flash_cache_pc[pc_jump_address] | 
-	                     (flash_cache_pc[pc_jump_address + 1] << 8);
+	uint16_t code_addr = peek_bank_byte(pc_jump_bank, (uint16_t)&flash_cache_pc[pc_jump_address])
+	                   | (peek_bank_byte(pc_jump_bank, (uint16_t)&flash_cache_pc[pc_jump_address + 1]) << 8);
 	void (*code_ptr)(void) = (void*) code_addr;
 	(*code_ptr)();
 	//unreachable, returns through flash_dispatch_return
+}
+
+#pragma section default
+
+uint8_t flash_cache_search(uint16_t emulated_pc)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	uint8_t result = flash_cache_search_b2(emulated_pc);
+	bankswitch_prg(saved_bank);
+	return result;
 }
 
 //============================================================================================================
@@ -671,8 +684,25 @@ static uint8_t invert_branch(uint8_t opcode) {
 }
 #endif
 
-uint8_t recompile_opcode()
+// ==========================================================================
+// recompile_opcode — moved to bank 2 to save ~6KB of fixed-bank space.
+// This is the single largest consumer (37% of fixed bank).
+// Performance of the recompiler itself doesn't matter — only the output.
+//
+// BANK 2 SAFETY RULES:
+//   - NEVER call bankswitch_prg() directly (would unmap self)
+//   - Use peek_bank_byte() for cross-bank reads (WRAM helper)
+//   - flash_byte_program() is safe (WRAM, restores mapper_prg_bank)
+//   - Fixed-bank functions ($C000+) are always reachable
+//   - opt2_record_pending_branch_safe() is a fixed-bank trampoline
+// ==========================================================================
+#pragma section bank2
+
+static uint8_t recompile_opcode_b2()
 {
+	// WRAM helper for cross-bank reads (safe from bank2)
+	extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+
 	uint8_t op_buffer_0;
 	uint8_t op_buffer_1;
 	uint8_t op_buffer_2;
@@ -709,13 +739,10 @@ uint8_t recompile_opcode()
 			// Backward branch - can optimize if target compiled
 			uint16_t target_pc = pc + 2 + branch_offset;
 			
-			// Save current bank state
-			uint8_t saved_bank = mapper_prg_bank;
-			
-			// Look up target's flag
+			// Look up target's flag via peek_bank_byte (safe from bank2)
 			uint8_t target_flag_bank = ((target_pc >> 14) + BANK_PC_FLAGS);
-			bankswitch_prg(target_flag_bank);
-			uint8_t target_flag = flash_cache_pc_flags[target_pc & FLASH_BANK_MASK];
+			uint8_t target_flag = peek_bank_byte(target_flag_bank,
+				(uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
 			
 			// Check if target is compiled (bit 7 clear = RECOMPILED)
 			if (target_flag & RECOMPILED)
@@ -727,7 +754,6 @@ uint8_t recompile_opcode()
 				uint8_t pattern_flash_bank = flash_code_bank;
 				uint8_t pattern_code_index = code_index;
 				
-				bankswitch_prg(saved_bank);
 				branch_not_compiled++;
 				
 				// Check space: need 21 bytes + epilogue room
@@ -803,11 +829,8 @@ uint8_t recompile_opcode()
 				// Use saved addresses from when pattern was emitted
 				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
 				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
-				// opt2_record_pending_branch is in bank1
-				uint8_t cur_bank = mapper_prg_bank;
-				bankswitch_prg(1);
-				opt2_record_pending_branch(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
-				bankswitch_prg(cur_bank);
+				// Call via fixed-bank trampoline (safe from bank2)
+				opt2_record_pending_branch_safe(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
 				
 				// Update PC table to point to this pattern
 				// (required when OPT_BLOCK_METADATA is 0)
@@ -821,8 +844,7 @@ uint8_t recompile_opcode()
 				return cache_flag[cache_index];
 				}  // end else (enough space for 21-byte pattern)
 #else
-				// Target not compiled - restore and interpret
-				bankswitch_prg(saved_bank);
+				// Target not compiled - interpret
 				branch_not_compiled++;
 				enable_interpret();
 				// Fall through to emit interpreted branch
@@ -835,7 +857,6 @@ uint8_t recompile_opcode()
 				if (target_code_bank != flash_code_bank)
 				{
 					// Different bank - cannot direct jump, must interpret
-					bankswitch_prg(saved_bank);
 					branch_wrong_bank++;
 					enable_interpret();
 					// Fall through to emit interpreted branch - don't try to optimize!
@@ -843,15 +864,11 @@ uint8_t recompile_opcode()
 				else
 				{
 				
-				// Get target's native address
+				// Get target's native address via peek_bank_byte (safe from bank2)
 				uint8_t target_pc_bank = ((target_pc >> 13) + BANK_PC);
-				bankswitch_prg(target_pc_bank);
 				uint16_t target_pc_addr = ((target_pc << 1) & FLASH_BANK_MASK);
-			uint16_t target_native = flash_cache_pc[target_pc_addr] | 
-			                         (flash_cache_pc[target_pc_addr + 1] << 8);
-			
-			// Restore bank state
-			bankswitch_prg(saved_bank);
+			uint16_t target_native = peek_bank_byte(target_pc_bank, (uint16_t)&flash_cache_pc[target_pc_addr])
+			                         | (peek_bank_byte(target_pc_bank, (uint16_t)&flash_cache_pc[target_pc_addr + 1]) << 8);
 			
 			// Calculate native branch offset
 			uint16_t current_native = flash_code_address + code_index + 2;
@@ -942,11 +959,8 @@ uint8_t recompile_opcode()
 				// - JMP operand at +6: patch $FFFF→target (bit-clear ✓)
 				uint16_t bcc_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 3;
 				uint16_t jmp_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 6;
-				// opt2_record_pending_branch is in bank1
-				uint8_t cur_bank2 = mapper_prg_bank;
-				bankswitch_prg(1);
-				opt2_record_pending_branch(bcc_operand_addr, jmp_operand_addr, flash_code_bank, target_pc, 0);
-				bankswitch_prg(cur_bank2);
+				// Call via fixed-bank trampoline (safe from bank2)
+				opt2_record_pending_branch_safe(bcc_operand_addr, jmp_operand_addr, flash_code_bank, target_pc, 0);
 				
 				pc = target_pc;
 				code_index += 9;
@@ -1339,6 +1353,18 @@ uint8_t recompile_opcode()
 	return cache_flag[cache_index];
 }
 
+#pragma section default
+
+// Fixed-bank trampoline for recompile_opcode
+uint8_t recompile_opcode(void)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	uint8_t result = recompile_opcode_b2();
+	bankswitch_prg(saved_bank);
+	return result;
+}
+
 // Removed: check_cache_links(), ready(), verify_link_type0(), verify_link_type1(), combine_caches()
 // These were all part of the old RAM cache execution system that is no longer used.
 // Flash cache execution uses dispatch_on_pc() and flash_dispatch_return instead.
@@ -1346,45 +1372,68 @@ uint8_t recompile_opcode()
 // Removed: decode_address_c() - now using platform_exidy.translate_addr() from platform/platform_exidy.c
 
 //============================================================================================================
-void cache_bit_enable(uint16_t addr)
+// ==========================================================================
+// cache_bit_enable / cache_bit_check — moved to bank 2.
+// Not performance-critical. Saves ~506 bytes of fixed-bank space.
+// ==========================================================================
+#pragma section bank2
+
+static void cache_bit_enable_b2(uint16_t addr)
 {	
 	uint8_t bit_mask = ~(1 << (addr & 3));
 	addr = addr >> 3;
-	bankswitch_prg(3);
-	uint8_t value = bit_mask & cache_bit_array[addr];
+	uint8_t value = bit_mask & peek_bank_byte(3, (uint16_t) &cache_bit_array[0] + addr);
 	flash_byte_program((uint16_t) &cache_bit_array[0] + addr, 3, value);
-	bankswitch_prg(0);
+}
+
+//============================================================================================================
+static uint8_t cache_bit_check_b2(uint16_t addr)
+{
+	uint8_t bit_number = addr & 3;
+	uint8_t value;
+	addr = addr >> 3;
+	uint8_t byte_val = peek_bank_byte(3, (uint16_t) &cache_bit_array[0] + addr);
+	switch (bit_number)
+	{
+		case 0:
+			value = 0x01 & byte_val;
+		case 1:
+			value = 0x02 & byte_val;
+		case 2:
+			value = 0x04 & byte_val;
+		case 3:
+			value = 0x08 & byte_val;
+		case 4:
+			value = 0x10 & byte_val;
+		case 5:
+			value = 0x20 & byte_val;
+		case 6:
+			value = 0x40 & byte_val;
+		case 7:
+			value = 0x80 & byte_val;
+		default:
+	}
+	return value;
+}
+
+#pragma section default
+
+void cache_bit_enable(uint16_t addr)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	cache_bit_enable_b2(addr);
+	bankswitch_prg(saved_bank);
 }
 
 //============================================================================================================
 uint8_t cache_bit_check(uint16_t addr)
 {
-	uint8_t bit_number = addr & 3;
-	uint8_t value;
-	addr = addr >> 3;
-	bankswitch_prg(3);
-	switch (bit_number)
-	{
-		case 0:
-			value = 0x01 & cache_bit_array[addr];
-		case 1:
-			value = 0x02 & cache_bit_array[addr];
-		case 2:
-			value = 0x04 & cache_bit_array[addr];
-		case 3:
-			value = 0x08 & cache_bit_array[addr];
-		case 4:
-			value = 0x10 & cache_bit_array[addr];
-		case 5:
-			value = 0x20 & cache_bit_array[addr];
-		case 6:
-			value = 0x40 & cache_bit_array[addr];
-		case 7:
-			value = 0x80 & cache_bit_array[addr];
-		default:
-	}
-	bankswitch_prg(0);
-	return value;
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	uint8_t result = cache_bit_check_b2(addr);
+	bankswitch_prg(saved_bank);
+	return result;
 }
 
 //============================================================================================================

@@ -95,10 +95,17 @@ __zpage uint8_t sprites_converted = 0;
 
 // ******************************************************************************************
 
+// ==========================================================================
+// convert_sprite / convert_sprites — moved to bank 2.
+// Init-only code, saves ~481 bytes of fixed-bank space.
+// Only touches PPU registers ($2006/$2007) and reads source data.
+// ==========================================================================
+#pragma section bank2
+
 // Convert a single 16x16 Exidy sprite (32 bytes, 1bpp) to 4 NES 8x8 tiles
 // Exidy format: 16 bytes left column (8 pixels wide, 16 rows), 16 bytes right column
 // NES format: 4 tiles in order: TL, TR, BL, BR (each 16 bytes: 8 bytes plane0, 8 bytes plane1=0)
-void convert_sprite(const uint8_t *src, uint16_t nes_chr_addr)
+static void convert_sprite_b2(const uint8_t *src, uint16_t nes_chr_addr)
 {
 	// Top-left tile (rows 0-7, columns 0-7)
 	IO8(0x2006) = nes_chr_addr >> 8;
@@ -137,14 +144,33 @@ void convert_sprite(const uint8_t *src, uint16_t nes_chr_addr)
 // Sidetrac has 16 sprites (512 bytes / 32 = 16 sprites)
 // Each 16x16 sprite becomes 4 NES 8x8 tiles
 // Sprites go into CHR starting at tile 0x80 (second half of pattern table 0)
-void convert_sprites(const uint8_t *src)
+static void convert_sprites_b2(const uint8_t *src)
 {
 	uint16_t nes_addr = 0x0800;  // Start of second half of pattern table 0 (tiles 0x80+)
 	for (uint8_t sprite = 0; sprite < 16; sprite++)
 	{
-		convert_sprite(src + (sprite * 32), nes_addr);
+		convert_sprite_b2(src + (sprite * 32), nes_addr);
 		nes_addr += 64;  // 4 tiles * 16 bytes each
 	}
+}
+
+#pragma section default
+
+// Fixed-bank trampolines
+void convert_sprite(const uint8_t *src, uint16_t nes_chr_addr)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	convert_sprite_b2(src, nes_chr_addr);
+	bankswitch_prg(saved_bank);
+}
+
+void convert_sprites(const uint8_t *src)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	convert_sprites_b2(src);
+	bankswitch_prg(saved_bank);
 }
 
 // ******************************************************************************************
@@ -156,10 +182,15 @@ int main(void)
 	lnSync(1);
 	lnPush(0x3F00, 32, palette);
 #ifdef ENABLE_CHR_ROM
+	// Copy ROM CHR/sprite data from bank1 to WRAM before converting,
+	// because convert_chr/convert_sprites trampolines switch to bank2
+	// which unmaps the bank1 source data.
 	bankswitch_prg(1);
-	convert_chr((uint8_t*)chr_sidetrac);
-	convert_sprites((uint8_t*)spr_sidetrac);
+	memcpy(CHARACTER_RAM_BASE, (uint8_t*)chr_sidetrac, 1024);
+	memcpy(CHARACTER_RAM_BASE + 1024, (uint8_t*)spr_sidetrac, 512);
 	bankswitch_prg(0);
+	convert_chr(CHARACTER_RAM_BASE);
+	convert_sprites(CHARACTER_RAM_BASE + 1024);
 #endif
 	IO8(0x201) = 0x01;
 	
@@ -474,7 +505,13 @@ void render_video(void)
 
 // ******************************************************************************************
 
-void convert_chr(uint8_t *source)
+// ==========================================================================
+// convert_chr — moved to bank 2 to save ~968 bytes of fixed-bank space.
+// Only called at init and when character RAM is updated.
+// ==========================================================================
+#pragma section bank2
+
+static void convert_chr_b2(uint8_t *source)
 {
 	uint16_t tiles = 0;
 	uint16_t nes_address = 0;
@@ -537,6 +574,16 @@ void convert_chr(uint8_t *source)
 		nes_address += 16;
 		emu_address += 8;
 	}
+}
+
+#pragma section default
+
+void convert_chr(uint8_t *source)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	convert_chr_b2(source);
+	bankswitch_prg(saved_bank);
 }
 
 

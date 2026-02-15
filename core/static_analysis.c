@@ -684,7 +684,7 @@ void sa_run(void)
         // interact poorly with partially-filled flash banks.  The final
         // full epilogue sweep after the loop is sufficient.
         static uint8_t sa_blocks_compiled = 0;
-        if (++sa_blocks_compiled >= 8)
+        if (++sa_blocks_compiled >= 4)
         {
             sa_blocks_compiled = 0;
             opt2_sweep_pending_patches();
@@ -692,15 +692,20 @@ void sa_run(void)
 #endif
     }
 
-    // Final sweep after all blocks are compiled
+    // Final sweep after all blocks are compiled.
+    // Sequence: pending → full epilogue scan → pending again.
+    // The second pending sweep catches any branches whose targets were
+    // in different banks during compile but got resolved by epilogue
+    // chaining.  Two epilogue passes ensure ordering doesn't matter.
 #ifdef ENABLE_OPTIMIZER_V2
     opt2_sweep_pending_patches();
 #ifdef ENABLE_PATCHABLE_EPILOGUE
-    // Full epilogue scan — cover ALL compiled blocks, not just one
-    // EPILOGUE_SCAN_BATCH.  FLASH_CACHE_BLOCKS/32 calls to scan them all,
-    // rounded up.
-    for (uint16_t s = 0; s < (FLASH_CACHE_BLOCKS + 31) / 32; s++)
-        opt2_scan_and_patch_epilogues();
+    for (uint8_t pass = 0; pass < 2; pass++)
+    {
+        for (uint16_t s = 0; s < (FLASH_CACHE_BLOCKS + 31) / 32; s++)
+            opt2_scan_and_patch_epilogues();
+        opt2_sweep_pending_patches();
+    }
 #endif
 #endif
 

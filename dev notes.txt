@@ -4,3 +4,9 @@ epilogue could start with php / clc / bcc regular_epilogue.  to "take over" and 
 
 
 invert the branch condition, then branch over a JMP $FFF0 instruction.  $FFF0 contains a trampoline that JMPs to flash dispatch return.  when the branch target is recompiled, the JMP $FFF0 operand can be patched, by writing only the 12-upper bits of the address, so the jump target must be aligned on a 16-byte boundary.  this could jump directly to another code block if it starts at that boundary, or it could jump to a proper 16-bit addressed JMP that is provided within the block.
+
+notes for LLM Agent:
+Mesen is at e:\drive-e\nes\mesen2a\
+launch Mesen with the rom name and LUA script name.
+you won't be able to see lua console output, so you may need to use a sentinal value to check if your revised script even loaded.  you may have to fix syntax errors blind.
+refer to this for Mesen 2.2.2 LUA API https://pastebin.com/z9w7Dj5Q

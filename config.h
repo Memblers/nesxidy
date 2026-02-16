@@ -5,6 +5,12 @@
 
 //#define DEBUG_OUT 1
 
+// Write JIT stats (hit/miss/branch counters, opt2 stats, block count)
+// to WRAM $7E00 every frame.  Costs ~840 NES cycles/frame (~2.8%)
+// due to 6 peek_bank_byte calls (12 bank switches) for opt2 stats.
+// Disable to eliminate per-frame overhead when not debugging.
+//#define ENABLE_DEBUG_STATS
+
 //#define TRACK_TICKS	//disable this to stop tracking run clock cycles
 
 // Normal build (linking + optimizer enabled)

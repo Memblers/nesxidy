@@ -65,7 +65,9 @@ extern uint8_t sta_indy_interpret_count;  // Debug: from fake6502.c
 extern uint8_t pc_2b27_count;  // Debug: from dynamos.c - count PC=$2B27
 extern uint16_t last_indy_ea;  // Debug: from fake6502.c
 extern uint8_t sta_5000_count;  // Debug: STA to $5000 specifically
+#ifdef ENABLE_DEBUG_STATS
 extern void debug_stats_update(void);  // Debug: write stats to WRAM $7E00
+#endif
 
 __zpage uint8_t interrupt_condition;
 __zpage uint8_t character_ram_updated = 0;
@@ -206,6 +208,8 @@ int main(void)
 	flash_format();
 #endif
 	
+	// Reservation system disabled — init_reservations() removed.
+	
 #ifdef ENABLE_OPTIMIZER
 	// Initialize optimizer with debug thresholds
 	// Requires OPT_MIN_BLOCKS_DEBUG unique blocks before optimizer can run
@@ -246,7 +250,9 @@ int main(void)
 		{
 			frame_time = 0;
 			interrupt_condition |= FLAG_EXIDY_IRQ;
+#ifdef ENABLE_DEBUG_STATS
 			debug_stats_update();
+#endif
 			render_video();
 		}
 #else
@@ -254,7 +260,9 @@ int main(void)
 		{
 			frame_time += FRAME_LENGTH;
 			interrupt_condition |= FLAG_EXIDY_IRQ;
+#ifdef ENABLE_DEBUG_STATS
 			debug_stats_update();
+#endif
 			render_video();
 		}	
 #endif	
@@ -609,9 +617,12 @@ static void flash_format_b2(void)
 		for (uint16_t sector = 0x8000; sector < 0xC000; sector += 0x1000)
 		{
 #ifdef ENABLE_STATIC_ANALYSIS
-			// Protect the static-analysis sectors in bank 3.
-			// SA bitmap, header, and indirect list are placed by the linker
-			// in bank 3.  Skip erasing those sectors so persisted data survives.
+			// Protect the SA persistence region in bank 3 from erasure.
+			// Sectors from SA_SECTOR_FIRST to SA_SECTOR_LAST contain the
+			// code bitmap, header, indirect-target list, and subroutine
+			// table.  The BFS walk checks the header signature to decide
+			// whether to erase and rebuild — so these sectors must survive
+			// flash_format.
 			if (bank == 3 && sector >= SA_SECTOR_FIRST && sector <= SA_SECTOR_LAST)
 				continue;
 #endif

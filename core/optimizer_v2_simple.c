@@ -329,8 +329,10 @@ void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t 
 }
 
 //============================================================================
-// API: Reset (for testing)
+// API: Reset — must be in the fixed bank so sa_run() can call it
+// directly without a trampoline.  Only touches WRAM variables.
 //============================================================================
+#pragma section default
 
 void opt2_reset(void) {
     pending_count = 0;

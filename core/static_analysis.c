@@ -45,6 +45,7 @@ extern uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
 extern uint16_t flash_cache_select(void);
 extern void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
 extern void flash_cache_pc_update(uint8_t code_address, uint8_t flags);
+extern uint16_t next_free_block;
 extern uint8_t recompile_opcode(void);
 __zpage extern uint16_t flash_cache_index;
 extern uint16_t flash_code_address;
@@ -529,10 +530,22 @@ uint16_t sa_blocks_total = 0;
 
 static uint8_t sa_compile_one_block(void)
 {
-    flash_cache_index = flash_cache_select();
-    if (!flash_cache_index)
-        return 0;           // cache full
-    flash_cache_index--;
+    // Check if this PC has a reserved block from a prior branch/JMP
+    // reservation.  If so, use the pre-allocated block instead of
+    // selecting a new one.  The block is already marked used and PC
+    // flags are already written, so we just need to compile into it.
+    int16_t reserved = consume_reservation(pc);
+    if (reserved >= 0)
+    {
+        flash_cache_index = (uint16_t)reserved;
+    }
+    else
+    {
+        flash_cache_index = flash_cache_select();
+        if (!flash_cache_index)
+            return 0;           // cache full
+        flash_cache_index--;
+    }
 
     // Use cache index 0 as temporary compilation buffer (same as run_6502)
     cache_index = 0;
@@ -847,6 +860,7 @@ void sa_run(void)
     // Batch compilation: scan bitmap from fixed bank, compile each hit.
     // All bitmap/flag reads use peek_bank_byte (WRAM helper), so this
     // runs entirely from the fixed bank — no bank2 trampoline needed.
+    // Reservation system disabled — no reservation list to check.
     for (uint16_t scan_cursor = ROM_ADDR_MIN; scan_cursor <= ROM_ADDR_MAX; scan_cursor++)
     {
         // Check bitmap: is this address known code?
@@ -886,6 +900,23 @@ void sa_run(void)
             opt2_sweep_pending_patches();
         }
 #endif
+    }
+
+    // Disable new reservations before draining — compiling a drained
+    // block's branches/JMPs would otherwise create more reservations,
+    // cascading until all flash blocks are consumed.
+    reservations_enabled = 0;
+
+    // Drain any unfulfilled reservations.  Forward targets the scan
+    // didn't reach (cache full) or edge cases leave reservations
+    // unconsumed — the direct JMP already points at the reserved
+    // flash block, so we MUST compile code there.
+    while (reservation_count > 0)
+    {
+        pc = reserved_pc[0];   // consume_reservation will remove [0]
+        if (!sa_compile_one_block())
+            break;             // cache full
+        sa_blocks_total++;
     }
 
     // Final sweep after all blocks are compiled.

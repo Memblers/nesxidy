@@ -194,6 +194,18 @@ void flash_cache_pc_update(uint8_t code_address, uint8_t flags);
 void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
 uint8_t flash_cache_search(uint16_t emulated_pc);
 
+// Block reservation API for eager allocation
+#define MAX_RESERVATIONS 32
+extern uint16_t reserved_pc[];
+extern uint16_t reserved_block[];
+extern uint8_t reservation_count;
+extern uint8_t reservations_enabled;
+uint16_t reserve_block_for_pc(uint16_t target_pc);
+int16_t consume_reservation(uint16_t target_pc);
+uint8_t reserve_block_for_pc_safe(uint16_t target_pc);
+extern uint16_t reserve_result_addr;
+extern uint8_t  reserve_result_bank;
+
 enum 6502op
 {
 	opBRK = 0x00,

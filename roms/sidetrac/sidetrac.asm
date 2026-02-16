@@ -3,231 +3,351 @@
 ;
 ; FILENAME: sidetrac.bin, File Size: 6145, ORG: $2800
 ;     -> Hex output enabled
+;
+; Side Trac (Exidy, 1979)
+; CPU: 6502 @ 705,562 Hz (11,289,000 / 16)
+; IRQ: Vblank-driven only (no collision IRQs), ~60 Hz
+;
+; Memory Map:
+;   $0000-$03FF  RAM (1KB)
+;   $0400-$3FFF  ROM (Side Trac: $2800-$3FFF = 6KB)
+;   $4000-$47FF  Screen RAM (2KB, 32x32 8x8 tiles, 256 bytes = 1 row)
+;   $4800-$4FFF  Character RAM (2KB, 256 8x8 characters)
+;   $5000        Sprite 1 X position (write)
+;   $5040        Sprite 1 Y position (write)
+;   $5100        DIP switches (read) / motion object image (write)
+;   $5101        Control inputs (read, active-LOW)
+;   $5103        Interrupt condition latch (read = ack IRQ)
+;   $5200        Sprite 2 color (write)
+;   $5201        Audio toggle (write, bit 0 = on/off)
+;
+; Zero Page Variables (original Exidy labels in CAPS where known):
+;   $00-$01  Screen RAM pointer (lo/hi)
+;   $02      STAT   - Game state flags (bit 7=active, bit 6=2P, bit 4=player)
+;   $03      Temp / debounce counter
+;   $04      Input mask for button check
+;   $05      Loop counter
+;   $06      Coin accumulator (fractional)
+;   $07      Sprite 1 X position
+;   $08      Sprite 1 Y position
+;   $09      CRNU   - Cars remaining / lives ('CaR Number Used')
+;   $0A-$0B  Player 1 score (BCD, lo/hi)
+;   $0C-$0D  Player 2 score (BCD, lo/hi)
+;   $0E      Lives remaining
+;   $0F-$10  High score (BCD, lo/hi)
+;   $11-$12  Temp score display (lo/hi)
+;   $13      CREDIT - Credits counter (BCD)
+;   $14      Number of high-score qualifiers
+;   $15-$16  Delay loop counters (hi/lo)
+;   $19-$1A  PRNG state
+;   $25-$26  Character ROM pointer (lo/hi)
+;   $30-$31  Entity position table (player car)
+;   $45      Number of active entities
+;   $46+     Entity direction table
+;   $51      Entity spawn countdown
+;   $52+     Entity state table
+;   $69-$6A  Collision check pointer (lo/hi)
+;   $6B      Movement countdown (ticks between position updates)
+;   $6C      Current direction index
+;   $77      Timer reload value (attract demo speed)
+;   $78      Timer countdown (ticks between direction changes)
+;   $7C      Speed timer reload
+;   $7D      Speed countdown
+;   $7E      Direction change flag
+;   $7F      Sound timer reload
+;   $80      Sound timer countdown
+;   $81      Sound toggle state
+;   $83      Difficulty level
+;   $84      Score event flags
+;   $85      Score display countdown
+;   $87      Temp
+;   $88      Sound effect counter
+;   $89      Sprite animation countdown
+;   $8A      Sprite animation flags
+;   $8B      Death animation sprite index
+;   $8C-$8D  Death delay loop counters
+;   $8E      CRAFLG - Crash/death flag ($FF=crashed, $00=alive)
+;   $8F      Initial lives per game
+;   $90      Direction sign ($FF=left/up, $00=right/down)
+;   $91      Speed change countdown
+;   $92      Speed level (1-4)
 ;---------------------------------------------------------------------------
-$2800> A2 FF:	LDX #$ff	;
+;
+;===== RESET ENTRY POINT ====================================================
+$2800> A2 FF:	LDX #$ff	; init stack pointer to $FF
 $2802> 9A:	TXS		;
-$2803> 86 19:	STX $19		;
-$2805> 86 90:	STX $90		;
-$2807> D8:	CLD		;
-$2808> 86 14:	STX $14		;
+$2803> 86 19:	STX $19		; init PRNG seed = $FF
+$2805> 86 90:	STX $90		; direction sign = $FF (left/up)
+$2807> D8:	CLD		; clear decimal mode
+$2808> 86 14:	STX $14		; high score qualifiers = $FF (none)
 $280A> A9 00:	LDA #$00	;
-$280C> 85 0F:	STA $0F		;
-$280E> 85 10:	STA $10		;
-$2810> 85 13:	STA $13		;
-$2812> 85 06:	STA $06		;
+$280C> 85 0F:	STA $0F		; high score lo = 0
+$280E> 85 10:	STA $10		; high score hi = 0
+$2810> 85 13:	STA $13		; CREDIT = 0
+$2812> 85 06:	STA $06		; coin accumulator = 0
 $2814> A9 76:	LDA #$76	;
-$2816> 85 8F:	STA $8F		;
-$2818> 20 FC29:	JSR $29FC	;
-$281B> 20 3E32:	JSR $323E	;
-$281E> 20 C92F:	JSR $2FC9	;
-$2821> 20 1B2C:	JSR $2C1B	;
-$2824> 20 3437:	JSR $3734	;
-$2827> 20 4A33:	JSR $334A	;
-$282A> 58:	CLI		;
-$282B> 20 262D:	JSR $2D26	;
-$282E> 20 FC29:	JSR $29FC	;
-$2831> AD 0051:	LDA $5100	;
-$2834> 29 03:	AND #$03	;
+$2816> 85 8F:	STA $8F		; CRNU lives per game = $76 (BCD display: "76"? likely 3 via DIP)
+$2818> 20 FC29:	JSR $29FC	; clear screen RAM
+$281B> 20 3E32:	JSR $323E	; draw track/maze
+$281E> 20 C92F:	JSR $2FC9	; draw score display
+$2821> 20 1B2C:	JSR $2C1B	; init game variables (timers, speed, etc.)
+$2824> 20 3437:	JSR $3734	; init player car position
+$2827> 20 4A33:	JSR $334A	; init entity table
+$282A> 58:	CLI		; enable interrupts — IRQ handler at $2B0E
+;
+;===== MAIN GAME ENTRY ======================================================
+; JSR $2D26 runs attract mode. It loops forever showing demos until a coin
+; is inserted ($13 > 0), then returns here to start a game.
+$282B> 20 262D:	JSR $2D26	; score check + attract mode (doesn't return until coin)
+;
+; --- Post-coin: set up game screen ---
+$282E> 20 FC29:	JSR $29FC	; clear screen RAM
+$2831> AD 0051:	LDA $5100	; read DIP switches
+$2834> 29 03:	AND #$03	; bits 0-1 = lives per game setting
 $2836> AA:	TAX		;
-$2837> BD B929:	LDA $29B9,X	;
-$283A> 85 0E:	STA $0E		;
-$283C> 20 8E29:	JSR $298E	;
+$2837> BD B929:	LDA $29B9,X	; look up lives count from table at $29B9
+$283A> 85 0E:	STA $0E		; store lives remaining
+$283C> 20 8E29:	JSR $298E	; draw lives/score display
+;
+; --- Draw title screen text strings ---
 $283F> A2 05:	LDX #$05	;
-$2841> 86 89:	STX $89		;
-$2843> 20 732E:	JSR $2E73	;
+$2841> 86 89:	STX $89		; animation countdown = 5
+$2843> 20 732E:	JSR $2E73	; draw string 5 ("SIDE TRAC"?)
 $2846> A2 06:	LDX #$06	;
-$2848> 20 732E:	JSR $2E73	;
+$2848> 20 732E:	JSR $2E73	; draw string 6
 $284B> A2 07:	LDX #$07	;
-$284D> 20 732E:	JSR $2E73	;
-$2850> 20 1B2A:	JSR $2A1B	;
+$284D> 20 732E:	JSR $2E73	; draw string 7
+$2850> 20 1B2A:	JSR $2A1B	; set screen pointer to page $41
 $2853> A2 08:	LDX #$08	;
-$2855> 20 732E:	JSR $2E73	;
+$2855> 20 732E:	JSR $2E73	; draw string 8
 $2858> A2 09:	LDX #$09	;
-$285A> 20 732E:	JSR $2E73	;
+$285A> 20 732E:	JSR $2E73	; draw string 9
 $285D> A2 0E:	LDX #$0e	;
-$285F> 20 732E:	JSR $2E73	;
-$2862> 20 202A:	JSR $2A20	;
+$285F> 20 732E:	JSR $2E73	; draw string 14
+$2862> 20 202A:	JSR $2A20	; set screen pointer to page $42
 $2865> A2 0A:	LDX #$0a	;
-$2867> 20 732E:	JSR $2E73	;
-$286A> AD 0051:	LDA $5100	;
-$286D> 29 10:	AND #$10	;
-$286F> F0 24:	BEQ $2895		;
+$2867> 20 732E:	JSR $2E73	; draw string 10
+;
+; --- Check DIP switch for bonus credit / high score display ---
+$286A> AD 0051:	LDA $5100	; DIP switches
+$286D> 29 10:	AND #$10	; bit 4 = bonus credit enable
+$286F> F0 24:	BEQ $2895		; disabled → skip bonus display
 $2871> EA:	NOP		;
-$2872> A5 14:	LDA $14		;
-$2874> D0 1F:	BNE $2895		;
+$2872> A5 14:	LDA $14		; high-score qualifier count
+$2874> D0 1F:	BNE $2895		; already qualified → skip
 $2876> EA:	NOP		;
 $2877> A2 0B:	LDX #$0b	;
-$2879> 20 732E:	JSR $2E73	;
-$287C> 20 252A:	JSR $2A25	;
-$287F> 20 D929:	JSR $29D9	;
-$2882> 29 07:	AND #$07	;
+$2879> 20 732E:	JSR $2E73	; draw string 11 ("BONUS AT"?)
+$287C> 20 252A:	JSR $2A25	; set screen pointer to page $43
+$287F> 20 D929:	JSR $29D9	; PRNG → random bonus threshold
+$2882> 29 07:	AND #$07	; mask to 0-7
 $2884> AA:	TAX		;
-$2885> BD BD29:	LDA $29BD,X	;
-$2888> 85 12:	STA $12		;
+$2885> BD BD29:	LDA $29BD,X	; lookup BCD score threshold from table
+$2888> 85 12:	STA $12		; bonus score hi byte
 $288A> A9 00:	LDA #$00	;
-$288C> 85 11:	STA $11		;
-$288E> A2 11:	LDX #$11	;
-$2890> A0 30:	LDY #$30	;
-$2892> 20 4B30:	JSR $304B	;
-$2895> 20 252A:	JSR $2A25	;
-$2898> 20 872E:	JSR $2E87	;
-$289B> 20 202A:	JSR $2A20	;
-$289E> 20 B02C:	JSR $2CB0	;
+$288C> 85 11:	STA $11		; bonus score lo byte = 0
+$288E> A2 11:	LDX #$11	; ZP offset for temp score
+$2890> A0 30:	LDY #$30	; screen offset
+$2892> 20 4B30:	JSR $304B	; draw bonus score number
+$2895> 20 252A:	JSR $2A25	; set screen pointer to page $43 (high score area)
+$2898> 20 872E:	JSR $2E87	; draw "TODAY'S HIGH SCORE" text
+$289B> 20 202A:	JSR $2A20	; set screen pointer to page $42
+;
+;----- COIN-WAIT LOOP: waits for player to insert coin and press start -----
+$289E> 20 B02C:	JSR $2CB0	; poll inputs (fast return if nothing pressed)
 $28A1> A0 8F:	LDY #$8f	;
 $28A3> A2 13:	LDX #$13	;
-$28A5> 20 5C30:	JSR $305C	;
-$28A8> 20 FD2C:	JSR $2CFD	;
-$28AB> F0 18:	BEQ $28C5		;
+$28A5> 20 5C30:	JSR $305C	; display credits counter
+$28A8> 20 FD2C:	JSR $2CFD	; check COIN1 button (returns nonzero if pressed)
+$28AB> F0 18:	BEQ $28C5		; no coin → check START instead
 $28AD> EA:	NOP		;
-$28AE> A6 13:	LDX $13		;
-$28B0> CA:	DEX		;
-$28B1> 30 EB:	BMI $289E		;
-$28B3> F8:	SED		;
+$28AE> A6 13:	LDX $13		; credits > 0?
+$28B0> CA:	DEX		; test if >= 1
+$28B1> 30 EB:	BMI $289E		; no credits → keep waiting
+$28B3> F8:	SED		; decimal mode for BCD subtraction
 $28B4> A5 13:	LDA $13		;
 $28B6> 38:	SEC		;
-$28B7> E9 01:	SBC #$01	;
+$28B7> E9 01:	SBC #$01	; credits -= 1 (1P game costs 1 credit)
 $28B9> 85 13:	STA $13		;
 $28BB> D8:	CLD		;
 $28BC> 20 C92F:	JSR $2FC9	;
 $28BF> 20 FC29:	JSR $29FC	;
 $28C2> 4C DF28:	JMP $28DF	;
-$28C5> A9 02:	LDA #$02	;
-$28C7> 20 FF2C:	JSR $2CFF	;
-$28CA> F0 D2:	BEQ $289E		;
+;
+; --- Check START button (costs 2 credits for 2P game) ---
+$28C5> A9 02:	LDA #$02	; mask for bit 1 (START button)
+$28C7> 20 FF2C:	JSR $2CFF	; debounced button check
+$28CA> F0 D2:	BEQ $289E		; not pressed → keep waiting
 $28CC> A6 13:	LDX $13		;
 $28CE> CA:	DEX		;
-$28CF> CA:	DEX		;
-$28D0> 30 CC:	BMI $289E		;
-$28D2> F8:	SED		;
+$28CF> CA:	DEX		; need at least 2 credits
+$28D0> 30 CC:	BMI $289E		; not enough → keep waiting
+$28D2> F8:	SED		; decimal mode
 $28D3> 38:	SEC		;
 $28D4> A5 13:	LDA $13		;
-$28D6> E9 02:	SBC #$02	;
+$28D6> E9 02:	SBC #$02	; credits -= 2 (2P game)
 $28D8> 85 13:	STA $13		;
 $28DA> D8:	CLD		;
-$28DB> A9 C0:	LDA #$c0	;
+$28DB> A9 C0:	LDA #$c0	; game state = $C0 (active + 2P mode)
 $28DD> 85 02:	STA $02		;
+;
+;----- GME5: POST-GAME LOOP: game over, run attract timer until timeout ---
 $28DF> A9 80:	LDA #$80	;
-$28E1> 20 EE2B:	JSR $2BEE	;
-$28E4> 20 3129:	JSR $2931	;
+$28E1> 20 EE2B:	JSR $2BEE	; set audio bits
+$28E4> 20 3129:	JSR $2931	; draw score + game field
 $28E7> A9 80:	LDA #$80	;
-$28E9> 20 EE2B:	JSR $2BEE	;
-$28EC> 20 2E2A:	JSR $2A2E	;
-$28EF> A5 8E:	LDA $8E		;
-$28F1> 30 08:	BMI $28FB		;
+$28E9> 20 EE2B:	JSR $2BEE	; set audio bits
+$28EC> 20 2E2A:	JSR $2A2E	; attract demo timer tick + entity update
+$28EF> A5 8E:	LDA $8E		; check crash flag
+$28F1> 30 08:	BMI $28FB		; if crashed → handle crash
 $28F3> EA:	NOP		;
-$28F4> 24 02:	BIT $02		;
-$28F6> 30 F4:	BMI $28EC		;
-$28F8> 4C 2B28:	JMP $282B	;
-$28FB> 24 02:	BIT $02		;
-$28FD> 50 0C:	BVC $290B		;
+$28F4> 24 02:	BIT $02		; check game state
+$28F6> 30 F4:	BMI $28EC		; bit 7 set → game still active, loop
+$28F8> 4C 2B28:	JMP $282B	; game over → restart attract mode
+;
+;----- POST-CRASH HANDLER (original label: CNGPLY) ------------------------
+; Decrement lives, toggle player in 2P mode, check game over.
+$28FB> 24 02:	BIT $02		; check game state
+$28FD> 50 0C:	BVC $290B		; bit 6 clear (1P mode) → skip 2P logic
 $28FF> EA:	NOP		;
 $2900> A5 02:	LDA $02		;
-$2902> 49 10:	EOR #$10	;
+$2902> 49 10:	EOR #$10	; toggle bit 4 (alternate player)
 $2904> 85 02:	STA $02		;
-$2906> 29 10:	AND #$10	;
-$2908> D0 18:	BNE $2922		;
+$2906> 29 10:	AND #$10	; check if back to player 1
+$2908> D0 18:	BNE $2922		; player 2's turn → don't decrement lives
 $290A> EA:	NOP		;
-$290B> C6 0E:	DEC $0E		;
-$290D> 10 13:	BPL $2922		;
+$290B> C6 0E:	DEC $0E		; SLPLY: CRNU-- (lives remaining)
+$290D> 10 13:	BPL $2922		; lives >= 0 → continue game
 $290F> EA:	NOP		;
+;
+; --- GAME OVER: no lives left ---
 $2910> A9 00:	LDA #$00	;
-$2912> 85 02:	STA $02		;
-$2914> 85 0E:	STA $0E		;
+$2912> 85 02:	STA $02		; clear game state (not active)
+$2914> 85 0E:	STA $0E		; lives = 0
 $2916> A9 00:	LDA #$00	;
-$2918> 85 8E:	STA $8E		;
+$2918> 85 8E:	STA $8E		; clear crash flag
 $291A> A2 02:	LDX #$02	;
-$291C> 20 C529:	JSR $29C5	;
-$291F> 4C 2B28:	JMP $282B	;
-$2922> 20 3429:	JSR $2934	;
+$291C> 20 C529:	JSR $29C5	; delay (2 passes = ~8.6 seconds)
+$291F> 4C 2B28:	JMP $282B	; restart → attract mode
+;
+; --- NOTEOG: Still alive, restart after crash ---
+$2922> 20 3429:	JSR $2934	; redraw game field
 $2925> A9 00:	LDA #$00	;
-$2927> 85 8E:	STA $8E		;
+$2927> 85 8E:	STA $8E		; clear crash flag
 $2929> A9 80:	LDA #$80	;
-$292B> 20 EE2B:	JSR $2BEE	;
-$292E> 4C EC28:	JMP $28EC	;
-$2931> 20 C92F:	JSR $2FC9	;
-$2934> 20 FC29:	JSR $29FC	;
-$2937> 20 1B2A:	JSR $2A1B	;
-$293A> A5 02:	LDA $02		;
-$293C> 29 10:	AND #$10	;
-$293E> F0 09:	BEQ $2949		;
+$292B> 20 EE2B:	JSR $2BEE	; set audio bits
+$292E> 4C EC28:	JMP $28EC	; return to game loop
+;
+;===== SCORE/FIELD REDRAW (original label: GAMSTR) =========================
+; $2931: Draw score display, then fall through to $2934 (GAMRST).
+$2931> 20 C92F:	JSR $2FC9	; draw score display ("HIGH" label etc.)
+;
+; $2934: Redraw game field after crash/restart.
+;   Clears screen, draws track, updates score and lives display.
+$2934> 20 FC29:	JSR $29FC	; clear screen RAM
+$2937> 20 1B2A:	JSR $2A1B	; set pointer to page $41
+$293A> A5 02:	LDA $02		; game state
+$293C> 29 10:	AND #$10	; bit 4 = alternate player active?
+$293E> F0 09:	BEQ $2949		; not alternate → draw "P1"
 $2940> EA:	NOP		;
 $2941> A2 10:	LDX #$10	;
-$2943> 20 732E:	JSR $2E73	;
+$2943> 20 732E:	JSR $2E73	; draw string $10 ("PLAYER 2")
 $2946> 4C 4E29:	JMP $294E	;
 $2949> A2 0F:	LDX #$0f	;
-$294B> 20 732E:	JSR $2E73	;
-$294E> 20 7529:	JSR $2975	;
+$294B> 20 732E:	JSR $2E73	; draw string $0F ("PLAYER 1")
+$294E> 20 7529:	JSR $2975	; draw lives count
 $2951> A2 01:	LDX #$01	;
-$2953> 20 C529:	JSR $29C5	;
-$2956> 20 FF30:	JSR $30FF	;
+$2953> 20 C529:	JSR $29C5	; delay (1 pass = ~4.3 seconds)
+$2956> 20 FF30:	JSR $30FF	; additional display update
 $2959> A2 01:	LDX #$01	;
-$295B> 20 C529:	JSR $29C5	;
-$295E> 20 1B2C:	JSR $2C1B	;
+$295B> 20 C529:	JSR $29C5	; delay (1 pass)
+;
+;===== DEATH RESET (original label: GAMRST) ================================
+; $295E: Called after crash to reinitialize game state and car.
+$295E> 20 1B2C:	JSR $2C1B	; reinit timing variables
 $2961> A9 76:	LDA #$76	;
-$2963> 85 8F:	STA $8F		;
+$2963> 85 8F:	STA $8F		; reset lives display value
 $2965> A9 FF:	LDA #$ff	;
-$2967> 85 90:	STA $90		;
-$2969> 20 3437:	JSR $3734	;
-$296C> 20 4A33:	JSR $334A	;
-$296F> 20 3E32:	JSR $323E	;
-$2972> 20 162A:	JSR $2A16	;
-$2975> 24 02:	BIT $02		;
-$2977> 10 14:	BPL $298D		;
+$2967> 85 90:	STA $90		; direction sign = $FF (left/up)
+$2969> 20 3437:	JSR $3734	; init player car position
+$296C> 20 4A33:	JSR $334A	; init entity table
+$296F> 20 3E32:	JSR $323E	; draw track/maze
+$2972> 20 162A:	JSR $2A16	; set pointer to page $40
+;
+; $2975: Draw lives indicator on screen.
+$2975> 24 02:	BIT $02		; check game state
+$2977> 10 14:	BPL $298D		; not active → skip
 $2979> EA:	NOP		;
-$297A> 50 04:	BVC $2980		;
+$297A> 50 04:	BVC $2980		; 1P mode → skip score header
 $297C> EA:	NOP		;
-$297D> 20 8E29:	JSR $298E	;
-$2980> 20 A329:	JSR $29A3	;
-$2983> A5 0E:	LDA $0E		;
-$2985> 29 0F:	AND #$0f	;
-$2987> A0 0F:	LDY #$0f	;
-$2989> 09 30:	ORA #$30	;
-$298B> 91 00:	STA ($00),Y		;
+$297D> 20 8E29:	JSR $298E	; draw score header (2P mode)
+$2980> 20 A329:	JSR $29A3	; draw player 1 score
+$2983> A5 0E:	LDA $0E		; lives remaining
+$2985> 29 0F:	AND #$0f	; mask to single digit
+$2987> A0 0F:	LDY #$0f	; screen offset
+$2989> 09 30:	ORA #$30	; convert to ASCII digit
+$298B> 91 00:	STA ($00),Y		; write lives digit to screen
 $298D> 60:	RTS		;
-$298E> 20 162A:	JSR $2A16	;
-$2991> A0 16:	LDY #$16	;
-$2993> A9 68:	LDA #$68	;
+;
+;===== SCORE DISPLAY ========================================================
+; $298E: Draw score header ("HI" label) and high score value.
+$298E> 20 162A:	JSR $2A16	; set pointer to page $40
+$2991> A0 16:	LDY #$16	; screen offset for "HI" label
+$2993> A9 68:	LDA #$68	; 'H' character (custom font)
 $2995> 91 00:	STA ($00),Y		;
 $2997> C8:	INY		;
-$2998> A9 32:	LDA #$32	;
+$2998> A9 32:	LDA #$32	; 'I' character
 $299A> 91 00:	STA ($00),Y		;
-$299C> A0 1C:	LDY #$1c	;
-$299E> A2 0C:	LDX #$0c	;
-$29A0> 20 4B30:	JSR $304B	;
-$29A3> 20 162A:	JSR $2A16	;
-$29A6> A0 01:	LDY #$01	;
-$29A8> A9 68:	LDA #$68	;
+$299C> A0 1C:	LDY #$1c	; screen offset for high score value
+$299E> A2 0C:	LDX #$0c	; ZP offset: $0C-$0D (player 2 score / high score)
+$29A0> 20 4B30:	JSR $304B	; draw BCD number from ZP
+;
+; $29A3: Draw player 1 score.
+$29A3> 20 162A:	JSR $2A16	; set pointer to page $40
+$29A6> A0 01:	LDY #$01	; screen offset for "HI" label (P1 area)
+$29A8> A9 68:	LDA #$68	; 'H'
 $29AA> 91 00:	STA ($00),Y		;
 $29AC> C8:	INY		;
-$29AD> A9 31:	LDA #$31	;
+$29AD> A9 31:	LDA #$31	; '1'
 $29AF> 91 00:	STA ($00),Y		;
-$29B1> A0 07:	LDY #$07	;
-$29B3> A2 0A:	LDX #$0a	;
-$29B5> 20 4B30:	JSR $304B	;
+$29B1> A0 07:	LDY #$07	; screen offset for P1 score value
+$29B3> A2 0A:	LDX #$0a	; ZP offset: $0A-$0B (player 1 score)
+$29B5> 20 4B30:	JSR $304B	; draw BCD number from ZP
 $29B8> 60:	RTS		;
-$29B9> 01 02:	ORA ($02,X)		;
-$29BB> 03:	.byte $03		; INVALID OPCODE !!!
-
-$29BC> 04:	.byte $04		; INVALID OPCODE !!!
-
-$29BD> 40:	RTI		;
-$29BE> 50 55:	BVC $2A15		;
-$29C0> 45 26:	EOR $26		;
-$29C2> 34:	.byte $34		; INVALID OPCODE !!!
-
-$29C3> 70 38:	BVS $29FD		;
-$29C5> 20 CC29:	JSR $29CC	;
-$29C8> CA:	DEX		;
-$29C9> D0 FA:	BNE $29C5		;
+;
+;===== DATA TABLES ==========================================================
+; $29B9: Lives per game lookup (indexed by DIP switch bits 0-1)
+;   0→1 life, 1→2 lives, 2→3 lives, 3→4 lives
+$29B9>	.byte $01, $02, $03, $04	; lives: 1, 2, 3, 4
+; $29BD: Bonus score threshold table (indexed by PRNG & 7)
+;   Values: $40, $50, $55, $45, $26, $34, $70, $38
+;   These are BCD score thresholds for bonus life awards.
+$29BD>	.byte $40, $50, $55, $45, $26, $34, $70, $38
+;
+;===== DELAY SUBROUTINES (original label: WAIT) ============================
+; $29C5: Multi-pass delay. X = number of passes of the 65536-iteration loop.
+;   Called with X=1 from $295E (death reset), X=5 from $28A9 (unused?).
+;   At 705 kHz: ~4.3 seconds per pass.
+$29C5> 20 CC29:	JSR $29CC	; run one 65536-iteration delay pass
+$29C8> CA:	DEX		; count down passes
+$29C9> D0 FA:	BNE $29C5		; loop until all passes done
 $29CB> 60:	RTS		;
+;
+; $29CC: Single 65536-iteration busy-wait delay loop.
+;   Inner: DEC $16 from 0→255→0 (256 iterations)
+;   Outer: DEC $15 from 0→255→0 (256 passes of inner)
+;   Total: 256 × 256 = 65,536 iterations, ~7 cycles each = ~459,000 cycles
 $29CC> A9 00:	LDA #$00	;
-$29CE> 85 15:	STA $15		;
-$29D0> C6 16:	DEC $16		;
-$29D2> D0 FC:	BNE $29D0		;
-$29D4> C6 15:	DEC $15		;
-$29D6> D0 F8:	BNE $29D0		;
+$29CE> 85 15:	STA $15		; delay counter hi = 0 (wraps to 255)
+$29D0> C6 16:	DEC $16		; inner loop countdown
+$29D2> D0 FC:	BNE $29D0		; inner loop (256 iterations)
+$29D4> C6 15:	DEC $15		; outer loop countdown
+$29D6> D0 F8:	BNE $29D0		; outer loop (256 passes)
 $29D8> 60:	RTS		;
-$29D9> 98:	TYA		;
+;
+;===== PSEUDO-RANDOM NUMBER GENERATOR =======================================
+; 23-bit LFSR using $19-$1A. Called from $2879 for random car direction.
+$29D9> 98:	TYA		; save Y
 $29DA> 48:	PHA		;
 $29DB> A0 17:	LDY #$17	;
 $29DD> A5 1A:	LDA $1A		;
@@ -250,44 +370,63 @@ $29F7> 68:	PLA		;
 $29F8> A8:	TAY		;
 $29F9> A5 19:	LDA $19		;
 $29FB> 60:	RTS		;
-$29FC> 20 252A:	JSR $2A25	;
-$29FF> AA:	TAX		;
-$2A00> A9 20:	LDA #$20	;
-$2A02> 81 00:	STA ($00,X)		;
-$2A04> C6 00:	DEC $00		;
-$2A06> D0 F8:	BNE $2A00		;
-$2A08> C6 01:	DEC $01		;
+;
+;===== SCREEN RAM CLEAR (original label: SRESET) ===========================
+; $29FC: Fill screen RAM ($4000-$47FF) with spaces ($20).
+;   Works backward from $43FF to $4000, clearing all 2KB.
+;
+$29FC> 20 252A:	JSR $2A25	; set pointer to page $43 (top of screen RAM)
+$29FF> AA:	TAX		; X=0
+$2A00> A9 20:	LDA #$20	; space character
+$2A02> 81 00:	STA ($00,X)		; store space at ($00),0
+$2A04> C6 00:	DEC $00		; move pointer backward
+$2A06> D0 F8:	BNE $2A00		; loop until page boundary
+$2A08> C6 01:	DEC $01		; next page down
 $2A0A> A5 01:	LDA $01		;
-$2A0C> C9 3F:	CMP #$3f	;
-$2A0E> D0 F0:	BNE $2A00		;
-$2A10> A9 FF:	LDA #$ff	;
-$2A12> 8D 0051:	STA $5100	;
+$2A0C> C9 3F:	CMP #$3f	; below $40? (below screen RAM)
+$2A0E> D0 F0:	BNE $2A00		; no → continue clearing
+$2A10> A9 FF:	LDA #$ff	; set sprite image to $FF (hidden)
+$2A12> 8D 0051:	STA $5100	; write motion object image
 $2A15> 60:	RTS		;
+;
+;===== SCREEN POINTER HELPERS ===============================================
+; Set $00/$01 (screen RAM pointer) to start of a 256-byte page.
+;   $2A16: page $40 (bottom of screen)       → $4000
+;   $2A1B: page $41 (score/lives display)    → $4100  
+;   $2A20: page $42 (mid-screen)             → $4200
+;   $2A25: page $43 (top of screen)          → $4300
+;
 $2A16> A9 40:	LDA #$40	;
-$2A18> D0 0D:	BNE $2A27		;
+$2A18> D0 0D:	BNE $2A27		; always taken
 $2A1A> EA:	NOP		;
 $2A1B> A9 41:	LDA #$41	;
-$2A1D> D0 08:	BNE $2A27		;
+$2A1D> D0 08:	BNE $2A27		; always taken
 $2A1F> EA:	NOP		;
 $2A20> A9 42:	LDA #$42	;
-$2A22> D0 03:	BNE $2A27		;
+$2A22> D0 03:	BNE $2A27		; always taken
 $2A24> EA:	NOP		;
 $2A25> A9 43:	LDA #$43	;
-$2A27> 85 01:	STA $01		;
+$2A27> 85 01:	STA $01		; set pointer hi byte
 $2A29> A9 00:	LDA #$00	;
-$2A2B> 85 00:	STA $00		;
+$2A2B> 85 00:	STA $00		; set pointer lo byte = 0
 $2A2D> 60:	RTS		;
-$2A2E> C6 78:	DEC $78		;
-$2A30> D0 0E:	BNE $2A40		;
+;
+;===== ATTRACT DEMO TIMER + ENTITY UPDATE ==================================
+; Called from $2E33 (attract demo loop) and $28EC (post-game loop).
+; Decrements timer $78; when it hits 0, reloads from $77 and calls $2AA4
+; to change car direction / advance game state.
+; Also updates all active entities via $3361.
+$2A2E> C6 78:	DEC $78		; decrement direction-change timer
+$2A30> D0 0E:	BNE $2A40		; not zero yet → skip direction change
 $2A32> EA:	NOP		;
-$2A33> A5 77:	LDA $77		;
-$2A35> 85 78:	STA $78		;
-$2A37> 20 A42A:	JSR $2AA4	;
-$2A3A> A5 8E:	LDA $8E		;
-$2A3C> 10 02:	BPL $2A40		;
+$2A33> A5 77:	LDA $77		; reload timer from preset
+$2A35> 85 78:	STA $78		; reset countdown (e.g. $30 = 48 ticks)
+$2A37> 20 A42A:	JSR $2AA4	; direction change / speed update
+$2A3A> A5 8E:	LDA $8E		; check crash flag
+$2A3C> 10 02:	BPL $2A40		; not crashed → continue
 $2A3E> EA:	NOP		;
-$2A3F> 60:	RTS		;
-$2A40> A6 45:	LDX $45		;
+$2A3F> 60:	RTS		; crashed → early return
+$2A40> A6 45:	LDX $45		; load number of active entities
 $2A42> E0 09:	CPX #$09	;
 $2A44> F0 5D:	BEQ $2AA3		;
 $2A46> EA:	NOP		;
@@ -399,148 +538,204 @@ $2B01> A9 C0:	LDA #$c0	;
 $2B03> 85 8A:	STA $8A		;
 $2B05> 20 6133:	JSR $3361	;
 $2B08> 60:	RTS		;
-$2B09> CC C9C4:	CPY $C4C9	;
-$2B0C> C2:	.byte $c2		; INVALID OPCODE !!!
+; Dead bytes (high-ASCII remnant, possibly initials "LIBB")
+$2B09>	.byte $CC, $C9, $C4, $C2, $C2
 
-$2B0D> C2:	.byte $c2		; INVALID OPCODE !!!
-
-$2B0E> 08:	PHP		;
-$2B0F> 48:	PHA		;
+;
+;===== IRQ HANDLER ==========================================================
+; Fires once per vblank (~60 Hz). Updates sprite positions, sound toggle,
+; and acknowledges the interrupt by reading $5103.
+;
+; The IRQ checks $15/$16 (delay loop counters): if either is non-zero,
+; a delay loop is active, so audio is silenced (write 0 to $5201).
+; Otherwise it toggles the audio square wave via $5201.
+;
+$2B0E> 08:	PHP		; save processor status
+$2B0F> 48:	PHA		; save A
 $2B10> 8A:	TXA		;
-$2B11> 48:	PHA		;
+$2B11> 48:	PHA		; save X
 $2B12> 98:	TYA		;
-$2B13> 48:	PHA		;
-$2B14> A5 07:	LDA $07		;
-$2B16> C9 EF:	CMP #$ef	;
+$2B13> 48:	PHA		; save Y
+;
+; --- Update sprite 1 position (player car) ---
+$2B14> A5 07:	LDA $07		; sprite X from ZP
+$2B16> C9 EF:	CMP #$ef	; clamp X: if < $EF, use as-is
 $2B18> 90 0D:	BCC $2B27		;
 $2B1A> EA:	NOP		;
-$2B1B> C9 F4:	CMP #$f4	;
-$2B1D> B0 06:	BCS $2B25		;
+$2B1B> C9 F4:	CMP #$f4	; if >= $F4 (wrapped past edge)
+$2B1D> B0 06:	BCS $2B25		; → set X=0 (off screen)
 $2B1F> EA:	NOP		;
-$2B20> A9 EF:	LDA #$ef	;
+$2B20> A9 EF:	LDA #$ef	; clamp to $EF max
 $2B22> 4C 272B:	JMP $2B27	;
-$2B25> A9 00:	LDA #$00	;
-$2B27> 8D 0050:	STA $5000	;
-$2B2A> A5 08:	LDA $08		;
-$2B2C> 8D 4050:	STA $5040	;
-$2B2F> 20 F62B:	JSR $2BF6	;
-$2B32> 20 632B:	JSR $2B63	;
-$2B35> A5 15:	LDA $15		;
-$2B37> F0 04:	BEQ $2B3D		;
+$2B25> A9 00:	LDA #$00	; X=0 (sprite hidden)
+$2B27> 8D 0050:	STA $5000	; write sprite 1 X position
+$2B2A> A5 08:	LDA $08		; sprite Y from ZP
+$2B2C> 8D 4050:	STA $5040	; write sprite 1 Y position
+$2B2F> 20 F62B:	JSR $2BF6	; update sprite 2 (enemy) position
+$2B32> 20 632B:	JSR $2B63	; update sound effects (only if game active)
+;
+; --- Delay loop audio mute check ---
+$2B35> A5 15:	LDA $15		; delay counter hi byte
+$2B37> F0 04:	BEQ $2B3D		; if 0, check lo byte
 $2B39> EA:	NOP		;
-$2B3A> 4C 422B:	JMP $2B42	;
-$2B3D> A5 16:	LDA $16		;
-$2B3F> F0 06:	BEQ $2B47		;
+$2B3A> 4C 422B:	JMP $2B42	; hi≠0: delay active → mute audio
+$2B3D> A5 16:	LDA $16		; delay counter lo byte
+$2B3F> F0 06:	BEQ $2B47		; both 0: no delay → toggle audio
 $2B41> EA:	NOP		;
-$2B42> A9 00:	LDA #$00	;
-$2B44> 4C 562B:	JMP $2B56	;
-$2B47> C6 80:	DEC $80		;
-$2B49> D0 0E:	BNE $2B59		;
+$2B42> A9 00:	LDA #$00	; delay active: write 0 to audio
+$2B44> 4C 562B:	JMP $2B56	; → STA $5201
+;
+; --- Audio toggle (normal operation) ---
+$2B47> C6 80:	DEC $80		; decrement sound timer
+$2B49> D0 0E:	BNE $2B59		; not zero → skip toggle, go to ack
 $2B4B> EA:	NOP		;
-$2B4C> A5 7F:	LDA $7F		;
+$2B4C> A5 7F:	LDA $7F		; reload sound timer from preset
 $2B4E> 85 80:	STA $80		;
-$2B50> A5 81:	LDA $81		;
-$2B52> 49 01:	EOR #$01	;
-$2B54> 85 81:	STA $81		;
-$2B56> 8D 0152:	STA $5201	;
-$2B59> AD 0351:	LDA $5103	;
-$2B5C> 68:	PLA		;
+$2B50> A5 81:	LDA $81		; current toggle state
+$2B52> 49 01:	EOR #$01	; flip bit 0
+$2B54> 85 81:	STA $81		; save new toggle state
+$2B56> 8D 0152:	STA $5201	; write to audio output
+;
+; --- Acknowledge IRQ and return ---
+$2B59> AD 0351:	LDA $5103	; read $5103 to clear IRQ latch
+$2B5C> 68:	PLA		; restore Y
 $2B5D> A8:	TAY		;
-$2B5E> 68:	PLA		;
+$2B5E> 68:	PLA		; restore X
 $2B5F> AA:	TAX		;
-$2B60> 68:	PLA		;
-$2B61> 28:	PLP		;
-$2B62> 40:	RTI		;
-$2B63> A5 02:	LDA $02		;
-$2B65> 30 02:	BMI $2B69		;
+$2B60> 68:	PLA		; restore A
+$2B61> 28:	PLP		; restore processor status
+$2B62> 40:	RTI		; return from interrupt
+;
+;===== GAME STATE UPDATE (called from IRQ) ==================================
+; $2B63: Only runs game logic when bit 7 of $02 is set (game active).
+;   Handles score events ($2BA8), sound effects ($2B8F), and
+;   sprite animation ($2B73).
+;
+$2B63> A5 02:	LDA $02		; STAT: game state flags
+$2B65> 30 02:	BMI $2B69		; bit 7 set = game active → run update
 $2B67> EA:	NOP		;
-$2B68> 60:	RTS		;
-$2B69> 20 A82B:	JSR $2BA8	;
-$2B6C> 20 8F2B:	JSR $2B8F	;
-$2B6F> 20 732B:	JSR $2B73	;
-$2B72> 60:	RTS		;
-$2B73> 24 8A:	BIT $8A		;
-$2B75> 10 17:	BPL $2B8E		;
+$2B68> 60:	RTS		; not active → skip
+$2B69> 20 A82B:	JSR $2BA8	; score event handler
+$2B6C> 20 8F2B:	JSR $2B8F	; sound effect handler
+$2B6F> 20 732B:	JSR $2B73	; sprite animation handler
+;
+;----- $2B73: Sprite animation handler (called from game state update) ----
+; $8A: animation state. Bit 7 = active, Bit 6 = phase.
+; Phase 0 (bit 6 set): set I/O bit 5 (sprite flash on), set $8A=$80
+; Phase 1 (bit 6 clear): clear I/O bit 5 (flash off), set $8A=$00
+;
+$2B73> 24 8A:	BIT $8A		; test animation state
+$2B75> 10 17:	BPL $2B8E		; bit 7 clear → not active, return
 $2B77> EA:	NOP		;
-$2B78> 50 0B:	BVC $2B85		;
+$2B78> 50 0B:	BVC $2B85		; bit 6 clear → phase 1 (turn off)
 $2B7A> EA:	NOP		;
-$2B7B> A9 20:	LDA #$20	;
-$2B7D> 20 EE2B:	JSR $2BEE	;
-$2B80> A9 80:	LDA #$80	;
-$2B82> 85 8A:	STA $8A		;
+$2B7B> A9 20:	LDA #$20	; phase 0: set bit 5
+$2B7D> 20 EE2B:	JSR $2BEE	; → I/O OR mask
+$2B80> A9 80:	LDA #$80	; clear bit 6, keep bit 7
+$2B82> 85 8A:	STA $8A		; next call → phase 1
 $2B84> 60:	RTS		;
-$2B85> A9 DF:	LDA #$df	;
-$2B87> 20 E92B:	JSR $2BE9	;
+$2B85> A9 DF:	LDA #$df	; phase 1: clear bit 5
+$2B87> 20 E92B:	JSR $2BE9	; → I/O AND mask
 $2B8A> A9 00:	LDA #$00	;
-$2B8C> 85 8A:	STA $8A		;
+$2B8C> 85 8A:	STA $8A		; animation done
 $2B8E> 60:	RTS		;
-$2B8F> C6 88:	DEC $88		;
-$2B91> D0 09:	BNE $2B9C		;
+;
+;----- $2B8F: Sound effect handler (called from game state update) --------
+; $88: sound timer/counter. Decrements each call.
+; When $88 reaches 0: set to 1, clear I/O bit 4 (mute), return.
+; Otherwise: if bit 5 of $88 is set → set I/O bit 4 (tone on),
+;            if clear → clear I/O bit 4 (tone off). Creates buzzing.
+;
+$2B8F> C6 88:	DEC $88		; sound timer countdown
+$2B91> D0 09:	BNE $2B9C		; not zero → continue sound
 $2B93> EA:	NOP		;
-$2B94> E6 88:	INC $88		;
-$2B96> A9 EF:	LDA #$ef	;
+$2B94> E6 88:	INC $88		; clamp at 1 (keeps sound dormant)
+$2B96> A9 EF:	LDA #$ef	; clear bit 4 → mute
 $2B98> 20 E92B:	JSR $2BE9	;
 $2B9B> 60:	RTS		;
 $2B9C> A5 88:	LDA $88		;
-$2B9E> 29 20:	AND #$20	;
-$2BA0> F0 F4:	BEQ $2B96		;
-$2BA2> A9 10:	LDA #$10	;
+$2B9E> 29 20:	AND #$20	; test bit 5 → creates square wave
+$2BA0> F0 F4:	BEQ $2B96		; bit 5 clear → mute phase
+$2BA2> A9 10:	LDA #$10	; bit 5 set → set I/O bit 4 (tone on)
 $2BA4> 20 EE2B:	JSR $2BEE	;
 $2BA7> 60:	RTS		;
-$2BA8> A5 84:	LDA $84		;
-$2BAA> 24 84:	BIT $84		;
-$2BAC> 10 13:	BPL $2BC1		;
+;
+;----- $2BA8: Score event handler (called from game state update) ----------
+; $84: score event register. Bit 7 = new event pending.
+;   Low nibble = score value (BCD points to add).
+; $85: repeat counter for multi-shot score sounds.
+; $86: total shot counter for extended scoring events.
+; When bit 7 set: clear it, extract score, trigger I/O sound, init repeat.
+; When bit 6 set (repeat phase): decrement $85, fire sound each rep.
+;   When $85 exhausted: reload, decrement $86. When $86 done: clear all.
+;
+$2BA8> A5 84:	LDA $84		; load score event register
+$2BAA> 24 84:	BIT $84		; test bits 7 and 6
+$2BAC> 10 13:	BPL $2BC1		; bit 7 clear → no new event
 $2BAE> EA:	NOP		;
-$2BAF> 29 7F:	AND #$7f	;
+$2BAF> 29 7F:	AND #$7f	; clear bit 7 (acknowledge event)
 $2BB1> 85 84:	STA $84		;
-$2BB3> 29 0F:	AND #$0f	;
-$2BB5> 20 EE2B:	JSR $2BEE	;
+$2BB3> 29 0F:	AND #$0f	; isolate score value (low nibble)
+$2BB5> 20 EE2B:	JSR $2BEE	; set I/O bits → trigger sound
 $2BB8> A9 02:	LDA #$02	;
-$2BBA> 85 85:	STA $85		;
+$2BBA> 85 85:	STA $85		; repeat counter = 2
 $2BBC> A9 10:	LDA #$10	;
-$2BBE> 85 86:	STA $86		;
+$2BBE> 85 86:	STA $86		; shot counter = 16
 $2BC0> 60:	RTS		;
-$2BC1> 50 25:	BVC $2BE8		;
+; --- Repeat/sustain phase (bit 7 clear, bit 6 set) ---
+$2BC1> 50 25:	BVC $2BE8		; bit 6 clear → no active sound, return
 $2BC3> EA:	NOP		;
-$2BC4> C6 85:	DEC $85		;
-$2BC6> F0 09:	BEQ $2BD1		;
+$2BC4> C6 85:	DEC $85		; decrement repeat counter
+$2BC6> F0 09:	BEQ $2BD1		; repeat done → reload
 $2BC8> EA:	NOP		;
-$2BC9> 29 0F:	AND #$0f	;
-$2BCB> 09 02:	ORA #$02	;
+$2BC9> 29 0F:	AND #$0f	; still repeating: re-trigger sound
+$2BCB> 09 02:	ORA #$02	; set bit 1 for sound variant
 $2BCD> 20 EE2B:	JSR $2BEE	;
 $2BD0> 60:	RTS		;
-$2BD1> A9 FD:	LDA #$fd	;
+$2BD1> A9 FD:	LDA #$fd	; repeat exhausted: clear bit 1
 $2BD3> 20 E92B:	JSR $2BE9	;
 $2BD6> A9 01:	LDA #$01	;
-$2BD8> 85 85:	STA $85		;
-$2BDA> C6 86:	DEC $86		;
-$2BDC> D0 0A:	BNE $2BE8		;
+$2BD8> 85 85:	STA $85		; reload repeat = 1
+$2BDA> C6 86:	DEC $86		; decrement shot counter
+$2BDC> D0 0A:	BNE $2BE8		; shots remaining → return
 $2BDE> EA:	NOP		;
-$2BDF> A9 F1:	LDA #$f1	;
+$2BDF> A9 F1:	LDA #$f1	; all shots done: clear bits 3-1
 $2BE1> 20 E92B:	JSR $2BE9	;
 $2BE4> A9 00:	LDA #$00	;
-$2BE6> 85 84:	STA $84		;
+$2BE6> 85 84:	STA $84		; clear score event entirely
 $2BE8> 60:	RTS		;
-$2BE9> 25 87:	AND $87		;
-$2BEB> 4C F02B:	JMP $2BF0	;
-$2BEE> 05 87:	ORA $87		;
-$2BF0> 85 87:	STA $87		;
-$2BF2> 8D 0052:	STA $5200	;
+;
+;===== I/O PORT BIT HELPERS =================================================
+; $2BE9: Clear bits in sprite color register. A = AND mask (0 bits cleared).
+; $2BEE: Set bits in sprite color register. A = OR mask (1 bits set).
+; Both write result to $87 (shadow) and $5200 (sprite 2 color).
+;
+$2BE9> 25 87:	AND $87		; clear bits in shadow register
+$2BEB> 4C F02B:	JMP $2BF0	; → write out
+$2BEE> 05 87:	ORA $87		; SETAUD: set bits in shadow register
+$2BF0> 85 87:	STA $87		; update shadow
+$2BF2> 8D 0052:	STA $5200	; write sprite 2 color / audio control
 $2BF5> 60:	RTS		;
-$2BF6> C6 82:	DEC $82		;
-$2BF8> D0 20:	BNE $2C1A		;
+;
+;===== SPEED/DIFFICULTY PROGRESSION (called from IRQ via $2B63) =============
+; $2BF6: Decrements $82 counter. When it reaches 0, reloads to $A0 (160)
+;   and adjusts game speed ($77 = direction timer) and difficulty ($83).
+;   Gradually speeds up the game over time.
+;
+$2BF6> C6 82:	DEC $82		; progression counter
+$2BF8> D0 20:	BNE $2C1A		; not zero → return
 $2BFA> EA:	NOP		;
 $2BFB> A9 A0:	LDA #$a0	;
-$2BFD> 85 82:	STA $82		;
-$2BFF> C6 77:	DEC $77		;
+$2BFD> 85 82:	STA $82		; reload counter = 160 (frames between speed changes)
+$2BFF> C6 77:	DEC $77		; decrease direction timer → faster turns
 $2C01> D0 03:	BNE $2C06		;
 $2C03> EA:	NOP		;
-$2C04> E6 77:	INC $77		;
-$2C06> C6 83:	DEC $83		;
+$2C04> E6 77:	INC $77		; clamp at 1 (don't go to 0)
+$2C06> C6 83:	DEC $83		; decrease difficulty counter
 $2C08> D0 10:	BNE $2C1A		;
 $2C0A> EA:	NOP		;
 $2C0B> A9 07:	LDA #$07	;
-$2C0D> 85 83:	STA $83		;
+$2C0D> 85 83:	STA $83		; reload difficulty counter = 7
 $2C0F> C6 7F:	DEC $7F		;
 $2C11> A5 7F:	LDA $7F		;
 $2C13> C9 01:	CMP #$01	;
@@ -548,51 +743,69 @@ $2C15> D0 03:	BNE $2C1A		;
 $2C17> EA:	NOP		;
 $2C18> E6 7F:	INC $7F		;
 $2C1A> 60:	RTS		;
+;
+;===== GAME VARIABLE INIT ===================================================
+; $2C1B: Initialize game timing and state variables.
+;   Called from RESET ($2821) and post-crash restart ($295E).
+;
 $2C1B> A9 14:	LDA #$14	;
-$2C1D> 85 7F:	STA $7F		;
+$2C1D> 85 7F:	STA $7F		; sound timer reload = 20
 $2C1F> A9 50:	LDA #$50	;
-$2C21> 85 77:	STA $77		;
+$2C21> 85 77:	STA $77		; direction-change timer reload = 80 ticks
 $2C23> A9 07:	LDA #$07	;
-$2C25> 85 83:	STA $83		;
+$2C25> 85 83:	STA $83		; difficulty level = 7
 $2C27> A9 02:	LDA #$02	;
-$2C29> 85 7C:	STA $7C		;
-$2C2B> 85 7D:	STA $7D		;
-$2C2D> 85 83:	STA $83		;
+$2C29> 85 7C:	STA $7C		; speed timer reload = 2
+$2C2B> 85 7D:	STA $7D		; speed countdown = 2
+$2C2D> 85 83:	STA $83		; difficulty = 2 (overrides 7 above)
 $2C2F> A9 00:	LDA #$00	;
-$2C31> 85 8E:	STA $8E		;
+$2C31> 85 8E:	STA $8E		; crash flag = 0 (alive)
 $2C33> A9 02:	LDA #$02	;
-$2C35> 85 92:	STA $92		;
+$2C35> 85 92:	STA $92		; speed level = 2
 $2C37> A9 00:	LDA #$00	;
-$2C39> 85 87:	STA $87		;
+$2C39> 85 87:	STA $87		; temp = 0
 $2C3B> 60:	RTS		;
+;
+;===== CRASH/DEATH ROUTINE ==================================================
+; $2C3C: Called via JMP from $375A when car hits a wall/obstacle.
+; Erases the car from screen RAM, calculates death sprite position,
+; plays death animation (expanding sprite), then sets $8E=$FF (dead).
+;
+; Contains two busy-wait delay loops and disables interrupts (SEI)
+; during the death animation, which takes ~0.5s on real hardware.
+;
 $2C3C> A0 00:	LDY #$00	;
-$2C3E> A9 20:	LDA #$20	;
-$2C40> 91 69:	STA ($69),Y		;
-$2C42> A5 69:	LDA $69		;
+$2C3E> A9 20:	LDA #$20	; space character (blank tile)
+$2C40> 91 69:	STA ($69),Y		; erase car from screen RAM
+;
+; --- Calculate death sprite position from screen RAM pointer ---
+$2C42> A5 69:	LDA $69		; screen pointer lo
 $2C44> 0A:	ASL A		;
 $2C45> 0A:	ASL A		;
-$2C46> 0A:	ASL A		;
-$2C47> 49 FF:	EOR #$ff	;
+$2C46> 0A:	ASL A		; ×8 (tile → pixel)
+$2C47> 49 FF:	EOR #$ff	; invert (Exidy Y-axis is inverted)
 $2C49> 18:	CLC		;
-$2C4A> 69 ED:	ADC #$ed	;
-$2C4C> 85 07:	STA $07		;
+$2C4A> 69 ED:	ADC #$ed	; adjust to sprite coordinate space
+$2C4C> 85 07:	STA $07		; sprite X position
 $2C4E> A5 69:	LDA $69		;
-$2C50> 46 6A:	LSR $6A		;
+$2C50> 46 6A:	LSR $6A		; divide pointer by 4
 $2C52> 6A:	ROR A		;
 $2C53> 46 6A:	LSR $6A		;
 $2C55> 6A:	ROR A		;
-$2C56> 29 F8:	AND #$f8	;
-$2C58> 49 FF:	EOR #$ff	;
+$2C56> 29 F8:	AND #$f8	; mask to 8-pixel grid
+$2C58> 49 FF:	EOR #$ff	; invert Y
 $2C5A> 18:	CLC		;
-$2C5B> 69 F6:	ADC #$f6	;
-$2C5D> 85 08:	STA $08		;
-$2C5F> A2 00:	LDX #$00	;
-$2C61> A0 0C:	LDY #$0c	;
-$2C63> CA:	DEX		;
-$2C64> D0 FD:	BNE $2C63		;
+$2C5B> 69 F6:	ADC #$f6	; adjust Y offset
+$2C5D> 85 08:	STA $08		; sprite Y position
+;
+; --- Short delay (256 × 12 = 3,072 iterations) ---
+$2C5F> A2 00:	LDX #$00	; inner: 256 (wraps from 0)
+$2C61> A0 0C:	LDY #$0c	; outer: 12 passes
+$2C63> CA:	DEX		; inner delay loop
+$2C64> D0 FD:	BNE $2C63		; (256 iterations per pass)
 $2C66> 88:	DEY		;
-$2C67> D0 FA:	BNE $2C63		;
-$2C69> 78:	SEI		;
+$2C67> D0 FA:	BNE $2C63		; (12 passes)
+$2C69> 78:	SEI		; DISABLE INTERRUPTS during death animation
 $2C6A> 24 02:	BIT $02		;
 $2C6C> 10 12:	BPL $2C80		;
 $2C6E> EA:	NOP		;
@@ -603,634 +816,612 @@ $2C76> 20 EE2B:	JSR $2BEE	;
 $2C79> A9 C0:	LDA #$c0	;
 $2C7B> 85 8A:	STA $8A		;
 $2C7D> 20 732B:	JSR $2B73	;
-$2C80> A9 F4:	LDA #$f4	;
-$2C82> 85 8B:	STA $8B		;
-$2C84> 8D 0051:	STA $5100	;
-$2C87> A9 30:	LDA #$30	;
+; --- Death animation: cycle through explosion sprites $F4-$FA ---
+; Interrupts are DISABLED (SEI at $2C69) during this entire sequence.
+; Each sprite frame has a delay of 48 × 256 = 12,288 inner iterations.
+; 7 frames × 12,288 = 86,016 total delay iterations.
+; At 705 kHz: ~0.5 seconds. With JIT dispatch overhead: much longer.
+;
+$2C80> A9 F4:	LDA #$f4	; first explosion sprite index
+$2C82> 85 8B:	STA $8B		; current sprite
+;
+; --- Outer loop: cycle through sprite frames $F4 → $FA ---
+$2C84> 8D 0051:	STA $5100	; set motion object image
+$2C87> A9 30:	LDA #$30	; delay = 48 (outer)
 $2C89> 85 8D:	STA $8D		;
-$2C8B> C6 8C:	DEC $8C		;
+;
+; --- Delay loop: 48 × 256 = 12,288 iterations per sprite frame ---
+$2C8B> C6 8C:	DEC $8C		; inner counter (256 iter, wraps from 0)
 $2C8D> D0 FC:	BNE $2C8B		;
-$2C8F> C6 8D:	DEC $8D		;
+$2C8F> C6 8D:	DEC $8D		; outer counter (48 passes)
 $2C91> D0 F8:	BNE $2C8B		;
-$2C93> E6 8B:	INC $8B		;
+;
+$2C93> E6 8B:	INC $8B		; next sprite frame
 $2C95> A5 8B:	LDA $8B		;
-$2C97> C9 F5:	CMP #$f5	;
+$2C97> C9 F5:	CMP #$f5	; at frame $F5? (special: update sound)
 $2C99> D0 06:	BNE $2CA1		;
 $2C9B> EA:	NOP		;
-$2C9C> 20 632B:	JSR $2B63	;
+$2C9C> 20 632B:	JSR $2B63	; update sound effects
 $2C9F> A5 8B:	LDA $8B		;
-$2CA1> C9 FB:	CMP #$fb	;
-$2CA3> D0 DF:	BNE $2C84		;
+$2CA1> C9 FB:	CMP #$fb	; past last frame ($FA)?
+$2CA3> D0 DF:	BNE $2C84		; loop back for next frame
+;
+; --- Death animation complete ---
 $2CA5> A9 BF:	LDA #$bf	;
-$2CA7> 20 E92B:	JSR $2BE9	;
-$2CAA> 58:	CLI		;
+$2CA7> 20 E92B:	JSR $2BE9	; clear audio bits
+$2CAA> 58:	CLI		; RE-ENABLE INTERRUPTS
 $2CAB> A9 FF:	LDA #$ff	;
-$2CAD> 85 8E:	STA $8E		;
+$2CAD> 85 8E:	STA $8E		; CRAFLG = $FF (dead)
 $2CAF> 60:	RTS		;
-$2CB0> AD 0151:	LDA $5101	;
-$2CB3> 10 04:	BPL $2CB9		;
+;
+;===== INPUT POLLING ========================================================
+; $2CB0: Check if any input is active. Returns A=0 if nothing pressed.
+;   $5101 is active-LOW: bit=0 when pressed, bit=1 when not pressed.
+;   Bit 7 = not connected on Side Trac (always 1 = active-LOW idle).
+;
+;   Fast path: if bit 7 is set (N flag), nothing pressed → return 0.
+;   Slow path: bit 7 clear → debounce by reading $5101 255 times.
+;
+;   The debounce loop filters switch bounce by requiring the input
+;   to remain stable for 255 consecutive reads (~0.4ms at 705 kHz).
+;   If it bounces back (bit 7 goes high), restart from $2CB0.
+;
+$2CB0> AD 0151:	LDA $5101	; read control inputs
+$2CB3> 10 04:	BPL $2CB9		; bit 7 clear → button active, debounce
 $2CB5> EA:	NOP		;
-$2CB6> A9 00:	LDA #$00	;
-$2CB8> 60:	RTS		;
+$2CB6> A9 00:	LDA #$00	; nothing pressed
+$2CB8> 60:	RTS		; return 0
+;
+; --- Debounce loop: wait for stable input ---
 $2CB9> A9 FF:	LDA #$ff	;
-$2CBB> 85 03:	STA $03		;
-$2CBD> AD 0151:	LDA $5101	;
-$2CC0> 30 EE:	BMI $2CB0		;
-$2CC2> C6 03:	DEC $03		;
-$2CC4> D0 F7:	BNE $2CBD		;
-$2CC6> AD 0151:	LDA $5101	;
-$2CC9> 30 03:	BMI $2CCE		;
+$2CBB> 85 03:	STA $03		; debounce counter = 255
+$2CBD> AD 0151:	LDA $5101	; re-read inputs
+$2CC0> 30 EE:	BMI $2CB0		; bit 7 set again → bounce, restart
+$2CC2> C6 03:	DEC $03		; count down
+$2CC4> D0 F7:	BNE $2CBD		; loop 255 times
+$2CC6> AD 0151:	LDA $5101	; re-read after debounce
+$2CC9> 30 03:	BMI $2CCE		; still pressed → wait for release
 $2CCB> EA:	NOP		;
-$2CCC> 10 F8:	BPL $2CC6		;
-$2CCE> C6 03:	DEC $03		;
+$2CCC> 10 F8:	BPL $2CC6		; released → wait for re-press
+$2CCE> C6 03:	DEC $03		; release debounce counter
 $2CD0> AD 0151:	LDA $5101	;
-$2CD3> 10 F1:	BPL $2CC6		;
+$2CD3> 10 F1:	BPL $2CC6		; bounced → restart
 $2CD5> C6 03:	DEC $03		;
-$2CD7> D0 F7:	BNE $2CD0		;
-$2CD9> AD 0051:	LDA $5100	;
-$2CDC> 29 0C:	AND #$0c	;
+$2CD7> D0 F7:	BNE $2CD0		; loop 255 times for release
+;
+; --- Coin accepted: add fractional credit based on DIP switch setting ---
+$2CD9> AD 0051:	LDA $5100	; read DIP switches
+$2CDC> 29 0C:	AND #$0c	; bits 2-3 = coinage setting
 $2CDE> 4A:	LSR A		;
-$2CDF> 4A:	LSR A		;
+$2CDF> 4A:	LSR A		; shift to 0-3
 $2CE0> AA:	TAX		;
-$2CE1> BD F92C:	LDA $2CF9,X	;
+$2CE1> BD F92C:	LDA $2CF9,X	; lookup coin fraction from table
 $2CE4> 18:	CLC		;
-$2CE5> 65 06:	ADC $06		;
+$2CE5> 65 06:	ADC $06		; add to coin accumulator
 $2CE7> 85 06:	STA $06		;
-$2CE9> 4A:	LSR A		;
-$2CEA> F0 0C:	BEQ $2CF8		;
+$2CE9> 4A:	LSR A		; if accumulator >= 2, add a credit
+$2CEA> F0 0C:	BEQ $2CF8		; < 2 → no credit yet
 $2CEC> EA:	NOP		;
-$2CED> F8:	SED		;
+$2CED> F8:	SED		; decimal mode for BCD credit counter
 $2CEE> 18:	CLC		;
-$2CEF> 65 13:	ADC $13		;
+$2CEF> 65 13:	ADC $13		; add credits (BCD)
 $2CF1> 85 13:	STA $13		;
 $2CF3> D8:	CLD		;
 $2CF4> A9 00:	LDA #$00	;
-$2CF6> 85 06:	STA $06		;
+$2CF6> 85 06:	STA $06		; reset coin accumulator
 $2CF8> 60:	RTS		;
-$2CF9> 04:	.byte $04		; INVALID OPCODE !!!
-
-$2CFA> 02:	.byte $02		; INVALID OPCODE !!!
-
-$2CFB> 01 01:	ORA ($01,X)		;
-$2CFD> A9 01:	LDA #$01	;
-$2CFF> 85 04:	STA $04		;
-$2D01> 20 052D:	JSR $2D05	;
+;
+; $2CF9: Coinage table (indexed by DIP bits 2-3):
+;   $04=4 coins/credit, $02=2 coins/credit, $01=1 coin/credit, $01=1/credit
+$2CF9>	.byte $04, $02, $01, $01	; 4/$, 2/$, 1/$, 1/$
+;
+;===== COIN/START BUTTON CHECK ==============================================
+; $2CFD: Check COIN1 (bit 0 of $5101). Returns A=$FF if pressed, A=$00 if not.
+; $2CFF: Check START (bit 0 of $04=$01). Both route through $2D05.
+;
+; $2D05: Generic debounced button check. Reads $5101, inverts (EOR $FF),
+;   ANDs with mask in $04. If the target bit is active, debounce 255 reads.
+;   Returns A=$FF (confirmed press) or A=$00 (not pressed / bounce).
+;
+$2CFD> A9 01:	LDA #$01	; mask for bit 0 (COIN1)
+$2CFF> 85 04:	STA $04		; store button mask
+$2D01> 20 052D:	JSR $2D05	; debounced button check
 $2D04> 60:	RTS		;
-$2D05> AD 0151:	LDA $5101	;
-$2D08> 49 FF:	EOR #$ff	;
-$2D0A> 25 04:	AND $04		;
-$2D0C> D0 04:	BNE $2D12		;
+;
+$2D05> AD 0151:	LDA $5101	; read inputs (active-LOW)
+$2D08> 49 FF:	EOR #$ff	; invert → active-HIGH
+$2D0A> 25 04:	AND $04		; isolate target button
+$2D0C> D0 04:	BNE $2D12		; button active → debounce
 $2D0E> EA:	NOP		;
-$2D0F> A9 00:	LDA #$00	;
-$2D11> 60:	RTS		;
+$2D0F> A9 00:	LDA #$00	; button not pressed
+$2D11> 60:	RTS		; return 0
+;
+; --- Debounce: require stable press for 255 reads ---
 $2D12> A9 FF:	LDA #$ff	;
-$2D14> 85 03:	STA $03		;
-$2D16> AD 0151:	LDA $5101	;
-$2D19> 49 FF:	EOR #$ff	;
-$2D1B> 25 04:	AND $04		;
-$2D1D> F0 E6:	BEQ $2D05		;
+$2D14> 85 03:	STA $03		; debounce counter = 255
+$2D16> AD 0151:	LDA $5101	; re-read inputs
+$2D19> 49 FF:	EOR #$ff	; invert
+$2D1B> 25 04:	AND $04		; check button still held
+$2D1D> F0 E6:	BEQ $2D05		; released → bounce, restart
 $2D1F> C6 03:	DEC $03		;
-$2D21> D0 F3:	BNE $2D16		;
-$2D23> A9 FF:	LDA #$ff	;
-$2D25> 60:	RTS		;
-$2D26> AD 0051:	LDA $5100	;
-$2D29> 29 10:	AND #$10	;
-$2D2B> F0 26:	BEQ $2D53		;
+$2D21> D0 F3:	BNE $2D16		; loop 255 times
+$2D23> A9 FF:	LDA #$ff	; confirmed press
+$2D25> 60:	RTS		; return $FF
+;
+;===== SCORE CHECK + ATTRACT MODE ENTRY (original label: ENDG) ==============
+; $2D26: Called from $282B after reset. Checks if any player scored a new
+;   high score, awards bonus credits, then JMPs to attract mode ($2E02).
+;   Never returns via RTS — attract mode loops until a coin is inserted,
+;   then returns via $2E6E → RTS to $282E.
+;
+$2D26> AD 0051:	LDA $5100	; read DIP switches
+$2D29> 29 10:	AND #$10	; bit 4 = bonus credit enable
+$2D2B> F0 26:	BEQ $2D53		; bonus disabled → skip
 $2D2D> EA:	NOP		;
-$2D2E> A5 14:	LDA $14		;
-$2D30> D0 21:	BNE $2D53		;
+$2D2E> A5 14:	LDA $14		; high-score qualifier count
+$2D30> D0 21:	BNE $2D53		; already qualified → skip
 $2D32> EA:	NOP		;
-$2D33> A5 0B:	LDA $0B		;
-$2D35> C5 12:	CMP $12		;
-$2D37> 90 03:	BCC $2D3C		;
+;----- Check each player's score against bonus threshold -----
+$2D33> A5 0B:	LDA $0B		; P1 score hi byte
+$2D35> C5 12:	CMP $12		; compare to bonus threshold hi
+$2D37> 90 03:	BCC $2D3C		; P1 below threshold → skip
 $2D39> EA:	NOP		;
-$2D3A> E6 14:	INC $14		;
-$2D3C> A5 0D:	LDA $0D		;
-$2D3E> C5 12:	CMP $12		;
-$2D40> 90 03:	BCC $2D45		;
+$2D3A> E6 14:	INC $14		; P1 earned bonus credit
+$2D3C> A5 0D:	LDA $0D		; P2 score hi byte
+$2D3E> C5 12:	CMP $12		; compare to bonus threshold hi
+$2D40> 90 03:	BCC $2D45		; P2 below threshold → skip
 $2D42> EA:	NOP		;
-$2D43> E6 14:	INC $14		;
-$2D45> A5 14:	LDA $14		;
-$2D47> F8:	SED		;
+$2D43> E6 14:	INC $14		; P2 earned bonus credit
+$2D45> A5 14:	LDA $14		; total bonus credits earned (0, 1, or 2)
+$2D47> F8:	SED		; BCD mode
 $2D48> 18:	CLC		;
-$2D49> 65 13:	ADC $13		;
+$2D49> 65 13:	ADC $13		; add bonus credits to credit counter
 $2D4B> 85 13:	STA $13		;
-$2D4D> D8:	CLD		;
+$2D4D> D8:	CLD		; back to binary
 $2D4E> A9 00:	LDA #$00	;
-$2D50> 4C 572D:	JMP $2D57	;
-$2D53> A9 00:	LDA #$00	;
-$2D55> 85 14:	STA $14		;
-$2D57> A5 10:	LDA $10		;
-$2D59> C5 0B:	CMP $0B		;
-$2D5B> D0 05:	BNE $2D62		;
+$2D50> 4C 572D:	JMP $2D57	; → update high score table
+$2D53> A9 00:	LDA #$00	; bonus disabled or already qualified
+$2D55> 85 14:	STA $14		; clear qualifier count
+;----- Update high score if P1 beat it -----
+$2D57> A5 10:	LDA $10		; high score hi byte
+$2D59> C5 0B:	CMP $0B		; compare to P1 score hi
+$2D5B> D0 05:	BNE $2D62		; hi bytes differ → just check carry
 $2D5D> EA:	NOP		;
-$2D5E> A5 0F:	LDA $0F		;
-$2D60> C5 0A:	CMP $0A		;
-$2D62> B0 09:	BCS $2D6D		;
+$2D5E> A5 0F:	LDA $0F		; hi bytes equal → compare lo bytes
+$2D60> C5 0A:	CMP $0A		; high score lo vs P1 score lo
+$2D62> B0 09:	BCS $2D6D		; high score >= P1 → no update
 $2D64> EA:	NOP		;
-$2D65> A5 0B:	LDA $0B		;
-$2D67> 85 10:	STA $10		;
+$2D65> A5 0B:	LDA $0B		; P1 beat high score!
+$2D67> 85 10:	STA $10		; update high score hi
 $2D69> A5 0A:	LDA $0A		;
-$2D6B> 85 0F:	STA $0F		;
-$2D6D> A5 10:	LDA $10		;
-$2D6F> C5 0D:	CMP $0D		;
-$2D71> D0 05:	BNE $2D78		;
+$2D6B> 85 0F:	STA $0F		; update high score lo
+;----- Update high score if P2 beat it -----
+$2D6D> A5 10:	LDA $10		; high score hi byte
+$2D6F> C5 0D:	CMP $0D		; compare to P2 score hi
+$2D71> D0 05:	BNE $2D78		; hi bytes differ → just check carry
 $2D73> EA:	NOP		;
-$2D74> A5 0F:	LDA $0F		;
-$2D76> C5 0C:	CMP $0C		;
-$2D78> B0 09:	BCS $2D83		;
+$2D74> A5 0F:	LDA $0F		; hi bytes equal → compare lo bytes
+$2D76> C5 0C:	CMP $0C		; high score lo vs P2 score lo
+$2D78> B0 09:	BCS $2D83		; high score >= P2 → no update
 $2D7A> EA:	NOP		;
-$2D7B> A5 0D:	LDA $0D		;
-$2D7D> 85 10:	STA $10		;
+$2D7B> A5 0D:	LDA $0D		; P2 beat high score!
+$2D7D> 85 10:	STA $10		; update high score hi
 $2D7F> A5 0C:	LDA $0C		;
-$2D81> 85 0F:	STA $0F		;
-$2D83> 20 892D:	JSR $2D89	;
-$2D86> 4C 022E:	JMP $2E02	;
-$2D89> 20 FC29:	JSR $29FC	;
-$2D8C> 20 162A:	JSR $2A16	;
-$2D8F> A2 02:	LDX #$02	;
-$2D91> 20 732E:	JSR $2E73	;
-$2D94> A2 01:	LDX #$01	;
-$2D96> 20 732E:	JSR $2E73	;
-$2D99> A0 F0:	LDY #$f0	;
-$2D9B> A2 0F:	LDX #$0f	;
-$2D9D> 20 4B30:	JSR $304B	;
-$2DA0> 20 D32F:	JSR $2FD3	;
-$2DA3> 20 202A:	JSR $2A20	;
-$2DA6> A2 03:	LDX #$03	;
-$2DA8> 20 732E:	JSR $2E73	;
-$2DAB> A2 04:	LDX #$04	;
-$2DAD> 20 732E:	JSR $2E73	;
-$2DB0> AD 0051:	LDA $5100	;
-$2DB3> 29 0C:	AND #$0c	;
-$2DB5> C9 00:	CMP #$00	;
-$2DB7> F0 19:	BEQ $2DD2		;
+$2D81> 85 0F:	STA $0F		; update high score lo
+$2D83> 20 892D:	JSR $2D89	; draw title screen
+$2D86> 4C 022E:	JMP $2E02	; → attract mode loop
+;
+;----- $2D89: Draw title/attract screen ------------------------------------
+; Clears screen, draws: "GAME OVER", "TODAYS HIGH SCORE", high score
+; number, P1/P2 labels + scores, coin info, copyright.
+;
+$2D89> 20 FC29:	JSR $29FC	; clear screen RAM ($E000-$E0FF)
+$2D8C> 20 162A:	JSR $2A16	; set screen ptr to page $40 (top of screen)
+$2D8F> A2 02:	LDX #$02	; string #2 = "TODAYS HIGH SCORE"
+$2D91> 20 732E:	JSR $2E73	; draw it
+$2D94> A2 01:	LDX #$01	; string #1 = "GAME OVER"  
+$2D96> 20 732E:	JSR $2E73	; draw it
+$2D99> A0 F0:	LDY #$f0	; screen offset for high score number
+$2D9B> A2 0F:	LDX #$0f	; ZP offset: $0F-$10 (high score)
+$2D9D> 20 4B30:	JSR $304B	; draw high score as BCD digits
+$2DA0> 20 D32F:	JSR $2FD3	; draw P1/P2 labels + their scores
+$2DA3> 20 202A:	JSR $2A20	; set screen ptr to page $42
+$2DA6> A2 03:	LDX #$03	; string #3 (coin-related message)
+$2DA8> 20 732E:	JSR $2E73	; draw it
+$2DAB> A2 04:	LDX #$04	; string #4 (coin-related message)
+$2DAD> 20 732E:	JSR $2E73	; draw it
+;----- Draw coinage info based on DIP switch bits 2-3 -----
+; DIP bits 2-3: 00=4 coins, 01=2 coins, 10/11=1 coin per credit
+; Tile $32='2', $34='4', $20=' ' (space)
+;
+$2DB0> AD 0051:	LDA $5100	; read DIP switches
+$2DB3> 29 0C:	AND #$0c	; isolate coinage bits 2-3
+$2DB5> C9 00:	CMP #$00	; 4-coin mode?
+$2DB7> F0 19:	BEQ $2DD2		; yes → draw "2 PLAYS 25¢" variant
 $2DB9> EA:	NOP		;
-$2DBA> C9 04:	CMP #$04	;
-$2DBC> F0 29:	BEQ $2DE7		;
+$2DBA> C9 04:	CMP #$04	; 2-coin mode?
+$2DBC> F0 29:	BEQ $2DE7		; yes → draw "1 PLAY 25¢" variant
 $2DBE> EA:	NOP		;
-$2DBF> A9 32:	LDA #$32	;
-$2DC1> A0 07:	LDY #$07	;
+; --- 1-coin mode: draw "2 PLAYS 25¢" or similar ---
+$2DBF> A9 32:	LDA #$32	; tile '2'
+$2DC1> A0 07:	LDY #$07	; screen offset
 $2DC3> 91 00:	STA ($00),Y		;
-$2DC5> A0 52:	LDY #$52	;
+$2DC5> A0 52:	LDY #$52	; screen offset
 $2DC7> 91 00:	STA ($00),Y		;
-$2DC9> A9 34:	LDA #$34	;
-$2DCB> A0 47:	LDY #$47	;
+$2DC9> A9 34:	LDA #$34	; tile '4'
+$2DCB> A0 47:	LDY #$47	; screen offset
 $2DCD> 91 00:	STA ($00),Y		;
-$2DCF> 4C F12D:	JMP $2DF1	;
-$2DD2> A9 32:	LDA #$32	;
-$2DD4> A0 12:	LDY #$12	;
+$2DCF> 4C F12D:	JMP $2DF1	; → draw remaining strings
+; --- 4-coin mode: draw "2 PLAYS 25¢" and blank out extra area ---
+$2DD2> A9 32:	LDA #$32	; tile '2'
+$2DD4> A0 12:	LDY #$12	; screen offset
 $2DD6> 91 00:	STA ($00),Y		;
-$2DD8> A0 57:	LDY #$57	;
-$2DDA> A2 10:	LDX #$10	;
-$2DDC> A9 20:	LDA #$20	;
+$2DD8> A0 57:	LDY #$57	; blank 17 tiles with spaces
+$2DDA> A2 10:	LDX #$10	; counter = 16+1
+$2DDC> A9 20:	LDA #$20	; tile ' ' (space)
 $2DDE> 91 00:	STA ($00),Y		;
 $2DE0> 88:	DEY		;
 $2DE1> CA:	DEX		;
-$2DE2> 10 FA:	BPL $2DDE		;
-$2DE4> 4C F12D:	JMP $2DF1	;
-$2DE7> A9 32:	LDA #$32	;
-$2DE9> A0 47:	LDY #$47	;
+$2DE2> 10 FA:	BPL $2DDE		; loop to clear area
+$2DE4> 4C F12D:	JMP $2DF1	; → draw remaining strings
+; --- 2-coin mode ---
+$2DE7> A9 32:	LDA #$32	; tile '2'
+$2DE9> A0 47:	LDY #$47	; screen offset
 $2DEB> 91 00:	STA ($00),Y		;
-$2DED> A0 52:	LDY #$52	;
+$2DED> A0 52:	LDY #$52	; screen offset
 $2DEF> 91 00:	STA ($00),Y		;
-$2DF1> A2 00:	LDX #$00	;
-$2DF3> 20 732E:	JSR $2E73	;
-$2DF6> 20 252A:	JSR $2A25	;
-$2DF9> 20 872E:	JSR $2E87	;
+$2DF1> A2 00:	LDX #$00	; string #0 = "SIDE TRAC" (title)
+$2DF3> 20 732E:	JSR $2E73	; draw it
+$2DF6> 20 252A:	JSR $2A25	; set screen ptr to page $43
+$2DF9> 20 872E:	JSR $2E87	; draw string using $2E87 variant
 $2DFC> A9 00:	LDA #$00	;
-$2DFE> 20 E92B:	JSR $2BE9	;
-$2E01> 60:	RTS		;
+$2DFE> 20 E92B:	JSR $2BE9	; set I/O port bit 0 = 0
+$2E01> 60:	RTS		; return from title screen setup
+;
+;===== ATTRACT MODE =========================================================
+; $2E02: Main attract mode sequence. Runs continuously until a coin is
+;   inserted ($13 > 0). On coin insert, sets $02=$80 (game active) and
+;   returns, which pops back through the JSR $2D26 at $282B.
+;
+; Flow:
+;   1. $2E02: Clear game state, set sprite image to $FF
+;   2. $2E06: Call $2E58 (65536-iteration delay with coin check)
+;   3. If coin inserted → $2E6E → return
+;   4. $2E13: Init player car + entities for demo
+;   5. $2E21: Draw track + score display  
+;   6. $2E2F: Set demo speed ($77=$30=48 ticks between direction changes)
+;   7. $2E33: ATTRACT DEMO LOOP — runs car around track
+;      - JSR $2A2E: timer tick + entity movement
+;      - If car crashed: JSR $295E (reset car), clear crash flag
+;      - JSR $2CB0: check for coin (return to title if inserted)
+;      - DEC $16/$15: 65536-iteration demo timer
+;   8. When demo timer expires: redraw title (JSR $2D89), restart at $2E06
+;
 $2E02> A9 00:	LDA #$00	;
-$2E04> 85 02:	STA $02		;
-$2E06> A9 FF:	LDA #$ff	;
-$2E08> 8D 0051:	STA $5100	;
-$2E0B> 20 582E:	JSR $2E58	;
-$2E0E> A5 13:	LDA $13		;
-$2E10> D0 5C:	BNE $2E6E		;
+$2E04> 85 02:	STA $02		; clear game state (not active)
+$2E06> A9 FF:	LDA #$ff	; sprite image = $FF (blank/hidden)
+$2E08> 8D 0051:	STA $5100	; write motion object image
+$2E0B> 20 582E:	JSR $2E58	; 65536-iteration delay (checks coin each iter)
+$2E0E> A5 13:	LDA $13		; credits?
+$2E10> D0 5C:	BNE $2E6E		; coin inserted → exit attract mode
 $2E12> EA:	NOP		;
-$2E13> 20 3437:	JSR $3734	;
-$2E16> 20 4A33:	JSR $334A	;
-$2E19> 20 B02C:	JSR $2CB0	;
+$2E13> 20 3437:	JSR $3734	; init player car position
+$2E16> 20 4A33:	JSR $334A	; init entity table
+$2E19> 20 B02C:	JSR $2CB0	; coin check
 $2E1C> A5 13:	LDA $13		;
-$2E1E> D0 4E:	BNE $2E6E		;
+$2E1E> D0 4E:	BNE $2E6E		; coin → exit
 $2E20> EA:	NOP		;
-$2E21> 20 3E32:	JSR $323E	;
-$2E24> 20 8E29:	JSR $298E	;
-$2E27> 20 B02C:	JSR $2CB0	;
+$2E21> 20 3E32:	JSR $323E	; draw track/maze
+$2E24> 20 8E29:	JSR $298E	; draw score/lives display
+$2E27> 20 B02C:	JSR $2CB0	; coin check
 $2E2A> A5 13:	LDA $13		;
-$2E2C> D0 40:	BNE $2E6E		;
+$2E2C> D0 40:	BNE $2E6E		; coin → exit
 $2E2E> EA:	NOP		;
-$2E2F> A9 30:	LDA #$30	;
-$2E31> 85 77:	STA $77		;
-$2E33> 20 2E2A:	JSR $2A2E	;
-$2E36> A5 8E:	LDA $8E		;
-$2E38> 10 08:	BPL $2E42		;
+$2E2F> A9 30:	LDA #$30	; demo speed = 48 ticks
+$2E31> 85 77:	STA $77		; direction-change timer reload value
+;
+;----- ATTRACT DEMO LOOP: car drives around track with random turns --------
+$2E33> 20 2E2A:	JSR $2A2E	; timer tick + entity update (moves car)
+$2E36> A5 8E:	LDA $8E		; crash flag?
+$2E38> 10 08:	BPL $2E42		; no crash → skip
 $2E3A> EA:	NOP		;
-$2E3B> 20 5E29:	JSR $295E	;
+$2E3B> 20 5E29:	JSR $295E	; handle crash: reset car, init variables
 $2E3E> A9 00:	LDA #$00	;
-$2E40> 85 8E:	STA $8E		;
-$2E42> 20 B02C:	JSR $2CB0	;
+$2E40> 85 8E:	STA $8E		; clear crash flag
+$2E42> 20 B02C:	JSR $2CB0	; coin check
 $2E45> A5 13:	LDA $13		;
-$2E47> D0 25:	BNE $2E6E		;
+$2E47> D0 25:	BNE $2E6E		; coin → exit attract mode
 $2E49> EA:	NOP		;
-$2E4A> C6 16:	DEC $16		;
-$2E4C> D0 E5:	BNE $2E33		;
-$2E4E> C6 15:	DEC $15		;
-$2E50> D0 E1:	BNE $2E33		;
-$2E52> 20 892D:	JSR $2D89	;
-$2E55> 4C 062E:	JMP $2E06	;
+$2E4A> C6 16:	DEC $16		; inner demo timer
+$2E4C> D0 E5:	BNE $2E33		; loop (256 iterations)
+$2E4E> C6 15:	DEC $15		; outer demo timer
+$2E50> D0 E1:	BNE $2E33		; loop (256 × 256 = 65536 total)
+$2E52> 20 892D:	JSR $2D89	; redraw title screen ("GAME OVER" etc.)
+$2E55> 4C 062E:	JMP $2E06	; restart attract cycle
+;
+;----- $2E58: Attract mode initial delay ------------------------------------
+; 65536-iteration delay loop. Each iteration polls $2CB0 for coin input.
+; If a coin is detected ($13 > 0), returns early.
+; On real hardware at 705 kHz: ~4.3 seconds.
+;
 $2E58> A9 00:	LDA #$00	;
-$2E5A> 85 15:	STA $15		;
-$2E5C> 20 B02C:	JSR $2CB0	;
-$2E5F> A5 13:	LDA $13		;
-$2E61> F0 02:	BEQ $2E65		;
+$2E5A> 85 15:	STA $15		; outer counter = 0 (wraps to 255)
+$2E5C> 20 B02C:	JSR $2CB0	; poll for coin input
+$2E5F> A5 13:	LDA $13		; credits?
+$2E61> F0 02:	BEQ $2E65		; no coin → continue delay
 $2E63> EA:	NOP		;
-$2E64> 60:	RTS		;
-$2E65> C6 16:	DEC $16		;
+$2E64> 60:	RTS		; coin detected → return early
+$2E65> C6 16:	DEC $16		; inner counter (256 iterations)
 $2E67> D0 F3:	BNE $2E5C		;
-$2E69> C6 15:	DEC $15		;
+$2E69> C6 15:	DEC $15		; outer counter (256 passes)
 $2E6B> D0 EF:	BNE $2E5C		;
-$2E6D> 60:	RTS		;
+$2E6D> 60:	RTS		; delay complete, no coin
+;
+;----- $2E6E: Exit attract mode (coin inserted) ----------------------------
 $2E6E> A9 80:	LDA #$80	;
-$2E70> 85 02:	STA $02		;
-$2E72> 60:	RTS		;
-$2E73> BC B72F:	LDY $2FB7,X	;
-$2E76> BD A52F:	LDA $2FA5,X	;
-$2E79> AA:	TAX		;
-$2E7A> BD 962E:	LDA $2E96,X	;
-$2E7D> F0 07:	BEQ $2E86		;
+$2E70> 85 02:	STA $02		; set game state = active (bit 7)
+$2E72> 60:	RTS		; return from JSR $2D26 → lands at $282E
+;
+;===== STRING DRAW ROUTINES =================================================
+; $2E73: Draw string X from the string table.
+;   X = string index. $2FA5,X = string data offset, $2FB7,X = screen Y offset.
+;   Reads characters from $2E96+offset until NUL (0), writes to screen RAM
+;   via ($00),Y.
+;
+$2E73> BC B72F:	LDY $2FB7,X	; Y = screen offset for this string
+$2E76> BD A52F:	LDA $2FA5,X	; A = string data start offset
+$2E79> AA:	TAX		; X = index into string data table
+$2E7A> BD 962E:	LDA $2E96,X	; load character from string data
+$2E7D> F0 07:	BEQ $2E86		; NUL terminator → done
 $2E7F> EA:	NOP		;
-$2E80> 91 00:	STA ($00),Y		;
-$2E82> E8:	INX		;
-$2E83> C8:	INY		;
-$2E84> D0 F4:	BNE $2E7A		;
+$2E80> 91 00:	STA ($00),Y		; write character to screen RAM
+$2E82> E8:	INX		; next string character
+$2E83> C8:	INY		; next screen position
+$2E84> D0 F4:	BNE $2E7A		; loop (BNE always taken, Y won't wrap to 0)
 $2E86> 60:	RTS		;
-$2E87> A0 A1:	LDY #$a1	;
-$2E89> A2 00:	LDX #$00	;
-$2E8B> BD 872F:	LDA $2F87,X	;
-$2E8E> F0 F6:	BEQ $2E86		;
-$2E90> 91 00:	STA ($00),Y		;
+;
+; $2E87: Draw "TODAY'S HIGH SCORE" text at screen offset $A1.
+;   String data at $2F87.
+$2E87> A0 A1:	LDY #$a1	; screen offset
+$2E89> A2 00:	LDX #$00	; string data index
+$2E8B> BD 872F:	LDA $2F87,X	; load character
+$2E8E> F0 F6:	BEQ $2E86		; NUL → done (shares RTS at $2E86)
+$2E90> 91 00:	STA ($00),Y		; write to screen RAM
 $2E92> E8:	INX		;
 $2E93> C8:	INY		;
-$2E94> D0 F5:	BNE $2E8B		;
-$2E96> 47:	.byte $47		; INVALID OPCODE !!!
-
-$2E97> 41 4D:	EOR ($4D,X)		;
-$2E99> 45 20:	EOR $20		;
-$2E9B> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2E9C> 56 45:	LSR $45,X		;
-$2E9E> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2E9F> 00:	BRK		;
-$2EA0> 54:	.byte $54		; INVALID OPCODE !!!
-
-$2EA1> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2EA2> 44:	.byte $44		; INVALID OPCODE !!!
-
-$2EA3> 41 59:	EOR ($59,X)		;
-$2EA5> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2EA6> 20 4849:	JSR $4948	;
-$2EA9> 47:	.byte $47		; INVALID OPCODE !!!
-
-$2EAA> 48:	PHA		;
-$2EAB> 20 5343:	JSR $4353	;
-$2EAE> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2EAF> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2EB0> 45 00:	EOR $00		;
-$2EB2> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2EB3> 49 44:	EOR #$44	;
-$2EB5> 45 20:	EOR $20		;
-$2EB7> 54:	.byte $54		; INVALID OPCODE !!!
-
-$2EB8> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2EB9> 41 43:	EOR ($43,X)		;
-$2EBB> 4B:	.byte $4b		; INVALID OPCODE !!!
-
-$2EBC> 00:	BRK		;
-$2EBD> 31 20:	AND ($20),Y		;
-$2EBF> 43:	.byte $43		; INVALID OPCODE !!!
-
-$2EC0> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2EC1> 49 4E:	EOR #$4e	;
-$2EC3> 20 6969:	JSR $6969	;
-$2EC6> 69 20:	ADC #$20	;
-$2EC8> 31 20:	AND ($20),Y		;
-$2ECA> 50 4C:	BVC $2F18		;
-$2ECC> 41 59:	EOR ($59,X)		;
-$2ECE> 00:	BRK		;
-$2ECF> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2ED0> 57:	.byte $57		; INVALID OPCODE !!!
-
-$2ED1> 49 54:	EOR #$54	;
-$2ED3> 43:	.byte $43		; INVALID OPCODE !!!
-
-$2ED4> 48:	PHA		;
-$2ED5> 20 5452:	JSR $5254	;
-$2ED8> 41 43:	EOR ($43,X)		;
-$2EDA> 4B:	.byte $4b		; INVALID OPCODE !!!
-
-$2EDB> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2EDC> 20 544F:	JSR $4F54	;
-$2EDF> 20 4156:	JSR $5641	;
-$2EE2> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2EE3> 49 44:	EOR #$44	;
-$2EE5> 00:	BRK		;
-$2EE6> 43:	.byte $43		; INVALID OPCODE !!!
-
-$2EE7> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2EE8> 41 53:	EOR ($53,X)		;
-$2EEA> 48:	PHA		;
-$2EEB> 20 5749:	JSR $4957	;
-$2EEE> 54:	.byte $54		; INVALID OPCODE !!!
-
-$2EEF> 48:	PHA		;
-$2EF0> 20 4B49:	JSR $494B	;
-$2EF3> 4C 4C45:	JMP $454C	;
-$2EF6> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2EF7> 20 454E:	JSR $4E45	;
-$2EFA> 47:	.byte $47		; INVALID OPCODE !!!
-
-$2EFB> 49 4E:	EOR #$4e	;
-$2EFD> 45 00:	EOR $00		;
-$2EFF> 50 41:	BVC $2F42		;
-$2F01> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2F02> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2F03> 20 5354:	JSR $5453	;
-$2F06> 41 52:	EOR ($52,X)		;
-$2F08> 54:	.byte $54		; INVALID OPCODE !!!
-
-$2F09> 49 4E:	EOR #$4e	;
-$2F0B> 47:	.byte $47		; INVALID OPCODE !!!
-
-$2F0C> 20 504F:	JSR $4F50	;
-$2F0F> 49 4E:	EOR #$4e	;
-$2F11> 54:	.byte $54		; INVALID OPCODE !!!
-
-$2F12> 20 464F:	JSR $4F46	;
-$2F15> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F16> 00:	BRK		;
-$2F17> 42:	.byte $42		; INVALID OPCODE !!!
-
-$2F18> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2F19> 4E 5553:	LSR $5355	;
-$2F1C> 20 4341:	JSR $4143	;
-$2F1F> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F20> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2F21> 20 414E:	JSR $4E41	;
-$2F24> 44:	.byte $44		; INVALID OPCODE !!!
-
-$2F25> 20 5343:	JSR $4353	;
-$2F28> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2F29> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F2A> 45 00:	EOR $00		;
-$2F2C> 41 44:	EOR ($44,X)		;
-$2F2E> 44:	.byte $44		; INVALID OPCODE !!!
-
-$2F2F> 45 44:	EOR $44		;
-$2F31> 20 5452:	JSR $5254	;
-$2F34> 41 49:	EOR ($49,X)		;
-$2F36> 4E 2043:	LSR $4320	;
-$2F39> 41 52:	EOR ($52,X)		;
-$2F3B> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2F3C> 20 494E:	JSR $4E49	;
-$2F3F> 43:	.byte $43		; INVALID OPCODE !!!
-
-$2F40> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F41> 45 41:	EOR $41		;
-$2F43> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2F44> 45 53:	EOR $53		;
-$2F46> 00:	BRK		;
-$2F47> 43:	.byte $43		; INVALID OPCODE !!!
-
-$2F48> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F49> 45 44:	EOR $44		;
-$2F4B> 49 54:	EOR #$54	;
-$2F4D> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2F4E> 00:	BRK		;
-$2F4F> 54:	.byte $54		; INVALID OPCODE !!!
-
-$2F50> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2F51> 50 20:	BVC $2F73		;
-$2F53> 54:	.byte $54		; INVALID OPCODE !!!
-
-$2F54> 48:	PHA		;
-$2F55> 49 53:	EOR #$53	;
-$2F57> 20 5343:	JSR $4353	;
-$2F5A> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2F5B> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F5C> 45 20:	EOR $20		;
-$2F5E> 46 4F:	LSR $4F		;
-$2F60> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F61> 20 4352:	JSR $5243	;
-$2F64> 45 44:	EOR $44		;
-$2F66> 49 54:	EOR #$54	;
-$2F68> 00:	BRK		;
-$2F69> 50 4C:	BVC $2FB7		;
-$2F6B> 41 59:	EOR ($59,X)		;
-$2F6D> 45 52:	EOR $52		;
-$2F6F> 20 3100:	JSR $0031	;
-$2F72> 50 4C:	BVC $2FC0		;
-$2F74> 41 59:	EOR ($59,X)		;
-$2F76> 45 52:	EOR $52		;
-$2F78> 20 3200:	JSR $0032	;
-$2F7B> 53:	.byte $53		; INVALID OPCODE !!!
-
-$2F7C> 43:	.byte $43		; INVALID OPCODE !!!
-
-$2F7D> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2F7E> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F7F> 45 00:	EOR $00		;
-$2F81> 42:	.byte $42		; INVALID OPCODE !!!
-
-$2F82> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2F83> 4E 5553:	LSR $5355	;
-$2F86> 00:	BRK		;
-$2F87> 43:	.byte $43		; INVALID OPCODE !!!
-
-$2F88> 4F:	.byte $4f		; INVALID OPCODE !!!
-
-$2F89> 50 59:	BVC $2FE4		;
-$2F8B> 52:	.byte $52		; INVALID OPCODE !!!
-
-$2F8C> 49 47:	EOR #$47	;
-$2F8E> 48:	PHA		;
-$2F8F> 54:	.byte $54		; INVALID OPCODE !!!
-
-$2F90> 20 6A20:	JSR $206A	;
-$2F93> 31 39:	AND ($39),Y		;
-$2F95> 37:	.byte $37		; INVALID OPCODE !!!
-
-$2F96> 39 2042:	AND $4220,Y	;
-$2F99> 59 2045:	EOR $4520,Y	;
-$2F9C> 58:	CLI		;
-$2F9D> 49 44:	EOR #$44	;
-$2F9F> 59 2049:	EOR $4920,Y	;
-$2FA2> 4E 4300:	LSR $0043	;
-$2FA5> 00:	BRK		;
+$2E94> D0 F5:	BNE $2E8B		; loop
+;
+;===== STRING DATA ==========================================================
+; ASCII text data for on-screen messages (NUL-terminated).
+; String index → offset → address → decoded text:
+;   #0  $00 → $2E96: "GAME OVER"
+;   #1  $0A → $2EA0: "TODAYS HIGH SCORE"
+;   #2  $1C → $2EB2: "SIDE TRACK"
+;   #3  $27 → $2EBD: "1 COIN... 1 PLAY"
+;   #4  $27 → $2EBD: (same as #3)
+;   #5  $39 → $2ECF: "SWITCH TRACKS TO AVOID"
+;   #6  $50 → $2EE6: "CRASH WITH KILLER ENGINE"
+;   #7  $69 → $2EFF: "PASS STARTING POINT FOR"
+;   #8  $81 → $2F17: "BONUS CARS AND SCORE"
+;   #9  $96 → $2F2C: "ADDED TRAIN CARS INCREASES"
+;   #10 $B1 → $2F47: "CREDITS"
+;   #11 $B9 → $2F4F: "TOP THIS SCORE FOR CREDIT"
+;   #12 $D3 → $2F69: "PLAYER 1"
+;   #13 $DC → $2F72: "PLAYER 2"
+;   #14 $E5 → $2F7B: "SCORE"
+;   #15 $D3 → $2F69: "PLAYER 1" (reused)
+;   #16 $DC → $2F72: "PLAYER 2" (reused)
+;   #17 $EB → $2F81: "BONUS" (or "EXTRA CAR")
+;
+; $2E96: ASCII game strings (null-terminated). 272 bytes.
+;   Referenced by pointer table at $2FA6 and Y-table at $2FB7.
+;   Strings #0-#17 used for attract mode, score display, copyright.
+;
+; String #0: "GAME OVER"
+$2E96>	.byte $47, $41, $4D, $45, $20, $4F, $56, $45, $52, $00	; GAME OVER.
+; String #1: "TODAYS HIGH SCORE"
+$2EA0>	.byte $54, $4F, $44, $41, $59, $53, $20, $48, $49, $47, $48, $20, $53, $43, $4F, $52	; TODAYS HIGH SCOR
+$2EB0>	.byte $45, $00	; E.
+; String #2: "SIDE TRACK"
+$2EB2>	.byte $53, $49, $44, $45, $20, $54, $52, $41, $43, $4B, $00	; SIDE TRACK.
+; String #3: "1 COIN iii 1 PLAY"
+$2EBD>	.byte $31, $20, $43, $4F, $49, $4E, $20, $69, $69, $69, $20, $31, $20, $50, $4C, $41	; 1 COIN iii 1 PLA
+$2ECD>	.byte $59, $00	; Y.
+; String #4: "SWITCH TRACKS TO AVOID"
+$2ECF>	.byte $53, $57, $49, $54, $43, $48, $20, $54, $52, $41, $43, $4B, $53, $20, $54, $4F	; SWITCH TRACKS TO
+$2EDF>	.byte $20, $41, $56, $4F, $49, $44, $00	;  AVOID.
+; String #5: "CRASH WITH KILLER ENGINE"
+$2EE6>	.byte $43, $52, $41, $53, $48, $20, $57, $49, $54, $48, $20, $4B, $49, $4C, $4C, $45	; CRASH WITH KILLE
+$2EF6>	.byte $52, $20, $45, $4E, $47, $49, $4E, $45, $00	; R ENGINE.
+; String #6: "PASS STARTING POINT FOR"
+$2EFF>	.byte $50, $41, $53, $53, $20, $53, $54, $41, $52, $54, $49, $4E, $47, $20, $50, $4F	; PASS STARTING PO
+$2F0F>	.byte $49, $4E, $54, $20, $46, $4F, $52, $00	; INT FOR.
+; String #7: "BONUS CARS AND SCORE"
+$2F17>	.byte $42, $4F, $4E, $55, $53, $20, $43, $41, $52, $53, $20, $41, $4E, $44, $20, $53	; BONUS CARS AND S
+$2F27>	.byte $43, $4F, $52, $45, $00	; CORE.
+; String #8: "ADDED TRAIN CARS INCREASES"
+$2F2C>	.byte $41, $44, $44, $45, $44, $20, $54, $52, $41, $49, $4E, $20, $43, $41, $52, $53	; ADDED TRAIN CARS
+$2F3C>	.byte $20, $49, $4E, $43, $52, $45, $41, $53, $45, $53, $00	;  INCREASES.
+; String #9: "CREDITS"
+$2F47>	.byte $43, $52, $45, $44, $49, $54, $53, $00	; CREDITS.
+; String #10: "TOP THIS SCORE FOR CREDIT"
+$2F4F>	.byte $54, $4F, $50, $20, $54, $48, $49, $53, $20, $53, $43, $4F, $52, $45, $20, $46	; TOP THIS SCORE F
+$2F5F>	.byte $4F, $52, $20, $43, $52, $45, $44, $49, $54, $00	; OR CREDIT.
+; String #11: "PLAYER 1"
+$2F69>	.byte $50, $4C, $41, $59, $45, $52, $20, $31, $00	; PLAYER 1.
+; String #12: "PLAYER 2"
+$2F72>	.byte $50, $4C, $41, $59, $45, $52, $20, $32, $00	; PLAYER 2.
+; String #13: "SCORE"
+$2F7B>	.byte $53, $43, $4F, $52, $45, $00	; SCORE.
+; String #14: "BONUS"
+$2F81>	.byte $42, $4F, $4E, $55, $53, $00	; BONUS.
+; String #15: "COPYRIGHT j 1979 BY EXIDY INC"
+$2F87>	.byte $43, $4F, $50, $59, $52, $49, $47, $48, $54, $20, $6A, $20, $31, $39, $37, $39	; COPYRIGHT j 1979
+$2F97>	.byte $20, $42, $59, $20, $45, $58, $49, $44, $59, $20, $49, $4E, $43, $00	;  BY EXIDY INC.
+; Trailing null
+$2FA5>	.byte $00
 $2FA6> 0A:	ASL A		;
-$2FA7> 1C:	.byte $1c		; INVALID OPCODE !!!
+;
+;===== STRING POINTER TABLE =================================================
+; $2FA5: String offset table (18 entries). Each byte is an offset from $2E96
+;   to the start of the NUL-terminated string.  Indexed by X register.
+;   See "STRING DATA" section above for decoded text.
+;
+$2FA5> 00:	BRK		;       ; #0  $00 -> "GAME OVER"
+$2FA6> 0A:	ASL A		;       ; #1  $0A -> "TODAYS HIGH SCORE"
+$2FA7> 1C:	.byte $1c		;       ; #2  $1C -> "SIDE TRACK"
+$2FA8> 27:	.byte $27		;       ; #3  $27 -> "1 COIN... 1 PLAY"
+$2FA9> 27:	.byte $27		;       ; #4  $27 -> (same as #3)
+$2FAA> 39 5069:	AND $6950,Y	;       ; #5  $39 -> "SWITCH TRACKS TO AVOID"
+$2FAD> 81 96:	STA ($96,X)		;       ; #6-#8 -> instruction screens
+$2FAF> B1 B9:	LDA ($B9),Y		;       ; #9  $B1 -> "CREDITS"  #10 $B9 -> "TOP THIS..."
+$2FB1> D3:	.byte $d3		;       ; #11 $D3 -> "PLAYER 1" (reused)
+$2FB2> DC:	.byte $dc		;       ; #12 $DC -> "PLAYER 2"(?)
+$2FB3> E5 D3:	SBC $D3		;       ; #13-#14
+$2FB5> DC:	.byte $dc		;       ; #15
+$2FB6> EB:	.byte $eb		;       ; #16 $EB -> "BONUS"
+;
+; $2FB7: Screen Y-coordinate table (18 entries). Each byte is the Y position
+;   (screen RAM row) where the corresponding string is drawn.
+;
+$2FB7> CB:	.byte $cb		;       ; row for string #0
+$2FB8> A7:	.byte $a7		;       ; row for string #1
+$2FB9> 4B:	.byte $4b		;       ; row for string #2
+$2FBA> 07:	.byte $07		;       ; row for string #3
+$2FBB> 47:	.byte $47		;       ; row for string #4
+$2FBC> 44:	.byte $44		;       ; row for string #5
+$2FBD> 84 E4:	STY $E4		;       ; rows #6-#7
+$2FBF> 24 84:	BIT $84		;       ; rows #8-#9
+$2FC1> 4C E324:	JMP $24E3	;       ; rows #10-#12
+$2FC4> 33:	.byte $33		;       ; row for string #13(?)
+$2FC5> C4 CB:	CPY $CB		;       ; rows #14-#15
+$2FC7> CB:	.byte $cb		;       ; row for string #16
 
-$2FA8> 27:	.byte $27		; INVALID OPCODE !!!
-
-$2FA9> 27:	.byte $27		; INVALID OPCODE !!!
-
-$2FAA> 39 5069:	AND $6950,Y	;
-$2FAD> 81 96:	STA ($96,X)		;
-$2FAF> B1 B9:	LDA ($B9),Y		;
-$2FB1> D3:	.byte $d3		; INVALID OPCODE !!!
-
-$2FB2> DC:	.byte $dc		; INVALID OPCODE !!!
-
-$2FB3> E5 D3:	SBC $D3		;
-$2FB5> DC:	.byte $dc		; INVALID OPCODE !!!
-
-$2FB6> EB:	.byte $eb		; INVALID OPCODE !!!
-
-$2FB7> CB:	.byte $cb		; INVALID OPCODE !!!
-
-$2FB8> A7:	.byte $a7		; INVALID OPCODE !!!
-
-$2FB9> 4B:	.byte $4b		; INVALID OPCODE !!!
-
-$2FBA> 07:	.byte $07		; INVALID OPCODE !!!
-
-$2FBB> 47:	.byte $47		; INVALID OPCODE !!!
-
-$2FBC> 44:	.byte $44		; INVALID OPCODE !!!
-
-$2FBD> 84 E4:	STY $E4		;
-$2FBF> 24 84:	BIT $84		;
-$2FC1> 4C E324:	JMP $24E3	;
-$2FC4> 33:	.byte $33		; INVALID OPCODE !!!
-
-$2FC5> C4 CB:	CPY $CB		;
-$2FC7> CB:	.byte $cb		; INVALID OPCODE !!!
-
+;
+;----- $2FC8: Clear P1/P2 scores (original label: CLSCOR) -----------------
 $2FC8> CD A900:	CMP $00A9	;
-$2FCB> A0 03:	LDY #$03	;
-$2FCD> 99 0A00:	STA $000A,Y	;
+$2FCB> A0 03:	LDY #$03	; clear 4 bytes: $0A-$0D (P1 + P2 scores)
+$2FCD> 99 0A00:	STA $000A,Y	; store 0 to $0A+Y
 $2FD0> 88:	DEY		;
-$2FD1> 10 FA:	BPL $2FCD		;
-$2FD3> 20 1B2A:	JSR $2A1B	;
-$2FD6> A2 0C:	LDX #$0c	;
-$2FD8> 20 732E:	JSR $2E73	;
-$2FDB> A2 0D:	LDX #$0d	;
-$2FDD> 20 732E:	JSR $2E73	;
-$2FE0> A2 0A:	LDX #$0a	;
-$2FE2> A0 89:	LDY #$89	;
-$2FE4> 20 4B30:	JSR $304B	;
-$2FE7> A2 0C:	LDX #$0c	;
-$2FE9> A0 98:	LDY #$98	;
-$2FEB> 20 4B30:	JSR $304B	;
+$2FD1> 10 FA:	BPL $2FCD		; loop Y = 3,2,1,0
+;
+;----- $2FD3: Draw P1/P2 score labels and numbers -------------------------
+; Sets screen pointer, draws "PLAYER 1" and "PLAYER 2" strings,
+; then draws P1 score ($0A-$0B) at offset $89 and P2 score ($0C-$0D)
+; at offset $98.
+;
+$2FD3> 20 1B2A:	JSR $2A1B	; set screen pointer
+$2FD6> A2 0C:	LDX #$0c	; string #12 = "PLAYER 1"
+$2FD8> 20 732E:	JSR $2E73	; draw it
+$2FDB> A2 0D:	LDX #$0d	; string #13 = "PLAYER 2"
+$2FDD> 20 732E:	JSR $2E73	; draw it
+$2FE0> A2 0A:	LDX #$0a	; ZP offset: $0A-$0B (P1 score)
+$2FE2> A0 89:	LDY #$89	; screen offset for P1 score number
+$2FE4> 20 4B30:	JSR $304B	; draw P1 score
+$2FE7> A2 0C:	LDX #$0c	; ZP offset: $0C-$0D (P2 score)
+$2FE9> A0 98:	LDY #$98	; screen offset for P2 score number
+$2FEB> 20 4B30:	JSR $304B	; draw P2 score
 $2FEE> 60:	RTS		;
-$2FEF> A5 02:	LDA $02		;
-$2FF1> 30 02:	BMI $2FF5		;
+;
+;----- $2FEF: Score add handler (called when points are earned) -----------
+; If game not active ($02 bit 7 clear) → return.
+; Generates random bonus based on entity count ($17).
+; Reads score value from table at $2B09 indexed by $17.
+; Multiplies $17 by itself ($45 times) via BCD doubling to compute
+; progressive score. Adds to active player's score, redraws, checks
+; for high score.
+;
+$2FEF> A5 02:	LDA $02		; game state
+$2FF1> 30 02:	BMI $2FF5		; bit 7 set → game active, proceed
 $2FF3> EA:	NOP		;
-$2FF4> 60:	RTS		;
-$2FF5> 20 D929:	JSR $29D9	;
-$2FF8> 29 07:	AND #$07	;
-$2FFA> C5 17:	CMP $17		;
-$2FFC> D0 04:	BNE $3002		;
+$2FF4> 60:	RTS		; not active → return
+$2FF5> 20 D929:	JSR $29D9	; PRNG
+$2FF8> 29 07:	AND #$07	; random 0-7
+$2FFA> C5 17:	CMP $17		; compare to entity/kill count
+$2FFC> D0 04:	BNE $3002		; mismatch → skip speed increase
 $2FFE> EA:	NOP		;
-$2FFF> 20 FF2B:	JSR $2BFF	;
-$3002> A6 17:	LDX $17		;
+$2FFF> 20 FF2B:	JSR $2BFF	; speed up (decrease direction timer)
+$3002> A6 17:	LDX $17		; entity/kill count
 $3004> CA:	DEX		;
-$3005> BD 092B:	LDA $2B09,X	;
-$3008> 85 84:	STA $84		;
-$300A> A4 45:	LDY $45		;
+$3005> BD 092B:	LDA $2B09,X	; lookup score value from table
+$3008> 85 84:	STA $84		; trigger score event (sets bit 7 for sound)
+$300A> A4 45:	LDY $45		; multiplier count
 $300C> 88:	DEY		;
-$300D> 30 14:	BMI $3023		;
+$300D> 30 14:	BMI $3023		; no multiplier → skip doubling
 $300F> EA:	NOP		;
-$3010> F8:	SED		;
-$3011> A5 17:	LDA $17		;
-$3013> 48:	PHA		;
-$3014> 65 17:	ADC $17		;
+$3010> F8:	SED		; BCD mode for score math
+$3011> A5 17:	LDA $17		; base score value
+$3013> 48:	PHA		; save
+$3014> 65 17:	ADC $17		; double (BCD): $17 += $17
 $3016> 85 17:	STA $17		;
-$3018> A5 18:	LDA $18		;
+$3018> A5 18:	LDA $18		; carry into high byte
 $301A> 69 00:	ADC #$00	;
 $301C> 85 18:	STA $18		;
-$301E> 68:	PLA		;
+$301E> 68:	PLA		; restore original
 $301F> 88:	DEY		;
-$3020> 10 F1:	BPL $3013		;
+$3020> 10 F1:	BPL $3013		; loop (doubles $45 times)
 $3022> D8:	CLD		;
-$3023> 20 162A:	JSR $2A16	;
-$3026> A2 0A:	LDX #$0a	;
-$3028> A0 07:	LDY #$07	;
-$302A> A5 02:	LDA $02		;
-$302C> 29 10:	AND #$10	;
-$302E> F0 05:	BEQ $3035		;
+; --- Add computed score to active player ---
+$3023> 20 162A:	JSR $2A16	; set screen pointer
+$3026> A2 0A:	LDX #$0a	; default: P1 score at $0A
+$3028> A0 07:	LDY #$07	; default: P1 screen offset
+$302A> A5 02:	LDA $02		; game state
+$302C> 29 10:	AND #$10	; bit 4 = active player (0=P1, 1=P2)
+$302E> F0 05:	BEQ $3035		; P1 → use defaults
 $3030> EA:	NOP		;
-$3031> A2 0C:	LDX #$0c	;
-$3033> A0 1C:	LDY #$1c	;
-$3035> B5 00:	LDA $00,X		;
+$3031> A2 0C:	LDX #$0c	; P2 score at $0C
+$3033> A0 1C:	LDY #$1c	; P2 screen offset
+$3035> B5 00:	LDA $00,X		; load score lo byte
 $3037> F8:	SED		;
 $3038> 18:	CLC		;
-$3039> 65 17:	ADC $17		;
-$303B> 95 00:	STA $00,X		;
-$303D> B5 01:	LDA $01,X		;
-$303F> 65 18:	ADC $18		;
-$3041> 95 01:	STA $01,X		;
+$3039> 65 17:	ADC $17		; add computed score lo
+$303B> 95 00:	STA $00,X		; store back
+$303D> B5 01:	LDA $01,X		; score hi byte
+$303F> 65 18:	ADC $18		; add carry + computed score hi
+$3041> 95 01:	STA $01,X		; store back
 $3043> D8:	CLD		;
-$3044> 20 4B30:	JSR $304B	;
-$3047> 20 B630:	JSR $30B6	;
+$3044> 20 4B30:	JSR $304B	; redraw score on screen
+$3047> 20 B630:	JSR $30B6	; check for new high score / bonus
 $304A> 60:	RTS		;
-$304B> 20 5C30:	JSR $305C	;
+;
+;===== BCD NUMBER DISPLAY ===================================================
+; $304B: Draw a 2-byte BCD number from zero page to screen RAM.
+;   X = zero page address of the BCD value
+;   Y = screen offset within ($00),Y
+;   Uses $305C to draw one byte as two decimal digits.
+;
+$304B> 20 5C30:	JSR $305C	; draw high byte digits
 $304E> E8:	INX		;
 $304F> 88:	DEY		;
-$3050> 20 5C30:	JSR $305C	;
-$3053> 20 7030:	JSR $3070	;
+$3050> 20 5C30:	JSR $305C	; draw low byte digits
+$3053> 20 7030:	JSR $3070	; suppress leading zeros
 $3056> C8:	INY		;
-$3057> A9 30:	LDA #$30	;
-$3059> 91 00:	STA ($00),Y		;
+$3057> A9 30:	LDA #$30	; '0' character
+$3059> 91 00:	STA ($00),Y		; ensure at least one digit shown
 $305B> 60:	RTS		;
-$305C> B5 00:	LDA $00,X		;
-$305E> 29 0F:	AND #$0f	;
-$3060> 09 30:	ORA #$30	;
-$3062> 91 00:	STA ($00),Y		;
-$3064> B5 00:	LDA $00,X		;
-$3066> 4A:	LSR A		;
+;
+; $305C: Draw one BCD byte as two decimal digits.
+;   Low nibble first (at Y), then high nibble (at Y-1).
+;
+$305C> B5 00:	LDA $00,X	; load BCD byte from ZP
+$305E> 29 0F:	AND #$0f	; low nibble
+$3060> 09 30:	ORA #$30	; → ASCII digit
+$3062> 91 00:	STA ($00),Y		; write to screen
+$3064> B5 00:	LDA $00,X	; reload same byte
+$3066> 4A:	LSR A		; high nibble → low
 $3067> 4A:	LSR A		;
 $3068> 4A:	LSR A		;
 $3069> 4A:	LSR A		;
-$306A> 09 30:	ORA #$30	;
-$306C> 88:	DEY		;
-$306D> 91 00:	STA ($00),Y		;
+$306A> 09 30:	ORA #$30	; → ASCII digit
+$306C> 88:	DEY		; previous screen position
+$306D> 91 00:	STA ($00),Y		; write to screen
 $306F> 60:	RTS		;
-$3070> A2 01:	LDX #$01	;
+;
+; $3070: Suppress leading zeros (replace '0' with space).
+;   Walks forward through digits, replacing '0' ($30) with space ($20)
+;   until a non-zero digit is found.
+;
+$3070> A2 01:	LDX #$01	; leading zero flag
 $3072> B1 00:	LDA ($00),Y		;
 $3074> C9 30:	CMP #$30	;
 $3076> D0 04:	BNE $307C		;
@@ -1269,212 +1460,135 @@ $30AF> A9 20:	LDA #$20	;
 $30B1> 91 00:	STA ($00),Y		;
 $30B3> A6 00:	LDX $00		;
 $30B5> 60:	RTS		;
-$30B6> C6 8F:	DEC $8F		;
-$30B8> F0 02:	BEQ $30BC		;
+;
+;----- $30B6: Bonus life / high score check --------------------------------
+; $8F: countdown timer. When it reaches 0, awards extra life:
+;   plays jingle ($30EB), clears screen, draws "EXTRA CAR" message,
+;   re-inits track/entities/lives display, sets $8F=$76 (118 frames).
+; Called after every score add to see if threshold was reached.
+;
+$30B6> C6 8F:	DEC $8F		; bonus countdown
+$30B8> F0 02:	BEQ $30BC		; reached 0 → award bonus!
 $30BA> EA:	NOP		;
-$30BB> 60:	RTS		;
-$30BC> 78:	SEI		;
-$30BD> A9 FF:	LDA #$ff	;
-$30BF> 8D 0051:	STA $5100	;
-$30C2> 20 EB30:	JSR $30EB	;
-$30C5> 20 FC29:	JSR $29FC	;
-$30C8> 20 1B2A:	JSR $2A1B	;
-$30CB> A2 11:	LDX #$11	;
-$30CD> 20 732E:	JSR $2E73	;
-$30D0> 20 EB30:	JSR $30EB	;
-$30D3> A5 45:	LDA $45		;
-$30D5> 85 90:	STA $90		;
+$30BB> 60:	RTS		; not yet → return
+$30BC> 78:	SEI		; disable interrupts for screen update
+$30BD> A9 FF:	LDA #$ff	; hide sprite
+$30BF> 8D 0051:	STA $5100	; write to motion object
+$30C2> 20 EB30:	JSR $30EB	; play bonus jingle
+$30C5> 20 FC29:	JSR $29FC	; clear screen
+$30C8> 20 1B2A:	JSR $2A1B	; set screen pointer
+$30CB> A2 11:	LDX #$11	; string #17 = "EXTRA CAR" or similar
+$30CD> 20 732E:	JSR $2E73	; draw it
+$30D0> 20 EB30:	JSR $30EB	; play jingle again
+$30D3> A5 45:	LDA $45		; load lives count
+$30D5> 85 90:	STA $90		; save to $90
 $30D7> C6 90:	DEC $90		;
-$30D9> 20 3E32:	JSR $323E	;
-$30DC> 20 3437:	JSR $3734	;
-$30DF> 20 4A33:	JSR $334A	;
-$30E2> 20 7529:	JSR $2975	;
-$30E5> A9 76:	LDA #$76	;
+$30D9> 20 3E32:	JSR $323E	; redraw track/maze
+$30DC> 20 3437:	JSR $3734	; re-init player car
+$30DF> 20 4A33:	JSR $334A	; re-init entities
+$30E2> 20 7529:	JSR $2975	; redraw lives display
+$30E5> A9 76:	LDA #$76	; reload bonus countdown = 118
 $30E7> 85 8F:	STA $8F		;
-$30E9> 58:	CLI		;
+$30E9> 58:	CLI		; re-enable interrupts
 $30EA> 60:	RTS		;
+;
+;----- $30EB: Play jingle/tone (original label: BEEP) ---------------------
+; Generates tone by toggling I/O bit 7 ($2BE9/$2BEE) with delay loops.
+; Outer loop ($22 = 8 iterations), inner period ($21 = $C0 down to 0).
+; Each iteration: $3120 toggles bit on/off with $21-length delay.
+;
 $30EB> A9 08:	LDA #$08	;
-$30ED> 85 22:	STA $22		;
+$30ED> 85 22:	STA $22		; outer loop = 8
 $30EF> A9 C0:	LDA #$c0	;
-$30F1> 85 21:	STA $21		;
-$30F3> 20 2031:	JSR $3120	;
-$30F6> C6 21:	DEC $21		;
-$30F8> D0 F9:	BNE $30F3		;
+$30F1> 85 21:	STA $21		; period = 192
+$30F3> 20 2031:	JSR $3120	; toggle tone with $21 delay
+$30F6> C6 21:	DEC $21		; decrease period → rising pitch
+$30F8> D0 F9:	BNE $30F3		; loop until period=0
 $30FA> C6 22:	DEC $22		;
-$30FC> D0 F1:	BNE $30EF		;
+$30FC> D0 F1:	BNE $30EF		; 8 sweeps total
 $30FE> 60:	RTS		;
-$30FF> A0 08:	LDY #$08	;
-$3101> 20 0831:	JSR $3108	;
+;
+;----- $30FF: Alternate tone generator (8 notes) ---------------------------
+$30FF> A0 08:	LDY #$08	; 8 notes
+$3101> 20 0831:	JSR $3108	; play one note pair
 $3104> 88:	DEY		;
 $3105> D0 FA:	BNE $3101		;
 $3107> 60:	RTS		;
-$3108> A9 60:	LDA #$60	;
+;
+;----- $3108: Play two-tone note pair --------------------------------------
+$3108> A9 60:	LDA #$60	; high tone period
 $310A> 85 21:	STA $21		;
-$310C> 20 1731:	JSR $3117	;
-$310F> A9 40:	LDA #$40	;
+$310C> 20 1731:	JSR $3117	; play 32 cycles at this period
+$310F> A9 40:	LDA #$40	; low tone period
 $3111> 85 21:	STA $21		;
-$3113> 20 1731:	JSR $3117	;
+$3113> 20 1731:	JSR $3117	; play 32 cycles at this period
 $3116> 60:	RTS		;
-$3117> A2 20:	LDX #$20	;
-$3119> 20 2031:	JSR $3120	;
+;
+;----- $3117: Play 32 cycles of tone at period $21 -------------------------
+$3117> A2 20:	LDX #$20	; 32 cycles
+$3119> 20 2031:	JSR $3120	; toggle tone once
 $311C> CA:	DEX		;
 $311D> D0 FA:	BNE $3119		;
 $311F> 60:	RTS		;
+;
+;----- $3120: Toggle I/O bit 7 with delay $21 (one half-cycle) -------------
+; Clear bit 7 for $21 counts, then set bit 0 for $21 counts.
+; This creates a square wave with period proportional to $21.
+;
 $3120> A5 21:	LDA $21		;
-$3122> 85 23:	STA $23		;
-$3124> A9 80:	LDA #$80	;
-$3126> 20 E92B:	JSR $2BE9	;
+$3122> 85 23:	STA $23		; delay counter = period
+$3124> A9 80:	LDA #$80	; clear bit 7 (falling edge)
+$3126> 20 E92B:	JSR $2BE9	; AND mask
 $3129> C6 23:	DEC $23		;
-$312B> D0 FC:	BNE $3129		;
-$312D> A9 01:	LDA #$01	;
-$312F> 20 EE2B:	JSR $2BEE	;
+$312B> D0 FC:	BNE $3129		; delay loop
+$312D> A9 01:	LDA #$01	; set bit 0 (rising edge)
+$312F> 20 EE2B:	JSR $2BEE	; OR mask
 $3132> A5 21:	LDA $21		;
-$3134> 85 23:	STA $23		;
+$3134> 85 23:	STA $23		; delay counter = period
 $3136> C6 23:	DEC $23		;
 $3138> D0 FC:	BNE $3136		;
 $313A> 60:	RTS		;
-$313B> EA:	NOP		;
-$313C> 23:	.byte $23		; INVALID OPCODE !!!
-
-$313D> 01 01:	ORA ($01,X)		;
-$313F> 01 01:	ORA ($01,X)		;
-$3141> 01 01:	ORA ($01,X)		;
-$3143> 01 01:	ORA ($01,X)		;
-$3145> 01 01:	ORA ($01,X)		;
-$3147> 01 01:	ORA ($01,X)		;
-$3149> 01 01:	ORA ($01,X)		;
-$314B> 01 00:	ORA ($00,X)		;
-$314D> 20 6320:	JSR $2063	;
-$3150> 63:	.byte $63		; INVALID OPCODE !!!
-
-$3151> 20 0020:	JSR $2000	;
-$3154> 63:	.byte $63		; INVALID OPCODE !!!
-
-$3155> 20 6320:	JSR $2063	;
-$3158> 00:	BRK		;
-$3159> 20 6320:	JSR $2063	;
-$315C> 00:	BRK		;
-$315D> 63:	.byte $63		; INVALID OPCODE !!!
-
-$315E> 20 2020:	JSR $2020	;
-$3161> 20 0020:	JSR $2000	;
-$3164> 20 2020:	JSR $2020	;
-$3167> 20 0020:	JSR $2000	;
-$316A> 20 2000:	JSR $0020	;
-$316D> 20 2023:	JSR $2320	;
-$3170> 01 01:	ORA ($01,X)		;
-$3172> 01 01:	ORA ($01,X)		;
-$3174> 01 01:	ORA ($01,X)		;
-$3176> 01 01:	ORA ($01,X)		;
-$3178> 01 01:	ORA ($01,X)		;
-$317A> 01 01:	ORA ($01,X)		;
-$317C> 00:	BRK		;
-$317D> 63:	.byte $63		; INVALID OPCODE !!!
-
-$317E> 20 0020:	JSR $2000	;
-$3181> 64:	.byte $64		; INVALID OPCODE !!!
-
-$3182> 20 6420:	JSR $2064	;
-$3185> 00:	BRK		;
-$3186> 20 6420:	JSR $2064	;
-$3189> 64:	.byte $64		; INVALID OPCODE !!!
-
-$318A> 20 0000:	JSR $0000	;
-$318D> 20 2000:	JSR $0020	;
-$3190> 64:	.byte $64		; INVALID OPCODE !!!
-
-$3191> 20 2020:	JSR $2020	;
-$3194> 20 0020:	JSR $2000	;
-$3197> 20 2020:	JSR $2020	;
-$319A> 20 0000:	JSR $0000	;
-$319D> 01 01:	ORA ($01,X)		;
-$319F> 00:	BRK		;
-$31A0> 20 2023:	JSR $2320	;
-$31A3> 01 01:	ORA ($01,X)		;
-$31A5> 01 01:	ORA ($01,X)		;
-$31A7> 01 01:	ORA ($01,X)		;
-$31A9> 01 01:	ORA ($01,X)		;
-$31AB> 01 00:	ORA ($00,X)		;
-$31AD> 20 2000:	JSR $0020	;
-$31B0> 64:	.byte $64		; INVALID OPCODE !!!
-
-$31B1> 20 0020:	JSR $2000	;
-$31B4> 65 20:	ADC $20		;
-$31B6> 65 20:	ADC $20		;
-$31B8> 00:	BRK		;
-$31B9> 20 6520:	JSR $2065	;
-$31BC> 00:	BRK		;
-$31BD> 63:	.byte $63		; INVALID OPCODE !!!
-
-$31BE> 20 0020:	JSR $2000	;
-$31C1> 20 0065:	JSR $6500	;
-$31C4> 20 2020:	JSR $2020	;
-$31C7> 20 0020:	JSR $2000	;
-$31CA> 20 2000:	JSR $0020	;
-$31CD> 20 2000:	JSR $0020	;
-$31D0> 01 01:	ORA ($01,X)		;
-$31D2> 00:	BRK		;
-$31D3> 20 2023:	JSR $2320	;
-$31D6> 01 01:	ORA ($01,X)		;
-$31D8> 01 01:	ORA ($01,X)		;
-$31DA> 01 01:	ORA ($01,X)		;
-$31DC> 00:	BRK		;
-$31DD> 63:	.byte $63		; INVALID OPCODE !!!
-
-$31DE> 20 0020:	JSR $2000	;
-$31E1> 20 0065:	JSR $6500	;
-$31E4> 20 0020:	JSR $2000	;
-$31E7> 66 20:	ROR $20		;
-$31E9> 66 20:	ROR $20		;
-$31EB> 00:	BRK		;
-$31EC> 00:	BRK		;
-$31ED> 20 2000:	JSR $0020	;
-$31F0> 64:	.byte $64		; INVALID OPCODE !!!
-
-$31F1> 20 0020:	JSR $2000	;
-$31F4> 20 0066:	JSR $6600	;
-$31F7> 20 2020:	JSR $2020	;
-$31FA> 20 0000:	JSR $0000	;
-$31FD> 01 01:	ORA ($01,X)		;
-$31FF> 00:	BRK		;
-$3200> 20 2000:	JSR $0020	;
-$3203> 01 01:	ORA ($01,X)		;
-$3205> 00:	BRK		;
-$3206> 20 2023:	JSR $2320	;
-$3209> 01 01:	ORA ($01,X)		;
-$320B> 01 00:	ORA ($00,X)		;
-$320D> 20 2000:	JSR $0020	;
-$3210> 64:	.byte $64		; INVALID OPCODE !!!
-
-$3211> 20 0020:	JSR $2000	;
-$3214> 20 0066:	JSR $6600	;
-$3217> 20 0020:	JSR $2000	;
-$321A> 67:	.byte $67		; INVALID OPCODE !!!
-
-$321B> 20 0063:	JSR $6300	;
-$321E> 20 0020:	JSR $2000	;
-$3221> 20 0065:	JSR $6500	;
-$3224> 20 0020:	JSR $2000	;
-$3227> 20 0067:	JSR $6700	;
-$322A> 20 2000:	JSR $0020	;
-$322D> 20 2000:	JSR $0020	;
-$3230> 01 01:	ORA ($01,X)		;
-$3232> 00:	BRK		;
-$3233> 20 2000:	JSR $0020	;
-$3236> 01 01:	ORA ($01,X)		;
-$3238> 00:	BRK		;
-$3239> 20 2020:	JSR $2020	;
-$323C> 3C:	.byte $3c		; INVALID OPCODE !!!
-
-$323D> 31 20:	AND ($20),Y		;
-$323F> 16 2A:	ASL $2A,X		;
+;
+;===== TRACK MAP DATA =======================================================
+; $313B-$314C: Track tile layout data. These bytes define the road pattern.
+;   $23 = road tile, $01 = wall tile, $00 = border.
+;   The disassembler interprets these as instructions ("INVALID OPCODE")
+;   but they are pure data read via LDA ($25),Y in the track renderer.
+;
+$313B>	.byte $EA, $23, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01
+$314B>	.byte $01, $00, $20, $63, $20, $63, $20, $00, $20, $63, $20, $63, $20, $00, $20, $63
+$315B>	.byte $20, $00, $63, $20, $20, $20, $20, $00, $20, $20, $20, $20, $20, $00, $20, $20
+$316B>	.byte $20, $00, $20, $20, $23, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01
+$317B>	.byte $01, $00, $63, $20, $00, $20, $64, $20, $64, $20, $00, $20, $64, $20, $64, $20
+$318B>	.byte $00, $00, $20, $20, $00, $64, $20, $20, $20, $20, $00, $20, $20, $20, $20, $20
+$319B>	.byte $00, $00, $01, $01, $00, $20, $20, $23, $01, $01, $01, $01, $01, $01, $01, $01
+$31AB>	.byte $01, $00, $20, $20, $00, $64, $20, $00, $20, $65, $20, $65, $20, $00, $20, $65
+$31BB>	.byte $20, $00, $63, $20, $00, $20, $20, $00, $65, $20, $20, $20, $20, $00, $20, $20
+$31CB>	.byte $20, $00, $20, $20, $00, $01, $01, $00, $20, $20, $23, $01, $01, $01, $01, $01
+$31DB>	.byte $01, $00, $63, $20, $00, $20, $20, $00, $65, $20, $00, $20, $66, $20, $66, $20
+$31EB>	.byte $00, $00, $20, $20, $00, $64, $20, $00, $20, $20, $00, $66, $20, $20, $20, $20
+$31FB>	.byte $00, $00, $01, $01, $00, $20, $20, $00, $01, $01, $00, $20, $20, $23, $01, $01
+$320B>	.byte $01, $00, $20, $20, $00, $64, $20, $00, $20, $20, $00, $66, $20, $00, $20, $67
+$321B>	.byte $20, $00, $63, $20, $00, $20, $20, $00, $65, $20, $00, $20, $20, $00, $67, $20
+$322B>	.byte $20, $00, $20, $20, $00, $01, $01, $00, $20, $20, $00, $01, $01, $00, $20, $20
+$323B>	.byte $20
+;
+;===== TRACK/MAZE RENDERER ==================================================
+; $323E: Draw the track/road onto screen RAM.
+;   NOTE: $323C-$323D are a data table (track map pointers), not code.
+;   The disassembler misaligns the boundary here. Actual entry is JSR $2A16.
+;   Reads track map data and renders to screen pages $40-$43.
+;
+$323C>	.byte $3C, $31		; track map pointer: $313C (low, high)
+$323E> 20 162A:	JSR $2A16	; (entry point — call screen-clear)
+; NOTE: disassembler shows $323E as $323F due to misaligned data above
 $3241> A8:	TAY		;
-$3242> A9 20:	LDA #$20	;
+$3242> A9 20:	LDA #$20	; space character
 $3244> 85 00:	STA $00		;
 $3246> A9 10:	LDA #$10	;
-$3248> 85 03:	STA $03		;
+$3248> 85 03:	STA $03		; tile stride = $10
 $324A> A9 10:	LDA #$10	;
-$324C> 85 05:	STA $05		;
+$324C> 85 05:	STA $05		; row count = 16
 $324E> B9 3C32:	LDA $323C,Y	;
 $3251> 85 25:	STA $25		;
 $3253> B9 3D32:	LDA $323D,Y	;
@@ -1563,25 +1677,30 @@ $3304> 88:	DEY		;
 $3305> CA:	DEX		;
 $3306> 10 F7:	BPL $32FF		;
 $3308> 60:	RTS		;
-$3309> 53:	.byte $53		; INVALID OPCODE !!!
+;
+; $3309: "START" text placed at screen position $43D1 (top center)
+$3309>	.byte $53, $54, $41, $52, $54	; "START"
 
-$330A> 54:	.byte $54		; INVALID OPCODE !!!
-
-$330B> 41 52:	EOR ($52,X)		;
-$330D> 54:	.byte $54		; INVALID OPCODE !!!
-
+;
+;----- Track renderer helpers: pointer arithmetic -------------------------
+; $330E: Advance screen pointer ($00) by 1
+; $3316: Advance screen pointer ($00) by $03 (row stride)
+; $3323: Advance track data pointer ($25) by 1
+;
 $330E> 18:	CLC		;
 $330F> A5 00:	LDA $00		;
-$3311> 69 01:	ADC #$01	;
-$3313> 4C 1B33:	JMP $331B	;
+$3311> 69 01:	ADC #$01	; +1
+$3313> 4C 1B33:	JMP $331B	; → store
 $3316> 18:	CLC		;
 $3317> A5 00:	LDA $00		;
-$3319> 65 03:	ADC $03		;
+$3319> 65 03:	ADC $03		; + row stride ($03)
 $331B> 85 00:	STA $00		;
 $331D> 90 03:	BCC $3322		;
 $331F> EA:	NOP		;
-$3320> E6 01:	INC $01		;
+$3320> E6 01:	INC $01		; carry into hi byte
 $3322> 60:	RTS		;
+;
+; $3323: Advance track data pointer ($25-$26) by 1
 $3323> 18:	CLC		;
 $3324> A5 25:	LDA $25		;
 $3326> 69 01:	ADC #$01	;
@@ -1590,6 +1709,8 @@ $332A> 90 03:	BCC $332F		;
 $332C> EA:	NOP		;
 $332D> E6 26:	INC $26		;
 $332F> 60:	RTS		;
+;
+; $3330: Decrement track data pointer ($25-$26) by 1
 $3330> 38:	SEC		;
 $3331> A5 25:	LDA $25		;
 $3333> E9 01:	SBC #$01	;
@@ -1598,6 +1719,8 @@ $3337> B0 03:	BCS $333C		;
 $3339> EA:	NOP		;
 $333A> C6 26:	DEC $26		;
 $333C> 60:	RTS		;
+;
+; $333D: Decrement screen pointer ($00-$01) by 1
 $333D> 38:	SEC		;
 $333E> A5 00:	LDA $00		;
 $3340> E9 01:	SBC #$01	;
@@ -1606,487 +1729,625 @@ $3344> B0 03:	BCS $3349		;
 $3346> EA:	NOP		;
 $3347> C6 01:	DEC $01		;
 $3349> 60:	RTS		;
+;
+;===== ENTITY TABLE INIT ====================================================
+; $334A: Initialize entity tracking tables.
+;   Entities are other cars on the track. Entity 0 = player car.
+;   $45 = count of active entities
+;   $46+ = direction table (0-3: up/right/down/left)
+;   $52+ = state table (bit 7 = active flag)
+;   $30/$31 = player car position (X/Y in tile coords)
+;
 $334A> A9 00:	LDA #$00	;
-$334C> 85 45:	STA $45		;
-$334E> 85 46:	STA $46		;
-$3350> 85 52:	STA $52		;
-$3352> 85 7E:	STA $7E		;
+$334C> 85 45:	STA $45		; 0 active entities
+$334E> 85 46:	STA $46		; entity 0 direction = 0 (up)
+$3350> 85 52:	STA $52		; entity 0 state = 0
+$3352> 85 7E:	STA $7E		; direction change flag = 0
 $3354> A9 03:	LDA #$03	;
-$3356> 85 51:	STA $51		;
+$3356> 85 51:	STA $51		; entity spawn countdown = 3
 $3358> A9 43:	LDA #$43	;
-$335A> 85 31:	STA $31		;
+$335A> 85 31:	STA $31		; player car Y = $43 (start position)
 $335C> A9 EF:	LDA #$ef	;
-$335E> 85 30:	STA $30		;
+$335E> 85 30:	STA $30		; player car X = $EF (right side)
 $3360> 60:	RTS		;
-$3361> A5 45:	LDA $45		;
-$3363> 85 03:	STA $03		;
-$3365> C6 51:	DEC $51		;
-$3367> 10 04:	BPL $336D		;
+;
+;===== ENTITY UPDATE ========================================================
+; $3361: Main entity update loop. Iterates through all entities,
+;   updating positions, checking for collisions, and spawning new ones.
+;   Called from $2A40 (attract timer) and $2B05 (game update).
+;
+$3361> A5 45:	LDA $45		; number of active entities
+$3363> 85 03:	STA $03		; loop counter
+$3365> C6 51:	DEC $51		; entity spawn countdown
+$3367> 10 04:	BPL $336D		; >= 0 → continue with existing entities
 $3369> EA:	NOP		;
-$336A> 4C 3134:	JMP $3431	;
-$336D> A5 51:	LDA $51		;
-$336F> C9 02:	CMP #$02	;
-$3371> D0 0F:	BNE $3382		;
+$336A> 4C 3134:	JMP $3431	; < 0 → spawn new entity
+$336D> A5 51:	LDA $51		; spawn countdown value
+$336F> C9 02:	CMP #$02	; == 2?
+$3371> D0 0F:	BNE $3382		; no → skip player look-ahead
 $3373> EA:	NOP		;
-$3374> A5 03:	LDA $03		;
-$3376> C9 00:	CMP #$00	;
-$3378> D0 08:	BNE $3382		;
+$3374> A5 03:	LDA $03		; entity index
+$3376> C9 00:	CMP #$00	; is this entity 0 (player)?
+$3378> D0 08:	BNE $3382		; no → skip
 $337A> EA:	NOP		;
-$337B> 20 B236:	JSR $36B2	;
+$337B> 20 B236:	JSR $36B2	; player car look-ahead collision check
 $337E> A9 00:	LDA #$00	;
-$3380> 85 03:	STA $03		;
-$3382> 20 9133:	JSR $3391	;
-$3385> A6 03:	LDX $03		;
-$3387> B5 52:	LDA $52,X		;
-$3389> 30 61:	BMI $33EC		;
+$3380> 85 03:	STA $03		; reset to entity 0
+$3382> 20 9133:	JSR $3391	; draw/animate entity sprite
+$3385> A6 03:	LDX $03		; entity index
+$3387> B5 52:	LDA $52,X		; entity state
+$3389> 30 61:	BMI $33EC		; bit 7 set → active, restore trail tile
 $338B> EA:	NOP		;
-$338C> C6 03:	DEC $03		;
-$338E> 10 DD:	BPL $336D		;
-$3390> 60:	RTS		;
-$3391> 20 2537:	JSR $3725	;
-$3394> A6 03:	LDX $03		;
-$3396> B5 46:	LDA $46,X		;
-$3398> 29 03:	AND #$03	;
-$339A> 0A:	ASL A		;
+$338C> C6 03:	DEC $03		; next entity
+$338E> 10 DD:	BPL $336D		; more entities → loop
+$3390> 60:	RTS		; done
+;
+;----- $3391: Entity renderer ----------------------------------------------
+; Draws a 3-tile sprite for entity $03 at its screen position.
+; Looks up direction ($46,X) to select sprite offset from $3998 table,
+; animation frame from $398F, and tile data from $3927 (enemy) or
+; $38EB (player car). Uses $3707 to advance pointer between tiles.
+;
+$3391> 20 2537:	JSR $3725	; look up entity position → ($25-$26)
+$3394> A6 03:	LDX $03		; entity index
+$3396> B5 46:	LDA $46,X		; entity direction
+$3398> 29 03:	AND #$03	; mask to 0-3
+$339A> 0A:	ASL A		; ×2 for word table
 $339B> A8:	TAY		;
-$339C> B9 9839:	LDA $3998,Y	;
+$339C> B9 9839:	LDA $3998,Y	; screen advance vector lo
 $339F> 85 00:	STA $00		;
 $33A1> C8:	INY		;
-$33A2> B9 9839:	LDA $3998,Y	;
+$33A2> B9 9839:	LDA $3998,Y	; screen advance vector hi
 $33A5> 85 01:	STA $01		;
-$33A7> B4 46:	LDY $46,X		;
-$33A9> B9 8F39:	LDA $398F,Y	;
-$33AC> A6 51:	LDX $51		;
+$33A7> B4 46:	LDY $46,X		; full direction byte
+$33A9> B9 8F39:	LDA $398F,Y	; animation frame offset
+$33AC> A6 51:	LDX $51		; spawn timer (frame selector)
 $33AE> 18:	CLC		;
-$33AF> 7D 9339:	ADC $3993,X	;
-$33B2> AA:	TAX		;
+$33AF> 7D 9339:	ADC $3993,X	; + frame variant offset
+$33B2> AA:	TAX		; X = tile data index
 $33B3> A0 00:	LDY #$00	;
-$33B5> A5 03:	LDA $03		;
-$33B7> C5 45:	CMP $45		;
-$33B9> F0 19:	BEQ $33D4		;
+$33B5> A5 03:	LDA $03		; entity index
+$33B7> C5 45:	CMP $45		; == max (player car)?
+$33B9> F0 19:	BEQ $33D4		; yes → player tile table ($38EB)
 $33BB> EA:	NOP		;
-$33BC> BD 2739:	LDA $3927,X	;
+; --- Enemy car: 3 tiles from $3927 table ---
+$33BC> BD 2739:	LDA $3927,X	; enemy tile 1
 $33BF> 91 25:	STA ($25),Y		;
 $33C1> E8:	INX		;
-$33C2> 20 0737:	JSR $3707	;
-$33C5> BD 2739:	LDA $3927,X	;
+$33C2> 20 0737:	JSR $3707	; advance to next screen cell
+$33C5> BD 2739:	LDA $3927,X	; enemy tile 2
 $33C8> 91 25:	STA ($25),Y		;
 $33CA> E8:	INX		;
-$33CB> 20 0737:	JSR $3707	;
-$33CE> BD 2739:	LDA $3927,X	;
+$33CB> 20 0737:	JSR $3707	; advance to next screen cell
+$33CE> BD 2739:	LDA $3927,X	; enemy tile 3
 $33D1> 91 25:	STA ($25),Y		;
 $33D3> 60:	RTS		;
-$33D4> BD EB38:	LDA $38EB,X	;
+; --- Player car: 3 tiles from $38EB table ---
+$33D4> BD EB38:	LDA $38EB,X	; player tile 1
 $33D7> 91 25:	STA ($25),Y		;
 $33D9> E8:	INX		;
-$33DA> 20 0737:	JSR $3707	;
-$33DD> BD EB38:	LDA $38EB,X	;
+$33DA> 20 0737:	JSR $3707	; advance
+$33DD> BD EB38:	LDA $38EB,X	; player tile 2
 $33E0> 91 25:	STA ($25),Y		;
 $33E2> E8:	INX		;
-$33E3> 20 0737:	JSR $3707	;
-$33E6> BD EB38:	LDA $38EB,X	;
+$33E3> 20 0737:	JSR $3707	; advance
+$33E6> BD EB38:	LDA $38EB,X	; player tile 3
 $33E9> 91 25:	STA ($25),Y		;
 $33EB> 60:	RTS		;
-$33EC> A5 51:	LDA $51		;
-$33EE> 0A:	ASL A		;
-$33EF> 0A:	ASL A		;
-$33F0> 0A:	ASL A		;
-$33F1> 85 5D:	STA $5D		;
-$33F3> B5 52:	LDA $52,X		;
-$33F5> 29 03:	AND #$03	;
+;
+;----- $33EC: Entity trail tile restoration --------------------------------
+; Restores the road/track tile behind a moving entity.
+; Uses spawn timer ($51) × 8 as frame base, entity state ($52,X) low
+; 2 bits as direction sub-index, and entity direction ($46,X) to look
+; up the correct road tile from the tile replacement table at $3967.
+; Compares direction against opposite-direction table $3963 to decide
+; which tile variant to write.
+;
+$33EC> A5 51:	LDA $51		; spawn timer (animation frame)
+$33EE> 0A:	ASL A		; × 2
+$33EF> 0A:	ASL A		; × 4
+$33F0> 0A:	ASL A		; × 8 = frame base offset
+$33F1> 85 5D:	STA $5D		; save frame base
+$33F3> B5 52:	LDA $52,X		; entity state
+$33F5> 29 03:	AND #$03	; low 2 bits = direction sub-index
 $33F7> A8:	TAY		;
-$33F8> B5 46:	LDA $46,X		;
-$33FA> D9 6339:	CMP $3963,Y	;
-$33FD> D0 2A:	BNE $3429		;
+$33F8> B5 46:	LDA $46,X		; entity direction
+$33FA> D9 6339:	CMP $3963,Y	; compare with opposite direction
+$33FD> D0 2A:	BNE $3429		; mismatch → try alternate index
 $33FF> EA:	NOP		;
-$3400> 98:	TYA		;
-$3401> 0A:	ASL A		;
-$3402> 18:	CLC		;
-$3403> 65 5D:	ADC $5D		;
+$3400> 98:	TYA		; direction sub-index
+$3401> 0A:	ASL A		; × 2
+$3402> 18:	CLC		; --- entry point for alternate ---
+$3403> 65 5D:	ADC $5D		; + frame base → tile table index
 $3405> A8:	TAY		;
-$3406> B9 6739:	LDA $3967,Y	;
-$3409> 85 5D:	STA $5D		;
-$340B> 20 2537:	JSR $3725	;
-$340E> B5 46:	LDA $46,X		;
-$3410> 0A:	ASL A		;
+$3406> B9 6739:	LDA $3967,Y	; look up replacement tile
+$3409> 85 5D:	STA $5D		; save tile to write
+$340B> 20 2537:	JSR $3725	; load entity position → ($25/$26)
+$340E> B5 46:	LDA $46,X		; direction
+$3410> 0A:	ASL A		; × 2 = word index
 $3411> AA:	TAX		;
-$3412> BD 8739:	LDA $3987,X	;
+$3412> BD 8739:	LDA $3987,X	; movement offset lo (behind entity)
 $3415> 85 00:	STA $00		;
 $3417> E8:	INX		;
-$3418> BD 8739:	LDA $3987,X	;
+$3418> BD 8739:	LDA $3987,X	; movement offset hi
 $341B> 85 01:	STA $01		;
-$341D> 20 0737:	JSR $3707	;
-$3420> A5 5D:	LDA $5D		;
+$341D> 20 0737:	JSR $3707	; advance screen pointer
+$3420> A5 5D:	LDA $5D		; replacement tile
 $3422> A0 00:	LDY #$00	;
-$3424> 91 25:	STA ($25),Y		;
-$3426> 4C 8C33:	JMP $338C	;
+$3424> 91 25:	STA ($25),Y		; write road tile behind entity
+$3426> 4C 8C33:	JMP $338C	; → continue entity loop
+; --- Alternate index: try sub-index × 2 + 1 ---
 $3429> 18:	CLC		;
-$342A> 98:	TYA		;
-$342B> 0A:	ASL A		;
-$342C> 69 01:	ADC #$01	;
-$342E> 4C 0234:	JMP $3402	;
-$3431> A9 04:	LDA #$04	;
+$342A> 98:	TYA		; direction sub-index
+$342B> 0A:	ASL A		; × 2
+$342C> 69 01:	ADC #$01	; + 1 = odd offset
+$342E> 4C 0234:	JMP $3402	; → look up tile with this index
+;
+;----- $3431: Spawn new entity / process entity movement -------------------
+; Reloads spawn timer ($51=4), then for each entity:
+;   If bit 7 of state ($52,X) set → active, call $3555 (AI direction)
+;   If entity 0 (player) → call $3598 (read joystick input)
+;   Then check tile ahead for road/wall to determine if movement is valid.
+;
+$3431> A9 04:	LDA #$04	; reload spawn countdown
 $3433> 85 51:	STA $51		;
-$3435> A6 03:	LDX $03		;
-$3437> B5 52:	LDA $52,X		;
-$3439> 10 04:	BPL $343F		;
+$3435> A6 03:	LDX $03		; current entity index
+$3437> B5 52:	LDA $52,X		; entity state
+$3439> 10 04:	BPL $343F		; bit 7 clear → skip AI
 $343B> EA:	NOP		;
-$343C> 20 5535:	JSR $3555	;
+$343C> 20 5535:	JSR $3555	; AI: choose new direction for entity
 $343F> A6 03:	LDX $03		;
-$3441> D0 04:	BNE $3447		;
+$3441> D0 04:	BNE $3447		; entity != 0 → skip player input
 $3443> EA:	NOP		;
-$3444> 20 9835:	JSR $3598	;
-$3447> 20 2537:	JSR $3725	;
-$344A> A6 03:	LDX $03		;
-$344C> B5 46:	LDA $46,X		;
-$344E> 0A:	ASL A		;
+$3444> 20 9835:	JSR $3598	; read joystick → set player direction
+;
+; --- Look ahead: read tile in entity's direction of travel ---
+$3447> 20 2537:	JSR $3725	; load entity position → ($25/$26)
+$344A> A6 03:	LDX $03		; entity index
+$344C> B5 46:	LDA $46,X		; entity direction
+$344E> 0A:	ASL A		; × 2 = word index
 $344F> A8:	TAY		;
-$3450> B9 A039:	LDA $39A0,Y	;
+$3450> B9 A039:	LDA $39A0,Y	; look-ahead offset lo
 $3453> 85 00:	STA $00		;
 $3455> C8:	INY		;
-$3456> B9 A039:	LDA $39A0,Y	;
+$3456> B9 A039:	LDA $39A0,Y	; look-ahead offset hi
 $3459> 85 01:	STA $01		;
-$345B> 20 0737:	JSR $3707	;
+$345B> 20 0737:	JSR $3707	; advance screen pointer to tile ahead
 $345E> 88:	DEY		;
-$345F> 84 05:	STY $05		;
+$345F> 84 05:	STY $05		; save direction × 2 for later
+;
+; --- Classify tile ahead: junction type determination ---
+; Tile IDs: $1F=T-junc-A, $0C=T-junc-B, $23=crossroad, $3D=T-junc-C
+; Each jumps to $350A+N (cascading INX) to set junction class X=0..3
+;
 $3461> A0 00:	LDY #$00	;
-$3463> A2 00:	LDX #$00	;
-$3465> B1 25:	LDA ($25),Y		;
-$3467> C9 1F:	CMP #$1f	;
+$3463> A2 00:	LDX #$00	; junction class = 0 (default)
+$3465> B1 25:	LDA ($25),Y		; read tile ahead
+$3467> C9 1F:	CMP #$1f	; T-junction type A?
 $3469> D0 04:	BNE $346F		;
 $346B> EA:	NOP		;
-$346C> 4C 0C35:	JMP $350C	;
-$346F> C9 0C:	CMP #$0c	;
+$346C> 4C 0C35:	JMP $350C	; → class 2 (INX×2 then $350D)
+$346F> C9 0C:	CMP #$0c	; T-junction type B?
 $3471> D0 04:	BNE $3477		;
 $3473> EA:	NOP		;
-$3474> 4C 0B35:	JMP $350B	;
-$3477> C9 23:	CMP #$23	;
+$3474> 4C 0B35:	JMP $350B	; → class 1 (INX×1 then $350D)
+$3477> C9 23:	CMP #$23	; crossroad?
 $3479> D0 04:	BNE $347F		;
 $347B> EA:	NOP		;
-$347C> 4C 0A35:	JMP $350A	;
-$347F> C9 3D:	CMP #$3d	;
+$347C> 4C 0A35:	JMP $350A	; → class 0 (straight to $350D)
+$347F> C9 3D:	CMP #$3d	; T-junction type C?
 $3481> D0 04:	BNE $3487		;
 $3483> EA:	NOP		;
-$3484> 4C 0D35:	JMP $350D	;
-$3487> A4 03:	LDY $03		;
-$3489> D0 3E:	BNE $34C9		;
+$3484> 4C 0D35:	JMP $350D	; → class 3 (INX×3 then $350D)
+;
+; --- Not a junction tile: passability check ---
+; Non-player entities always pass through; player checks road table.
+;
+$3487> A4 03:	LDY $03		; entity index
+$3489> D0 3E:	BNE $34C9		; non-player → always passable
 $348B> EA:	NOP		;
-$348C> 48:	PHA		;
-$348D> A4 03:	LDY $03		;
-$348F> B9 4600:	LDA $0046,Y	;
+$348C> 48:	PHA		; save tile value
+$348D> A4 03:	LDY $03		; (player only from here)
+$348F> B9 4600:	LDA $0046,Y	; player direction
 $3492> A8:	TAY		;
-$3493> 68:	PLA		;
-$3494> D9 DC39:	CMP $39DC,Y	;
-$3497> F0 30:	BEQ $34C9		;
+$3493> 68:	PLA		; restore tile value
+$3494> D9 DC39:	CMP $39DC,Y	; matches expected road tile for dir?
+$3497> F0 30:	BEQ $34C9		; yes → tile is valid road, proceed
 $3499> EA:	NOP		;
-$349A> C9 01:	CMP #$01	;
-$349C> 4C 903A:	JMP $3A90	;
-$349F> A5 25:	LDA $25		;
-$34A1> 29 10:	AND #$10	;
-$34A3> F0 07:	BEQ $34AC		;
+;
+; --- Player road tile replacement: write correct directional tile ---
+; Selects from $39E0 or $39E4 tables based on screen position
+; (row parity or screen page), then replaces tile on screen.
+;
+$349A> C9 01:	CMP #$01	; tile == 1? (horizontal road)
+$349C> 4C 903A:	JMP $3A90	; → check via branch table at $3A90
+$349F> A5 25:	LDA $25		; screen pointer lo
+$34A1> 29 10:	AND #$10	; bit 4 = row parity
+$34A3> F0 07:	BEQ $34AC		; even row → use $39E0 table
 $34A5> EA:	NOP		;
-$34A6> B9 E439:	LDA $39E4,Y	;
-$34A9> 4C C234:	JMP $34C2	;
-$34AC> B9 E039:	LDA $39E0,Y	;
-$34AF> 4C C234:	JMP $34C2	;
-$34B2> A5 26:	LDA $26		;
-$34B4> C9 42:	CMP #$42	;
-$34B6> B0 07:	BCS $34BF		;
+$34A6> B9 E439:	LDA $39E4,Y	; odd row: alternate road tile
+$34A9> 4C C234:	JMP $34C2	; → write tile
+$34AC> B9 E039:	LDA $39E0,Y	; even row: standard road tile
+$34AF> 4C C234:	JMP $34C2	; → write tile
+$34B2> A5 26:	LDA $26		; screen pointer hi
+$34B4> C9 42:	CMP #$42	; above page $42?
+$34B6> B0 07:	BCS $34BF		; yes → use $39E4 (lower screen)
 $34B8> EA:	NOP		;
-$34B9> B9 E039:	LDA $39E0,Y	;
+$34B9> B9 E039:	LDA $39E0,Y	; upper screen: standard tile
 $34BC> 4C C234:	JMP $34C2	;
-$34BF> B9 E439:	LDA $39E4,Y	;
+$34BF> B9 E439:	LDA $39E4,Y	; lower screen: alternate tile
 $34C2> A0 00:	LDY #$00	;
-$34C4> 91 25:	STA ($25),Y		;
-$34C6> 4C 3F34:	JMP $343F	;
-$34C9> 20 4035:	JSR $3540	;
-$34CC> 20 DA34:	JSR $34DA	;
-$34CF> C6 03:	DEC $03		;
-$34D1> 10 04:	BPL $34D7		;
+$34C4> 91 25:	STA ($25),Y		; write road tile to screen
+$34C6> 4C 3F34:	JMP $343F	; → re-enter entity loop
+;
+; --- Valid move: advance entity and restore previous tile ---
+$34C9> 20 4035:	JSR $3540	; advance entity to next tile
+$34CC> 20 DA34:	JSR $34DA	; restore tile behind entity
+$34CF> C6 03:	DEC $03		; next entity index
+$34D1> 10 04:	BPL $34D7		; more entities → continue
 $34D3> EA:	NOP		;
-$34D4> 4C 6133:	JMP $3361	;
-$34D7> 4C 3534:	JMP $3435	;
-$34DA> B9 C839:	LDA $39C8,Y	;
+$34D4> 4C 6133:	JMP $3361	; → restart entity update loop
+$34D7> 4C 3534:	JMP $3435	; → next entity
+;
+;----- $34DA: Restore previous tile behind entity -------------------------
+; Loads screen offset from $39C8,Y to find the tile position behind
+; the entity, writes the default road tile from $39D0 (direction-based).
+; If bit 6 of entity state ($52,X) is set ("just turned" flag), clears
+; that flag and overwrites with the deferred/saved tile from $5E,X.
+;
+$34DA> B9 C839:	LDA $39C8,Y	; behind-entity offset lo
 $34DD> 85 00:	STA $00		;
 $34DF> C8:	INY		;
-$34E0> B9 C839:	LDA $39C8,Y	;
+$34E0> B9 C839:	LDA $39C8,Y	; behind-entity offset hi
 $34E3> 85 01:	STA $01		;
-$34E5> 20 2537:	JSR $3725	;
-$34E8> 20 0737:	JSR $3707	;
-$34EB> 46 05:	LSR $05		;
+$34E5> 20 2537:	JSR $3725	; load entity position
+$34E8> 20 0737:	JSR $3707	; advance pointer to tile behind
+$34EB> 46 05:	LSR $05		; direction / 2 = tile variant
 $34ED> A6 05:	LDX $05		;
-$34EF> BD D039:	LDA $39D0,X	;
+$34EF> BD D039:	LDA $39D0,X	; default road tile for direction
 $34F2> A0 00:	LDY #$00	;
-$34F4> 91 25:	STA ($25),Y		;
-$34F6> A6 03:	LDX $03		;
-$34F8> B5 52:	LDA $52,X		;
-$34FA> 29 40:	AND #$40	;
-$34FC> F0 0B:	BEQ $3509		;
+$34F4> 91 25:	STA ($25),Y		; write default road tile
+$34F6> A6 03:	LDX $03		; entity index
+$34F8> B5 52:	LDA $52,X		; entity state
+$34FA> 29 40:	AND #$40	; bit 6 = "just turned" flag?
+$34FC> F0 0B:	BEQ $3509		; no → done
 $34FE> EA:	NOP		;
-$34FF> B5 52:	LDA $52,X		;
+$34FF> B5 52:	LDA $52,X		; clear bit 6 flag
 $3501> 29 BF:	AND #$bf	;
 $3503> 95 52:	STA $52,X		;
-$3505> B5 5E:	LDA $5E,X		;
-$3507> 91 25:	STA ($25),Y		;
+$3505> B5 5E:	LDA $5E,X		; load saved/deferred tile
+$3507> 91 25:	STA ($25),Y		; overwrite with saved tile
 $3509> 60:	RTS		;
-$350A> E8:	INX		;
-$350B> E8:	INX		;
-$350C> E8:	INX		;
-$350D> 48:	PHA		;
-$350E> 8A:	TXA		;
-$350F> 48:	PHA		;
-$3510> A4 03:	LDY $03		;
-$3512> B9 4600:	LDA $0046,Y	;
+;
+;----- $350A: Junction/intersection turn handler --------------------------
+; Jumped to from tile classifier ($3467-$3484). Cascading INX entries
+; set junction class X=0..3 based on tile type.
+; Compares junction class against two direction-validity tables
+; ($39D4 and $39D8). If neither matches → entity passes straight
+; through. If match → entity turns: advance position, restore
+; previous tile, save current tile as deferred ($5E,X), and
+; set entity state bit 7 (active) + junction class.
+;
+$350A> E8:	INX		; class 0 entry (crossroad $23)
+$350B> E8:	INX		; class 1 entry (T-junc-B $0C)
+$350C> E8:	INX		; class 2 entry (T-junc-A $1F)
+$350D> 48:	PHA		; class 3 entry; save tile value
+$350E> 8A:	TXA		; junction class
+$350F> 48:	PHA		; save class
+$3510> A4 03:	LDY $03		; entity index
+$3512> B9 4600:	LDA $0046,Y	; entity direction
 $3515> A8:	TAY		;
-$3516> 68:	PLA		;
-$3517> D9 D439:	CMP $39D4,Y	;
-$351A> F0 0B:	BEQ $3527		;
+$3516> 68:	PLA		; restore junction class
+$3517> D9 D439:	CMP $39D4,Y	; valid turn direction A?
+$351A> F0 0B:	BEQ $3527		; yes → execute turn
 $351C> EA:	NOP		;
-$351D> D9 D839:	CMP $39D8,Y	;
-$3520> F0 05:	BEQ $3527		;
+$351D> D9 D839:	CMP $39D8,Y	; valid turn direction B?
+$3520> F0 05:	BEQ $3527		; yes → execute turn
 $3522> EA:	NOP		;
-$3523> 68:	PLA		;
-$3524> 4C C934:	JMP $34C9	;
-$3527> 48:	PHA		;
-$3528> 20 4035:	JSR $3540	;
-$352B> 20 DA34:	JSR $34DA	;
-$352E> 68:	PLA		;
+$3523> 68:	PLA		; neither → pass through junction
+$3524> 4C C934:	JMP $34C9	; → normal move (advance + restore)
+; --- Execute junction turn ---
+$3527> 48:	PHA		; save junction class
+$3528> 20 4035:	JSR $3540	; advance entity to next tile
+$352B> 20 DA34:	JSR $34DA	; restore tile behind
+$352E> 68:	PLA		; restore junction class
 $352F> AA:	TAX		;
-$3530> 68:	PLA		;
-$3531> A4 03:	LDY $03		;
-$3533> 99 5E00:	STA $005E,Y	;
-$3536> 8A:	TXA		;
-$3537> 09 80:	ORA #$80	;
+$3530> 68:	PLA		; restore original tile value
+$3531> A4 03:	LDY $03		; entity index
+$3533> 99 5E00:	STA $005E,Y	; save tile as deferred ($5E,X)
+$3536> 8A:	TXA		; junction class
+$3537> 09 80:	ORA #$80	; set bit 7 = active entity
 $3539> A6 03:	LDX $03		;
-$353B> 95 52:	STA $52,X		;
-$353D> 4C CF34:	JMP $34CF	;
-$3540> 20 2537:	JSR $3725	;
-$3543> A4 05:	LDY $05		;
-$3545> B9 A839:	LDA $39A8,Y	;
+$353B> 95 52:	STA $52,X		; update entity state
+$353D> 4C CF34:	JMP $34CF	; → continue entity loop (dec $03)
+;
+;----- $3540: Advance entity to next tile ---------------------------------
+; Loads movement offset for current direction from table $39A8 (signed
+; 16-bit screen pointer delta), advances entity screen pointer ($25/$26)
+; by that offset, and saves new position into entity table ($30+).
+;
+$3540> 20 2537:	JSR $3725	; load entity position → ($25/$26)
+$3543> A4 05:	LDY $05		; Y = direction * 2 (word index)
+$3545> B9 A839:	LDA $39A8,Y	; movement offset lo for direction
 $3548> 85 00:	STA $00		;
 $354A> C8:	INY		;
-$354B> B9 A839:	LDA $39A8,Y	;
+$354B> B9 A839:	LDA $39A8,Y	; movement offset hi for direction
 $354E> 85 01:	STA $01		;
 $3550> 88:	DEY		;
-$3551> 20 1537:	JSR $3715	;
+$3551> 20 1537:	JSR $3715	; advance pointer + save entity position
 $3554> 60:	RTS		;
-$3555> 20 9133:	JSR $3391	;
-$3558> A6 03:	LDX $03		;
-$355A> B5 46:	LDA $46,X		;
+;
+;----- $3555: Entity direction AI -----------------------------------------
+; Called each tick for active entities (bit 7 of state $52,X set).
+; Draws entity sprite ($3391), then checks if entity's requested
+; direction (state & $03) matches the "allowed" direction at current
+; tile from $39C0 table (indexed by current direction $46,X).
+;   If mismatch → turn entity via $39C4 alternate-direction table,
+;     look up turn offset from $39B0 table, set bit 6 ("just turned")
+;     flag in state, and reposition entity.
+;   If match → keep going straight via $39C0.
+; After choosing direction, computes offset into $39B0 (direction×4+1)×2
+; and advances entity position.
+;
+$3555> 20 9133:	JSR $3391	; draw/animate entity sprite
+$3558> A6 03:	LDX $03		; entity index
+$355A> B5 46:	LDA $46,X		; current direction
 $355C> A8:	TAY		;
-$355D> B5 52:	LDA $52,X		;
-$355F> 29 03:	AND #$03	;
-$3561> D9 C039:	CMP $39C0,Y	;
-$3564> F0 27:	BEQ $358D		;
+$355D> B5 52:	LDA $52,X		; entity state
+$355F> 29 03:	AND #$03	; extract requested direction bits
+$3561> D9 C039:	CMP $39C0,Y	; matches allowed direction for tile?
+$3564> F0 27:	BEQ $358D		; yes → keep going straight
 $3566> EA:	NOP		;
-$3567> B9 C439:	LDA $39C4,Y	;
-$356A> 95 46:	STA $46,X		;
-$356C> 98:	TYA		;
-$356D> 0A:	ASL A		;
+$3567> B9 C439:	LDA $39C4,Y	; no → get alternate turn direction
+$356A> 95 46:	STA $46,X		; set new direction
+$356C> 98:	TYA		; old direction
+$356D> 0A:	ASL A		; × 2
 $356E> A8:	TAY		;
-$356F> C8:	INY		;
+$356F> C8:	INY		; (dir * 2) + 1
 $3570> 98:	TYA		;
-$3571> 0A:	ASL A		;
-$3572> A8:	TAY		;
-$3573> B9 B039:	LDA $39B0,Y	;
+$3571> 0A:	ASL A		; × 2 again → (dir * 4 + 2)
+$3572> A8:	TAY		; Y = offset into turn vector table
+$3573> B9 B039:	LDA $39B0,Y	; turn movement offset lo
 $3576> 85 00:	STA $00		;
 $3578> C8:	INY		;
-$3579> B9 B039:	LDA $39B0,Y	;
+$3579> B9 B039:	LDA $39B0,Y	; turn movement offset hi
 $357C> 85 01:	STA $01		;
-$357E> B5 52:	LDA $52,X		;
-$3580> 29 03:	AND #$03	;
-$3582> 09 40:	ORA #$40	;
-$3584> 95 52:	STA $52,X		;
-$3586> 20 2537:	JSR $3725	;
-$3589> 20 1537:	JSR $3715	;
+$357E> B5 52:	LDA $52,X		; entity state
+$3580> 29 03:	AND #$03	; keep direction bits
+$3582> 09 40:	ORA #$40	; set bit 6 = "just turned" flag
+$3584> 95 52:	STA $52,X		; update state
+$3586> 20 2537:	JSR $3725	; load entity position
+$3589> 20 1537:	JSR $3715	; advance + save entity position
 $358C> 60:	RTS		;
-$358D> B9 C039:	LDA $39C0,Y	;
-$3590> 95 46:	STA $46,X		;
+; --- Direction matches: keep straight ---
+$358D> B9 C039:	LDA $39C0,Y	; same direction from table
+$3590> 95 46:	STA $46,X		; (redundant but consistent)
 $3592> 98:	TYA		;
 $3593> 0A:	ASL A		;
 $3594> A8:	TAY		;
-$3595> 4C 7035:	JMP $3570	;
-$3598> 24 02:	BIT $02		;
-$359A> 30 02:	BMI $359E		;
+$3595> 4C 7035:	JMP $3570	; → compute offset and advance
+;
+;----- $3598: Player joystick input handler --------------------------------
+; Reads joystick port ($5101), maps button presses to direction 0-3.
+; Only runs if game is active ($02 bit 7 set).
+; Joystick bits (active-low, EOR #$FF to make active-high):
+;   Bit 3 = up, Bit 2 = down, Bit 5 = left, Bit 6 = right
+; Direction encoding: 0=up, 1=right, 2=down, 3=left
+; Falls through E8/INX ladder to set X=0..3 based on direction.
+;
+$3598> 24 02:	BIT $02		; game state
+$359A> 30 02:	BMI $359E		; active → proceed
 $359C> EA:	NOP		;
-$359D> 60:	RTS		;
+$359D> 60:	RTS		; not active → return
 $359E> A2 00:	LDX #$00	;
-$35A0> 20 2537:	JSR $3725	;
-$35A3> AD 0151:	LDA $5101	;
-$35A6> 49 FF:	EOR #$ff	;
-$35A8> 48:	PHA		;
-$35A9> 29 08:	AND #$08	;
-$35AB> D0 19:	BNE $35C6		;
+$35A0> 20 2537:	JSR $3725	; look up player position
+$35A3> AD 0151:	LDA $5101	; read joystick port
+$35A6> 49 FF:	EOR #$ff	; invert (active-high)
+$35A8> 48:	PHA		; save
+$35A9> 29 08:	AND #$08	; bit 3 = up?
+$35AB> D0 19:	BNE $35C6		; yes → direction = 2 (up: INX×2 via fall-through)
 $35AD> EA:	NOP		;
 $35AE> 68:	PLA		;
 $35AF> 48:	PHA		;
-$35B0> 29 04:	AND #$04	;
-$35B2> D0 14:	BNE $35C8		;
+$35B0> 29 04:	AND #$04	; bit 2 = down?
+$35B2> D0 14:	BNE $35C8		; yes → direction = 0 (down)
 $35B4> EA:	NOP		;
 $35B5> 68:	PLA		;
 $35B6> 48:	PHA		;
-$35B7> 29 20:	AND #$20	;
-$35B9> D0 0C:	BNE $35C7		;
+$35B7> 29 20:	AND #$20	; bit 5 = left?
+$35B9> D0 0C:	BNE $35C7		; yes → direction = 3 (left: INX×3)
 $35BB> EA:	NOP		;
 $35BC> 68:	PLA		;
 $35BD> 48:	PHA		;
-$35BE> 29 40:	AND #$40	;
-$35C0> D0 03:	BNE $35C5		;
+$35BE> 29 40:	AND #$40	; bit 6 = right?
+$35C0> D0 03:	BNE $35C5		; yes → direction = 1 (right: INX×1)
 $35C2> EA:	NOP		;
-$35C3> 68:	PLA		;
-$35C4> 60:	RTS		;
-$35C5> E8:	INX		;
-$35C6> E8:	INX		;
-$35C7> E8:	INX		;
-$35C8> 68:	PLA		;
-$35C9> 20 2537:	JSR $3725	;
-$35CC> 86 05:	STX $05		;
-$35CE> A5 46:	LDA $46		;
-$35D0> C5 05:	CMP $05		;
-$35D2> D0 32:	BNE $3606		;
+$35C3> 68:	PLA		; no input
+$35C4> 60:	RTS		; return (no direction change)
+$35C5> E8:	INX		; right: X=1
+$35C6> E8:	INX		; up: X=2 (or right fell through → X=2 BUG?)
+$35C7> E8:	INX		; left: X=3
+; ...direction encoding: up→$35C6 (X=0+2=2), down→$35C8 (X=0),
+;   left→$35C7 (X=0+3=3), right→$35C5 (X=0+1=1)
+;\n; --- Apply joystick direction ---
+$35C8> 68:	PLA		; discard saved joystick byte
+$35C9> 20 2537:	JSR $3725	; reload player position
+$35CC> 86 05:	STX $05		; save requested direction
+$35CE> A5 46:	LDA $46		; current player direction
+$35D0> C5 05:	CMP $05		; same as requested?
+$35D2> D0 32:	BNE $3606		; different → handle direction change
 $35D4> EA:	NOP		;
-$35D5> 06 05:	ASL $05		;
+;\n; --- Same direction: check if tile ahead needs road tile update ---
+$35D5> 06 05:	ASL $05		; direction × 2 = word index
 $35D7> A6 05:	LDX $05		;
-$35D9> BD E839:	LDA $39E8,X	;
+$35D9> BD E839:	LDA $39E8,X	; same-dir look-ahead offset lo
 $35DC> 85 00:	STA $00		;
 $35DE> E8:	INX		;
-$35DF> BD E839:	LDA $39E8,X	;
+$35DF> BD E839:	LDA $39E8,X	; same-dir look-ahead offset hi
 $35E2> 85 01:	STA $01		;
-$35E4> 20 0737:	JSR $3707	;
+$35E4> 20 0737:	JSR $3707	; advance pointer to tile ahead
 $35E7> A0 00:	LDY #$00	;
-$35E9> B1 25:	LDA ($25),Y		;
-$35EB> 85 05:	STA $05		;
+$35E9> B1 25:	LDA ($25),Y		; read tile ahead
+$35EB> 85 05:	STA $05		; save tile value
 $35ED> CA:	DEX		;
-$35EE> 29 FE:	AND #$fe	;
-$35F0> D0 13:	BNE $3605		;
+$35EE> 29 FE:	AND #$fe	; strip direction bit
+$35F0> D0 13:	BNE $3605		; non-empty tile → don't write, return
 $35F2> EA:	NOP		;
-$35F3> BD F039:	LDA $39F0,X	;
+; --- Empty tile ahead: copy road tile from behind to ahead ---
+$35F3> BD F039:	LDA $39F0,X	; behind-entity offset lo
 $35F6> 85 00:	STA $00		;
 $35F8> E8:	INX		;
-$35F9> BD F039:	LDA $39F0,X	;
+$35F9> BD F039:	LDA $39F0,X	; behind-entity offset hi
 $35FC> 85 01:	STA $01		;
-$35FE> 20 0737:	JSR $3707	;
-$3601> A5 05:	LDA $05		;
-$3603> 91 25:	STA ($25),Y		;
+$35FE> 20 0737:	JSR $3707	; advance pointer to tile behind
+$3601> A5 05:	LDA $05		; saved tile value
+$3603> 91 25:	STA ($25),Y		; write it to the position behind
 $3605> 60:	RTS		;
-$3606> A8:	TAY		;
-$3607> B9 C039:	LDA $39C0,Y	;
-$360A> C5 05:	CMP $05		;
-$360C> F0 0A:	BEQ $3618		;
+;
+;----- $3606: Handle direction change request (player joystick) -----------
+; Input: Y = current direction ($46), $05 = requested direction.
+; Checks if requested matches allowed direction ($39C0) → forward turn,
+; or alternate ($39C4) → reverse turn. If neither matches → ignore.
+; Forward turn: check tile ahead via $39F8 offset, if clear → apply.
+; Reverse turn: check tile behind via $3A0C offset, if clear → apply.
+;
+$3606> A8:	TAY		; Y = current direction
+$3607> B9 C039:	LDA $39C0,Y	; primary allowed direction
+$360A> C5 05:	CMP $05		; matches joystick input?
+$360C> F0 0A:	BEQ $3618		; yes → forward turn path
 $360E> EA:	NOP		;
-$360F> B9 C439:	LDA $39C4,Y	;
-$3612> C5 05:	CMP $05		;
-$3614> F0 43:	BEQ $3659		;
+$360F> B9 C439:	LDA $39C4,Y	; alternate allowed direction
+$3612> C5 05:	CMP $05		; matches joystick input?
+$3614> F0 43:	BEQ $3659		; yes → reverse turn path
 $3616> EA:	NOP		;
-$3617> 60:	RTS		;
-$3618> 84 05:	STY $05		;
-$361A> 06 05:	ASL $05		;
+$3617> 60:	RTS		; neither → ignore input
+;
+; --- Forward turn: check tile ahead in new direction ---
+$3618> 84 05:	STY $05		; $05 = current dir (save for later)
+$361A> 06 05:	ASL $05		; × 2 = word index
 $361C> A6 05:	LDX $05		;
 $361E> 18:	CLC		;
-$361F> BD F839:	LDA $39F8,X	;
+$361F> BD F839:	LDA $39F8,X	; forward look-ahead offset lo
 $3622> 65 25:	ADC $25		;
 $3624> 85 25:	STA $25		;
 $3626> E8:	INX		;
-$3627> BD F839:	LDA $39F8,X	;
+$3627> BD F839:	LDA $39F8,X	; forward look-ahead offset hi
 $362A> 65 26:	ADC $26		;
 $362C> 85 26:	STA $26		;
 $362E> A0 00:	LDY #$00	;
-$3630> B1 25:	LDA ($25),Y		;
-$3632> 29 FE:	AND #$fe	;
-$3634> F0 08:	BEQ $363E		;
+$3630> B1 25:	LDA ($25),Y		; read tile at forward position
+$3632> 29 FE:	AND #$fe	; strip low bit (shared road tile base)
+$3634> F0 08:	BEQ $363E		; tile=0/1 (empty/road) → can turn
 $3636> EA:	NOP		;
-$3637> 20 9A36:	JSR $369A	;
-$363A> F0 02:	BEQ $363E		;
+$3637> 20 9A36:	JSR $369A	; check two-ahead: road tile there?
+$363A> F0 02:	BEQ $363E		; yes → can still turn
 $363C> EA:	NOP		;
-$363D> 60:	RTS		;
+$363D> 60:	RTS		; blocked → cancel turn
+; --- Apply forward turn: write direction tile to screen ---
 $363E> CA:	DEX		;
 $363F> 18:	CLC		;
-$3640> BD 003A:	LDA $3A00,X	;
+$3640> BD 003A:	LDA $3A00,X	; turn tile position offset lo
 $3643> 65 25:	ADC $25		;
 $3645> 85 25:	STA $25		;
 $3647> E8:	INX		;
-$3648> BD 003A:	LDA $3A00,X	;
+$3648> BD 003A:	LDA $3A00,X	; turn tile position offset hi
 $364B> 65 26:	ADC $26		;
 $364D> 85 26:	STA $26		;
-$364F> 46 05:	LSR $05		;
+$364F> 46 05:	LSR $05		; dir / 2 = tile variant index
 $3651> A6 05:	LDX $05		;
-$3653> BD 083A:	LDA $3A08,X	;
-$3656> 91 25:	STA ($25),Y		;
+$3653> BD 083A:	LDA $3A08,X	; direction-change tile graphic
+$3656> 91 25:	STA ($25),Y		; write turn tile to screen
 $3658> 60:	RTS		;
-$3659> 84 05:	STY $05		;
-$365B> 06 05:	ASL $05		;
+;
+; --- Reverse turn: check tile behind in alternate direction ---
+$3659> 84 05:	STY $05		; $05 = current dir (save)
+$365B> 06 05:	ASL $05		; × 2 = word index
 $365D> A6 05:	LDX $05		;
 $365F> 18:	CLC		;
-$3660> BD 0C3A:	LDA $3A0C,X	;
+$3660> BD 0C3A:	LDA $3A0C,X	; reverse look-ahead offset lo
 $3663> 65 25:	ADC $25		;
 $3665> 85 25:	STA $25		;
 $3667> E8:	INX		;
-$3668> BD 0C3A:	LDA $3A0C,X	;
+$3668> BD 0C3A:	LDA $3A0C,X	; reverse look-ahead offset hi
 $366B> 65 26:	ADC $26		;
 $366D> 85 26:	STA $26		;
 $366F> A0 00:	LDY #$00	;
-$3671> B1 25:	LDA ($25),Y		;
-$3673> 29 FE:	AND #$fe	;
-$3675> F0 08:	BEQ $367F		;
+$3671> B1 25:	LDA ($25),Y		; read tile at reverse position
+$3673> 29 FE:	AND #$fe	; strip low bit
+$3675> F0 08:	BEQ $367F		; empty/road → can turn
 $3677> EA:	NOP		;
-$3678> 20 9A36:	JSR $369A	;
-$367B> F0 02:	BEQ $367F		;
+$3678> 20 9A36:	JSR $369A	; check two-ahead in reverse
+$367B> F0 02:	BEQ $367F		; clear → can turn
 $367D> EA:	NOP		;
-$367E> 60:	RTS		;
+$367E> 60:	RTS		; blocked → cancel reverse turn
+; --- Apply reverse turn: write direction tile to screen ---
 $367F> CA:	DEX		;
 $3680> 18:	CLC		;
-$3681> BD 143A:	LDA $3A14,X	;
+$3681> BD 143A:	LDA $3A14,X	; reverse tile position offset lo
 $3684> 65 25:	ADC $25		;
 $3686> 85 25:	STA $25		;
 $3688> E8:	INX		;
-$3689> BD 143A:	LDA $3A14,X	;
+$3689> BD 143A:	LDA $3A14,X	; reverse tile position offset hi
 $368C> 65 26:	ADC $26		;
 $368E> 85 26:	STA $26		;
-$3690> 46 05:	LSR $05		;
+$3690> 46 05:	LSR $05		; dir / 2 = tile variant index
 $3692> A6 05:	LDX $05		;
-$3694> BD 1C3A:	LDA $3A1C,X	;
-$3697> 91 25:	STA ($25),Y		;
+$3694> BD 1C3A:	LDA $3A1C,X	; reverse turn tile graphic
+$3697> 91 25:	STA ($25),Y		; write turn tile to screen
 $3699> 60:	RTS		;
+;
+;----- $369A: Two-tiles-ahead road check ----------------------------------
+; Advances screen pointer by offset from $3A20 table (direction-based),
+; reads tile there, masks with #$FE (strip directional bit).
+; Returns Z=1 if tile is empty/road (caller can proceed with turn).
+;
 $369A> CA:	DEX		;
 $369B> 18:	CLC		;
-$369C> BD 203A:	LDA $3A20,X	;
+$369C> BD 203A:	LDA $3A20,X	; two-ahead offset lo
 $369F> 65 25:	ADC $25		;
 $36A1> 85 25:	STA $25		;
 $36A3> E8:	INX		;
-$36A4> BD 203A:	LDA $3A20,X	;
+$36A4> BD 203A:	LDA $3A20,X	; two-ahead offset hi
 $36A7> 65 26:	ADC $26		;
 $36A9> 85 26:	STA $26		;
 $36AB> A0 00:	LDY #$00	;
-$36AD> B1 25:	LDA ($25),Y		;
-$36AF> 29 FE:	AND #$fe	;
-$36B1> 60:	RTS		;
-$36B2> 20 2537:	JSR $3725	;
-$36B5> A5 46:	LDA $46		;
-$36B7> 0A:	ASL A		;
+$36AD> B1 25:	LDA ($25),Y		; read tile two ahead
+$36AF> 29 FE:	AND #$fe	; strip direction bit
+$36B1> 60:	RTS		; Z=1 → clear path
+;
+;----- $36B2: Player car look-ahead collision check -----------------------
+; Checks tiles ahead in current direction for collectible items.
+; Uses direction-based offset table at $3A32 to find the tile ahead,
+; calls $36E5 to check for collectible, then checks the second
+; tile using offset table $3A3A.
+;
+$36B2> 20 2537:	JSR $3725	; get player position
+$36B5> A5 46:	LDA $46		; player direction
+$36B7> 0A:	ASL A		; ×2 for word offset
 $36B8> AA:	TAX		;
 $36B9> 18:	CLC		;
-$36BA> BD 323A:	LDA $3A32,X	;
+$36BA> BD 323A:	LDA $3A32,X	; direction offset lo
 $36BD> 65 25:	ADC $25		;
 $36BF> 85 25:	STA $25		;
 $36C1> E8:	INX		;
-$36C2> BD 323A:	LDA $3A32,X	;
+$36C2> BD 323A:	LDA $3A32,X	; direction offset hi
 $36C5> 65 26:	ADC $26		;
-$36C7> 85 26:	STA $26		;
+$36C7> 85 26:	STA $26		; ($25) = tile ahead
 $36C9> 8A:	TXA		;
-$36CA> 48:	PHA		;
-$36CB> 20 E536:	JSR $36E5	;
+$36CA> 48:	PHA		; save X
+$36CB> 20 E536:	JSR $36E5	; check for collectible
 $36CE> 68:	PLA		;
 $36CF> AA:	TAX		;
 $36D0> CA:	DEX		;
 $36D1> 18:	CLC		;
-$36D2> BD 3A3A:	LDA $3A3A,X	;
+$36D2> BD 3A3A:	LDA $3A3A,X	; second offset lo
 $36D5> 65 25:	ADC $25		;
 $36D7> 85 25:	STA $25		;
 $36D9> E8:	INX		;
-$36DA> BD 3A3A:	LDA $3A3A,X	;
+$36DA> BD 3A3A:	LDA $3A3A,X	; second offset hi
 $36DD> 65 26:	ADC $26		;
 $36DF> 85 26:	STA $26		;
-$36E1> 20 E536:	JSR $36E5	;
+$36E1> 20 E536:	JSR $36E5	; check second tile
 $36E4> 60:	RTS		;
 $36E5> A0 00:	LDY #$00	;
 $36E7> B1 25:	LDA ($25),Y		;
@@ -2106,6 +2367,8 @@ $36FE> BD 2D3A:	LDA $3A2D,X	;
 $3701> 85 18:	STA $18		;
 $3703> 20 EF2F:	JSR $2FEF	;
 $3706> 60:	RTS		;
+;
+;----- $3707: Advance screen pointer ($25-$26) by ($00-$01) ---------------
 $3707> 18:	CLC		;
 $3708> A5 25:	LDA $25		;
 $370A> 65 00:	ADC $00		;
@@ -2114,663 +2377,444 @@ $370E> A5 01:	LDA $01		;
 $3710> 65 26:	ADC $26		;
 $3712> 85 26:	STA $26		;
 $3714> 60:	RTS		;
-$3715> 20 0737:	JSR $3707	;
-$3718> A5 03:	LDA $03		;
-$371A> 0A:	ASL A		;
+;
+;----- $3715: Save entity position -----------------------------------------
+; Advances screen pointer by ($00-$01), then saves ($25-$26) to
+; entity position table at $30 + (entity_index * 2).
+;
+$3715> 20 0737:	JSR $3707	; advance screen pointer
+$3718> A5 03:	LDA $03		; entity index
+$371A> 0A:	ASL A		; ×2
 $371B> AA:	TAX		;
 $371C> A5 25:	LDA $25		;
-$371E> 95 30:	STA $30,X		;
+$371E> 95 30:	STA $30,X		; save position lo
 $3720> A5 26:	LDA $26		;
-$3722> 95 31:	STA $31,X		;
+$3722> 95 31:	STA $31,X		; save position hi
 $3724> 60:	RTS		;
+;
+;===== ENTITY POSITION LOOKUP ===============================================
+; $3725: Load entity position from $30+X table into $25/$26.
+;   X = entity index × 2. Loads 16-bit position pointer.
+;
 $3725> A5 03:	LDA $03		;
 $3727> 0A:	ASL A		;
 $3728> A8:	TAY		;
-$3729> B9 3000:	LDA $0030,Y	;
+$3729> B9 3000:	LDA $0030,Y	; entity position lo
 $372C> 85 25:	STA $25		;
-$372E> B9 3100:	LDA $0031,Y	;
+$372E> B9 3100:	LDA $0031,Y	; entity position hi
 $3731> 85 26:	STA $26		;
 $3733> 60:	RTS		;
+;
+;===== PLAYER CAR INIT ======================================================
+; $3734: Set up player car's initial position and screen pointers.
+;   Places car at start position on the right side of the track.
+;
 $3734> A9 76:	LDA #$76	;
-$3736> 85 07:	STA $07		;
+$3736> 85 07:	STA $07		; sprite X = $76 (118 pixels)
 $3738> A9 8C:	LDA #$8c	;
-$373A> 85 08:	STA $08		;
+$373A> 85 08:	STA $08		; sprite Y = $8C (140 pixels)
 $373C> A9 B0:	LDA #$b0	;
-$373E> 85 69:	STA $69		;
+$373E> 85 69:	STA $69		; screen pointer lo = $B0
 $3740> A9 41:	LDA #$41	;
-$3742> 85 6A:	STA $6A		;
+$3742> 85 6A:	STA $6A		; screen pointer hi = $41 (page $41)
 $3744> A9 00:	LDA #$00	;
-$3746> 85 6C:	STA $6C		;
-$3748> A9 F0:	LDA #$f0	;
-$374A> 8D 0051:	STA $5100	;
+$3746> 85 6C:	STA $6C		; direction index = 0
+$3748> A9 F0:	LDA #$f0	; player car sprite image
+$374A> 8D 0051:	STA $5100	; write motion object image
 $374D> A9 07:	LDA #$07	;
-$374F> 85 6B:	STA $6B		;
+$374F> 85 6B:	STA $6B		; movement countdown = 7
 $3751> A9 10:	LDA #$10	;
-$3753> 85 6F:	STA $6F		;
+$3753> 85 6F:	STA $6F		; movement accumulator X = $10
 $3755> A9 0D:	LDA #$0d	;
-$3757> 85 70:	STA $70		;
+$3757> 85 70:	STA $70		; movement accumulator Y = $0D
 $3759> 60:	RTS		;
-$375A> C6 6B:	DEC $6B		;
-$375C> 30 26:	BMI $3784		;
+;
+;===== COLLISION CHECK ======================================================
+; $375A: Check if player car has hit a wall. Called from $2AD2 (speed update).
+;   Decrements movement countdown ($6B); when it goes negative, do full
+;   position update at $3784. Otherwise check tile at car's screen position.
+;   If tile is one of 6 road tiles ($3A5A table), car is safe.
+;   Otherwise → JMP $2C3C (crash/death routine).
+;
+$375A> C6 6B:	DEC $6B		; movement countdown
+$375C> 30 26:	BMI $3784		; < 0 → full position update
 $375E> EA:	NOP		;
 $375F> A0 00:	LDY #$00	;
-$3761> B1 69:	LDA ($69),Y		;
-$3763> A0 05:	LDY #$05	;
-$3765> D9 5A3A:	CMP $3A5A,Y	;
-$3768> F0 07:	BEQ $3771		;
+$3761> B1 69:	LDA ($69),Y		; read tile at car's screen position
+$3763> A0 05:	LDY #$05	; check against 6 road tile types
+$3765> D9 5A3A:	CMP $3A5A,Y	; compare with road tile table
+$3768> F0 07:	BEQ $3771		; match → on road, safe
 $376A> EA:	NOP		;
 $376B> 88:	DEY		;
-$376C> 10 F7:	BPL $3765		;
-$376E> 4C 3C2C:	JMP $2C3C	;
-$3771> A6 6C:	LDX $6C		;
+$376C> 10 F7:	BPL $3765		; check next tile type
+$376E> 4C 3C2C:	JMP $2C3C	; no match → CRASH! jump to death routine
+;
+; --- On road: update sprite position from movement table ---
+$3771> A6 6C:	LDX $6C		; direction index
 $3773> 18:	CLC		;
-$3774> A5 07:	LDA $07		;
-$3776> 7D 423A:	ADC $3A42,X	;
-$3779> 85 07:	STA $07		;
-$377B> A5 08:	LDA $08		;
+$3774> A5 07:	LDA $07		; sprite X
+$3776> 7D 423A:	ADC $3A42,X	; add X movement delta
+$3779> 85 07:	STA $07		; update sprite X
+$377B> A5 08:	LDA $08		; sprite Y
 $377D> 18:	CLC		;
-$377E> 7D 463A:	ADC $3A46,X	;
-$3781> 85 08:	STA $08		;
+$377E> 7D 463A:	ADC $3A46,X	; add Y movement delta
+$3781> 85 08:	STA $08		; update sprite Y
 $3783> 60:	RTS		;
+;
+;----- $3784: Full position update (movement countdown expired) -----------
+; Reloads countdown ($6B=8), decomposes position ($379B), determines
+; preferred steering direction ($37DC), then checks tile ahead ($3839).
+; If no crash, applies movement vector ($37B6).
+;
 $3784> A9 08:	LDA #$08	;
-$3786> 85 6B:	STA $6B		;
-$3788> 20 9B37:	JSR $379B	;
-$378B> 20 DC37:	JSR $37DC	;
-$378E> 20 3938:	JSR $3839	;
-$3791> A5 8E:	LDA $8E		;
-$3793> 10 02:	BPL $3797		;
+$3786> 85 6B:	STA $6B		; reload movement countdown = 8
+$3788> 20 9B37:	JSR $379B	; decompose position → $6D (coarse), $6E (fine)
+$378B> 20 DC37:	JSR $37DC	; compute preferred direction from deltas
+$378E> 20 3938:	JSR $3839	; check tile ahead for road/wall
+$3791> A5 8E:	LDA $8E		; crash flag?
+$3793> 10 02:	BPL $3797		; no crash → apply movement
 $3795> EA:	NOP		;
-$3796> 60:	RTS		;
-$3797> 20 B637:	JSR $37B6	;
+$3796> 60:	RTS		; crashed → return early
+$3797> 20 B637:	JSR $37B6	; apply movement vector to screen position
 $379A> 60:	RTS		;
-$379B> A5 31:	LDA $31		;
+;
+;----- $379B: Decompose car position into coarse + fine --------------------
+; Input: $30-$31 (player position pointer)
+; Output: $6D = coarse position (row/column combined)
+;         $6E = fine position (sub-tile X offset)
+;
+$379B> A5 31:	LDA $31		; position hi byte
 $379D> 0A:	ASL A		;
 $379E> 0A:	ASL A		;
 $379F> 0A:	ASL A		;
-$37A0> 29 18:	AND #$18	;
+$37A0> 29 18:	AND #$18	; extract row bits
 $37A2> 85 03:	STA $03		;
-$37A4> A5 30:	LDA $30		;
+$37A4> A5 30:	LDA $30		; position lo byte
 $37A6> 4A:	LSR A		;
 $37A7> 4A:	LSR A		;
 $37A8> 4A:	LSR A		;
 $37A9> 4A:	LSR A		;
-$37AA> 4A:	LSR A		;
-$37AB> 05 03:	ORA $03		;
-$37AD> 85 6D:	STA $6D		;
+$37AA> 4A:	LSR A		; shift down 5 bits → column index
+$37AB> 05 03:	ORA $03		; combine row + column
+$37AD> 85 6D:	STA $6D		; coarse position
 $37AF> A5 30:	LDA $30		;
-$37B1> 29 1F:	AND #$1f	;
-$37B3> 85 6E:	STA $6E		;
+$37B1> 29 1F:	AND #$1f	; mask low 5 bits
+$37B3> 85 6E:	STA $6E		; fine position (sub-tile)
 $37B5> 60:	RTS		;
-$37B6> A6 6C:	LDX $6C		;
+;
+;----- $37B6: Apply movement vector to screen position --------------------
+; Adds direction-based deltas to sub-tile accumulators ($6F, $70)
+; and screen pointer ($69-$6A) using tables at $3A4A-$3A56.
+;
+$37B6> A6 6C:	LDX $6C		; direction index
 $37B8> 18:	CLC		;
-$37B9> A5 6F:	LDA $6F		;
-$37BB> 7D 523A:	ADC $3A52,X	;
+$37B9> A5 6F:	LDA $6F		; sub-tile X accumulator
+$37BB> 7D 523A:	ADC $3A52,X	; add X delta from table
 $37BE> 85 6F:	STA $6F		;
 $37C0> 18:	CLC		;
-$37C1> A5 70:	LDA $70		;
-$37C3> 7D 563A:	ADC $3A56,X	;
+$37C1> A5 70:	LDA $70		; sub-tile Y accumulator
+$37C3> 7D 563A:	ADC $3A56,X	; add Y delta from table
 $37C6> 85 70:	STA $70		;
 $37C8> 8A:	TXA		;
-$37C9> 0A:	ASL A		;
+$37C9> 0A:	ASL A		; direction ×2 for word table
 $37CA> AA:	TAX		;
 $37CB> 18:	CLC		;
-$37CC> A5 69:	LDA $69		;
-$37CE> 7D 4A3A:	ADC $3A4A,X	;
+$37CC> A5 69:	LDA $69		; screen pointer lo
+$37CE> 7D 4A3A:	ADC $3A4A,X	; add screen offset lo
 $37D1> 85 69:	STA $69		;
 $37D3> E8:	INX		;
-$37D4> A5 6A:	LDA $6A		;
-$37D6> 7D 4A3A:	ADC $3A4A,X	;
+$37D4> A5 6A:	LDA $6A		; screen pointer hi
+$37D6> 7D 4A3A:	ADC $3A4A,X	; add screen offset hi
 $37D9> 85 6A:	STA $6A		;
 $37DB> 60:	RTS		;
+;
+;----- $37DC: Compute preferred steering direction -------------------------
+; Computes deltas between sub-tile accumulators ($6F,$70) and
+; position decomposition ($6E,$6D). Determines preferred primary ($75)
+; and secondary ($76) directions based on largest delta.
+; Directions: 0=up, 1=right, 2=down, 3=left
+;
 $37DC> 38:	SEC		;
-$37DD> A5 6F:	LDA $6F		;
-$37DF> E5 6E:	SBC $6E		;
-$37E1> B0 0E:	BCS $37F1		;
+$37DD> A5 6F:	LDA $6F		; X accumulator
+$37DF> E5 6E:	SBC $6E		; subtract fine X position
+$37E1> B0 0E:	BCS $37F1		; positive → moving right
 $37E3> EA:	NOP		;
-$37E4> 49 FF:	EOR #$ff	;
+$37E4> 49 FF:	EOR #$ff	; negate (absolute value)
 $37E6> 69 01:	ADC #$01	;
-$37E8> 85 73:	STA $73		;
+$37E8> 85 73:	STA $73		; abs(delta X)
 $37EA> A9 00:	LDA #$00	;
-$37EC> 85 71:	STA $71		;
+$37EC> 85 71:	STA $71		; X direction = 0 (up)
 $37EE> 4C FE37:	JMP $37FE	;
-$37F1> 85 73:	STA $73		;
+$37F1> 85 73:	STA $73		; abs(delta X)
 $37F3> A9 02:	LDA #$02	;
-$37F5> 85 71:	STA $71		;
+$37F5> 85 71:	STA $71		; X direction = 2 (down)
 $37F7> 4C FE37:	JMP $37FE	;
 $37FA> 85 73:	STA $73		;
-$37FC> 85 71:	STA $71		;
+$37FC> 85 71:	STA $71		; no X movement
 $37FE> 38:	SEC		;
-$37FF> A5 70:	LDA $70		;
-$3801> E5 6D:	SBC $6D		;
-$3803> B0 0E:	BCS $3813		;
+$37FF> A5 70:	LDA $70		; Y accumulator
+$3801> E5 6D:	SBC $6D		; subtract coarse position
+$3803> B0 0E:	BCS $3813		; positive → moving in +Y dir
 $3805> EA:	NOP		;
-$3806> 49 FF:	EOR #$ff	;
+$3806> 49 FF:	EOR #$ff	; negate
 $3808> 69 01:	ADC #$01	;
-$380A> 85 74:	STA $74		;
+$380A> 85 74:	STA $74		; abs(delta Y)
 $380C> A9 03:	LDA #$03	;
-$380E> 85 72:	STA $72		;
+$380E> 85 72:	STA $72		; Y direction = 3 (left)
 $3810> 4C 2038:	JMP $3820	;
-$3813> 85 74:	STA $74		;
+$3813> 85 74:	STA $74		; abs(delta Y)
 $3815> A9 01:	LDA #$01	;
-$3817> 85 72:	STA $72		;
+$3817> 85 72:	STA $72		; Y direction = 1 (right)
 $3819> 4C 2038:	JMP $3820	;
 $381C> 85 74:	STA $74		;
-$381E> 85 72:	STA $72		;
-$3820> A5 73:	LDA $73		;
-$3822> C5 74:	CMP $74		;
-$3824> B0 0A:	BCS $3830		;
+$381E> 85 72:	STA $72		; no Y movement
+; --- Choose primary direction based on larger delta ---
+$3820> A5 73:	LDA $73		; abs(delta X)
+$3822> C5 74:	CMP $74		; compare with abs(delta Y)
+$3824> B0 0A:	BCS $3830		; X >= Y → primary = X dir
 $3826> EA:	NOP		;
-$3827> A5 72:	LDA $72		;
-$3829> 85 75:	STA $75		;
+$3827> A5 72:	LDA $72		; Y dir is primary
+$3829> 85 75:	STA $75		; primary direction
 $382B> A5 71:	LDA $71		;
-$382D> 85 76:	STA $76		;
+$382D> 85 76:	STA $76		; secondary direction = X dir
 $382F> 60:	RTS		;
-$3830> A5 71:	LDA $71		;
+$3830> A5 71:	LDA $71		; X dir is primary
 $3832> 85 75:	STA $75		;
 $3834> A5 72:	LDA $72		;
-$3836> 85 76:	STA $76		;
+$3836> 85 76:	STA $76		; secondary direction = Y dir
 $3838> 60:	RTS		;
+;
+;----- $3839: Tile-ahead check and direction update ------------------------
+; Reads tile at ($69),Y. If not a road tile ($3A5A table) → crash.
+; If it IS a road tile, checks if preferred direction ($75/$76) is
+; valid for the current tile (intersection, T-junction, etc.).
+; Updates direction index ($6C) and sprite image accordingly.
+;
 $3839> A0 00:	LDY #$00	;
-$383B> B1 69:	LDA ($69),Y		;
-$383D> A0 05:	LDY #$05	;
-$383F> D9 5A3A:	CMP $3A5A,Y	;
-$3842> F0 07:	BEQ $384B		;
+$383B> B1 69:	LDA ($69),Y		; read tile at car position
+$383D> A0 05:	LDY #$05	; 6 road tile types
+$383F> D9 5A3A:	CMP $3A5A,Y	; compare with road tile table
+$3842> F0 07:	BEQ $384B		; match → on road
 $3844> EA:	NOP		;
 $3845> 88:	DEY		;
-$3846> 10 F7:	BPL $383F		;
-$3848> 4C 3C2C:	JMP $2C3C	;
-$384B> A6 6C:	LDX $6C		;
-$384D> A5 75:	LDA $75		;
-$384F> DD 603A:	CMP $3A60,X	;
-$3852> D0 51:	BNE $38A5		;
+$3846> 10 F7:	BPL $383F		; check next tile type
+$3848> 4C 3C2C:	JMP $2C3C	; no road tile → CRASH!
+;\n; --- Check preferred directions against current tile's allowed directions ---
+$384B> A6 6C:	LDX $6C		; current direction index
+$384D> A5 75:	LDA $75		; primary preferred direction
+$384F> DD 603A:	CMP $3A60,X	; same as current tile direction?
+$3852> D0 51:	BNE $38A5		; no → try primary as new direction
 $3854> EA:	NOP		;
-$3855> A5 76:	LDA $76		;
-$3857> DD 603A:	CMP $3A60,X	;
-$385A> D0 56:	BNE $38B2		;
+$3855> A5 76:	LDA $76		; secondary preferred direction
+$3857> DD 603A:	CMP $3A60,X	; same as current?
+$385A> D0 56:	BNE $38B2		; no → try secondary as new direction
 $385C> EA:	NOP		;
+;\n; --- Neither direction change needed: maintain current heading ---
+; Re-enter here ($385D) after direction change to write road tile.
 $385D> A0 00:	LDY #$00	;
-$385F> B1 69:	LDA ($69),Y		;
-$3861> 48:	PHA		;
-$3862> 29 FE:	AND #$fe	;
-$3864> D0 16:	BNE $387C		;
+$385F> B1 69:	LDA ($69),Y		; read tile at car position
+$3861> 48:	PHA		; save tile
+$3862> 29 FE:	AND #$fe	; strip direction bit
+$3864> D0 16:	BNE $387C		; non-empty → check intersection tiles
 $3866> EA:	NOP		;
-$3867> B1 69:	LDA ($69),Y		;
-$3869> A6 6C:	LDX $6C		;
-$386B> DD DC39:	CMP $39DC,X	;
-$386E> D0 03:	BNE $3873		;
+; --- Empty tile: write directional road tile ---
+$3867> B1 69:	LDA ($69),Y		; re-read tile
+$3869> A6 6C:	LDX $6C		; direction index
+$386B> DD DC39:	CMP $39DC,X	; already correct road tile for dir?
+$386E> D0 03:	BNE $3873		; no → write it
 $3870> EA:	NOP		;
-$3871> 68:	PLA		;
+$3871> 68:	PLA		; already correct → done
 $3872> 60:	RTS		;
-$3873> BD 8C3A:	LDA $3A8C,X	;
-$3876> 91 69:	STA ($69),Y		;
+$3873> BD 8C3A:	LDA $3A8C,X	; road tile for current direction
+$3876> 91 69:	STA ($69),Y		; write to screen
 $3878> 68:	PLA		;
-$3879> 4C 5D38:	JMP $385D	;
-$387C> 68:	PLA		;
-$387D> 06 6C:	ASL $6C		;
+$3879> 4C 5D38:	JMP $385D	; re-check tile
+;\n; --- Non-empty tile: check intersection tile table ---
+$387C> 68:	PLA		; restore tile value
+$387D> 06 6C:	ASL $6C		; direction × 2
 $387F> A6 6C:	LDX $6C		;
-$3881> 46 6C:	LSR $6C		;
-$3883> DD 643A:	CMP $3A64,X	;
-$3886> F0 12:	BEQ $389A		;
+$3881> 46 6C:	LSR $6C		; restore direction (×1)
+$3883> DD 643A:	CMP $3A64,X	; matches intersection tile set A?
+$3886> F0 12:	BEQ $389A		; yes → apply direction change
 $3888> EA:	NOP		;
-$3889> E8:	INX		;
-$388A> DD 643A:	CMP $3A64,X	;
-$388D> F0 0B:	BEQ $389A		;
+$3889> E8:	INX		; try next entry
+$388A> DD 643A:	CMP $3A64,X	; matches intersection tile set B?
+$388D> F0 0B:	BEQ $389A		; yes → apply direction change
 $388F> EA:	NOP		;
-$3890> A6 6C:	LDX $6C		;
-$3892> BD DC39:	LDA $39DC,X	;
+; --- No intersection match: write default road tile ---
+$3890> A6 6C:	LDX $6C		; direction index
+$3892> BD DC39:	LDA $39DC,X	; default road tile for direction
 $3895> A0 00:	LDY #$00	;
-$3897> 91 69:	STA ($69),Y		;
+$3897> 91 69:	STA ($69),Y		; write to screen
 $3899> 60:	RTS		;
-$389A> BD 6C3A:	LDA $3A6C,X	;
-$389D> 85 6C:	STA $6C		;
-$389F> 09 F0:	ORA #$f0	;
-$38A1> 8D 0051:	STA $5100	;
+; --- Intersection match: update direction and sprite ---
+$389A> BD 6C3A:	LDA $3A6C,X	; new direction from intersection table
+$389D> 85 6C:	STA $6C		; update direction index
+$389F> 09 F0:	ORA #$f0	; OR with $F0 → sprite image code
+$38A1> 8D 0051:	STA $5100	; write motion object image register
 $38A4> 60:	RTS		;
-$38A5> 20 C138:	JSR $38C1	;
-$38A8> D0 B3:	BNE $385D		;
-$38AA> A5 75:	LDA $75		;
-$38AC> 20 DE38:	JSR $38DE	;
-$38AF> 4C 5D38:	JMP $385D	;
-$38B2> A5 76:	LDA $76		;
-$38B4> 20 C138:	JSR $38C1	;
-$38B7> D0 A4:	BNE $385D		;
-$38B9> A5 76:	LDA $76		;
-$38BB> 20 DE38:	JSR $38DE	;
-$38BE> 4C 5D38:	JMP $385D	;
+;\n; --- Try primary direction as new heading ---
+$38A5> 20 C138:	JSR $38C1	; check adjacent tile for primary dir
+$38A8> D0 B3:	BNE $385D		; tile blocked → maintain heading
+$38AA> A5 75:	LDA $75		; primary direction
+$38AC> 20 DE38:	JSR $38DE	; write intersection/turn tile
+$38AF> 4C 5D38:	JMP $385D	; → re-enter tile check
+;\n; --- Try secondary direction as new heading ---
+$38B2> A5 76:	LDA $76		; secondary direction
+$38B4> 20 C138:	JSR $38C1	; check adjacent tile for secondary dir
+$38B7> D0 A4:	BNE $385D		; tile blocked → maintain heading
+$38B9> A5 76:	LDA $76		; secondary direction
+$38BB> 20 DE38:	JSR $38DE	; write intersection/turn tile
+$38BE> 4C 5D38:	JMP $385D	; → re-enter tile check
+;
+;----- $38C1: Check adjacent tile for direction change --------------------
+; Input: A = direction index to check.
+; Computes screen pointer for adjacent tile using offset table $3A74,
+; reads that tile, compares with expected road tile from $39DC table.
+; Returns Z flag: Z=1 if tile matches (direction change allowed).
+;
 $38C1> 48:	PHA		;
-$38C2> 0A:	ASL A		;
+$38C2> 0A:	ASL A		; direction * 2 (word index into offset table)
 $38C3> AA:	TAX		;
 $38C4> 18:	CLC		;
-$38C5> A5 69:	LDA $69		;
-$38C7> 7D 743A:	ADC $3A74,X	;
-$38CA> 85 25:	STA $25		;
+$38C5> A5 69:	LDA $69		; car screen pointer lo
+$38C7> 7D 743A:	ADC $3A74,X	; add direction offset lo
+$38CA> 85 25:	STA $25		; adjacent tile pointer lo
 $38CC> E8:	INX		;
-$38CD> A5 6A:	LDA $6A		;
-$38CF> 7D 743A:	ADC $3A74,X	;
-$38D2> 85 26:	STA $26		;
+$38CD> A5 6A:	LDA $6A		; car screen pointer hi
+$38CF> 7D 743A:	ADC $3A74,X	; add direction offset hi
+$38D2> 85 26:	STA $26		; adjacent tile pointer hi
 $38D4> 68:	PLA		;
 $38D5> AA:	TAX		;
 $38D6> A0 00:	LDY #$00	;
-$38D8> B1 25:	LDA ($25),Y		;
-$38DA> DD DC39:	CMP $39DC,X	;
-$38DD> 60:	RTS		;
+$38D8> B1 25:	LDA ($25),Y		; read tile at adjacent position
+$38DA> DD DC39:	CMP $39DC,X	; compare with expected road tile
+$38DD> 60:	RTS		; Z=1: matches, direction OK
+;
+;----- $38DE: Write direction-change tile to screen -----------------------
+; Input: A = new direction. Computes tile index from (A*4 + current dir)
+; and writes the corresponding intersection tile from $3A7C table.
+;
 $38DE> 0A:	ASL A		;
-$38DF> 0A:	ASL A		;
-$38E0> 05 6C:	ORA $6C		;
+$38DF> 0A:	ASL A		; new dir * 4
+$38E0> 05 6C:	ORA $6C		; + current direction = table index
 $38E2> AA:	TAX		;
-$38E3> BD 7C3A:	LDA $3A7C,X	;
+$38E3> BD 7C3A:	LDA $3A7C,X	; lookup intersection tile
 $38E6> A0 00:	LDY #$00	;
-$38E8> 91 69:	STA ($69),Y		;
+$38E8> 91 69:	STA ($69),Y		; write to screen at car position
 $38EA> 60:	RTS		;
-$38EB> 0F:	.byte $0f		; INVALID OPCODE !!!
-
-$38EC> 13:	.byte $13		; INVALID OPCODE !!!
-
-$38ED> 17:	.byte $17		; INVALID OPCODE !!!
-
-$38EE> 10 14:	BPL $3904		;
-$38F0> 18:	CLC		;
-$38F1> 11 15:	ORA ($15),Y		;
-$38F3> 76 12:	ROR $12,X		;
-$38F5> 16 70:	ASL $70,X		;
-$38F7> 01 01:	ORA ($01,X)		;
-$38F9> 01 03:	ORA ($03,X)		;
-$38FB> 07:	.byte $07		; INVALID OPCODE !!!
-
-$38FC> 0B:	.byte $0b		; INVALID OPCODE !!!
-
-$38FD> 02:	.byte $02		; INVALID OPCODE !!!
-
-$38FE> 06 0A:	ASL $0A		;
-$3900> 19 0509:	ORA $0905,Y	;
-$3903> 6F:	.byte $6f		; INVALID OPCODE !!!
-
-$3904> 04:	.byte $04		; INVALID OPCODE !!!
-
-$3905> 08:	PHP		;
-$3906> 00:	BRK		;
-$3907> 00:	BRK		;
-$3908> 00:	BRK		;
-$3909> 10 14:	BPL $391F		;
-$390B> 18:	CLC		;
-$390C> 0F:	.byte $0f		; INVALID OPCODE !!!
-
-$390D> 13:	.byte $13		; INVALID OPCODE !!!
-
-$390E> 17:	.byte $17		; INVALID OPCODE !!!
-
-$390F> 1A:	.byte $1a		; INVALID OPCODE !!!
-
-$3910> 12:	.byte $12		; INVALID OPCODE !!!
-
-$3911> 16 70:	ASL $70,X		;
-$3913> 11 15:	ORA ($15),Y		;
-$3915> 01 01:	ORA ($01,X)		;
-$3917> 01 02:	ORA ($02,X)		;
-$3919> 06 0A:	ASL $0A		;
-$391B> 03:	.byte $03		; INVALID OPCODE !!!
-
-$391C> 07:	.byte $07		; INVALID OPCODE !!!
-
-$391D> 0B:	.byte $0b		; INVALID OPCODE !!!
-
-$391E> 04:	.byte $04		; INVALID OPCODE !!!
-
-$391F> 08:	PHP		;
-$3920> 77:	.byte $77		; INVALID OPCODE !!!
-
-$3921> 05 09:	ORA $09		;
-$3923> 6F:	.byte $6f		; INVALID OPCODE !!!
-
-$3924> 00:	BRK		;
-$3925> 00:	BRK		;
-$3926> 00:	BRK		;
-$3927> 5C:	.byte $5c		; INVALID OPCODE !!!
-
-$3928> 13:	.byte $13		; INVALID OPCODE !!!
-
-$3929> 17:	.byte $17		; INVALID OPCODE !!!
-
-$392A> 5D 1418:	EOR $1814,X	;
-$392D> 27:	.byte $27		; INVALID OPCODE !!!
-
-$392E> 15 76:	ORA $76,X		;
-$3930> 12:	.byte $12		; INVALID OPCODE !!!
-
-$3931> 16 70:	ASL $70,X		;
-$3933> 01 01:	ORA ($01,X)		;
-$3935> 01 03:	ORA ($03,X)		;
-$3937> 07:	.byte $07		; INVALID OPCODE !!!
-
-$3938> 61 02:	ADC ($02,X)		;
-$393A> 06 62:	ASL $62		;
-$393C> 19 052D:	ORA $2D05,Y	;
-$393F> 6F:	.byte $6f		; INVALID OPCODE !!!
-
-$3940> 04:	.byte $04		; INVALID OPCODE !!!
-
-$3941> 08:	PHP		;
-$3942> 00:	BRK		;
-$3943> 00:	BRK		;
-$3944> 00:	BRK		;
-$3945> 10 14:	BPL $395B		;
-$3947> 5D 0F13:	EOR $130F,X	;
-$394A> 5C:	.byte $5c		; INVALID OPCODE !!!
-
-$394B> 1A:	.byte $1a		; INVALID OPCODE !!!
-
-$394C> 12:	.byte $12		; INVALID OPCODE !!!
-
-$394D> 1C:	.byte $1c		; INVALID OPCODE !!!
-
-$394E> 70 11:	BVS $3961		;
-$3950> 15 01:	ORA $01,X		;
-$3952> 01 01:	ORA ($01,X)		;
-$3954> 62:	.byte $62		; INVALID OPCODE !!!
-
-$3955> 06 0A:	ASL $0A		;
-$3957> 61 07:	ADC ($07,X)		;
-$3959> 0B:	.byte $0b		; INVALID OPCODE !!!
-
-$395A> 28:	PLP		;
-$395B> 08:	PHP		;
-$395C> 77:	.byte $77		; INVALID OPCODE !!!
-
-$395D> 05 09:	ORA $09		;
-$395F> 6F:	.byte $6f		; INVALID OPCODE !!!
-
-$3960> 00:	BRK		;
-$3961> 00:	BRK		;
-$3962> 00:	BRK		;
-$3963> 03:	.byte $03		; INVALID OPCODE !!!
-
-$3964> 00:	BRK		;
-$3965> 01 02:	ORA ($02,X)		;
-$3967> 5B:	.byte $5b		; INVALID OPCODE !!!
-
-$3968> 60:	RTS		;
-$3969> 22:	.byte $22		; INVALID OPCODE !!!
-
-$396A> 2C 0E1D:	BIT $1D0E	;
-$396D> 26 29:	ROL $29		;
-$396F> 3F:	.byte $3f		; INVALID OPCODE !!!
-
-$3970> 5F:	.byte $5f		; INVALID OPCODE !!!
-
-$3971> 21 2B:	AND ($2B,X)		;
-$3973> 0D 1E25:	ORA $251E	;
-$3976> 2A:	ROL A		;
-$3977> 3E 5E3B:	ROL $3B5E,X	;
-$397A> 2F:	.byte $2f		; INVALID OPCODE !!!
-
-$397B> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$397C> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$397D> 24 23:	BIT $23		;
-$397F> 6E 6E6B:	ROR $6B6E	;
-$3982> 6B:	.byte $6b		; INVALID OPCODE !!!
-
-$3983> 6C 6C6D:	JMP ($6D6C)	;
-$3986> 6D 0200:	ADC $0002	;
-$3989> 00:	BRK		;
-$398A> 00:	BRK		;
-$398B> 00:	BRK		;
-$398C> 00:	BRK		;
-$398D> 40:	RTI		;
-$398E> 00:	BRK		;
-$398F> 00:	BRK		;
-$3990> 0F:	.byte $0f		; INVALID OPCODE !!!
-
-$3991> 1E 2D00:	ASL $002D,X	;
-$3994> 03:	.byte $03		; INVALID OPCODE !!!
-
-$3995> 06 09:	ASL $09		;
-$3997> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3998> 01 00:	ORA ($00,X)		;
-$399A> 20 0001:	JSR $0100	;
-$399D> 00:	BRK		;
-$399E> 20 0003:	JSR $0300	;
-$39A1> 00:	BRK		;
-$39A2> E0 FF:	CPX #$ff	;
-$39A4> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39A5> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39A6> 60:	RTS		;
-$39A7> 00:	BRK		;
-$39A8> 01 00:	ORA ($00,X)		;
-$39AA> E0 FF:	CPX #$ff	;
-$39AC> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39AD> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39AE> 20 00C2:	JSR $C200	;
-$39B1> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39B2> 02:	.byte $02		; INVALID OPCODE !!!
-
-$39B3> 00:	BRK		;
-$39B4> FE FF00:	INC $00FF,X	;
-$39B7> 00:	BRK		;
-$39B8> 00:	BRK		;
-$39B9> 00:	BRK		;
-$39BA> C0 FF:	CPY #$ff	;
-$39BC> 40:	RTI		;
-$39BD> 00:	BRK		;
-$39BE> 3E 0001:	ROL $0100,X	;
-$39C1> 02:	.byte $02		; INVALID OPCODE !!!
-
-$39C2> 03:	.byte $03		; INVALID OPCODE !!!
-
-$39C3> 00:	BRK		;
-$39C4> 03:	.byte $03		; INVALID OPCODE !!!
-
-$39C5> 00:	BRK		;
-$39C6> 01 02:	ORA ($02,X)		;
-$39C8> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39C9> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39CA> 60:	RTS		;
-$39CB> 00:	BRK		;
-$39CC> 03:	.byte $03		; INVALID OPCODE !!!
-
-$39CD> 00:	BRK		;
-$39CE> E0 FF:	CPX #$ff	;
-$39D0> 01 00:	ORA ($00,X)		;
-$39D2> 01 00:	ORA ($00,X)		;
-$39D4> 01 02:	ORA ($02,X)		;
-$39D6> 03:	.byte $03		; INVALID OPCODE !!!
-
-$39D7> 00:	BRK		;
-$39D8> 02:	.byte $02		; INVALID OPCODE !!!
-
-$39D9> 03:	.byte $03		; INVALID OPCODE !!!
-
-$39DA> 00:	BRK		;
-$39DB> 01 01:	ORA ($01,X)		;
-$39DD> 00:	BRK		;
-$39DE> 01 00:	ORA ($00,X)		;
-$39E0> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$39E1> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$39E2> 23:	.byte $23		; INVALID OPCODE !!!
-
-$39E3> 1F:	.byte $1f		; INVALID OPCODE !!!
-
-$39E4> 1F:	.byte $1f		; INVALID OPCODE !!!
-
-$39E5> 23:	.byte $23		; INVALID OPCODE !!!
-
-$39E6> 3D 3D04:	AND $043D,X	;
-$39E9> 00:	BRK		;
-$39EA> C0 FF:	CPY #$ff	;
-$39EC> FE FF80:	INC $80FF,X	;
-$39EF> 00:	BRK		;
-$39F0> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39F1> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39F2> 20 0001:	JSR $0100	;
-$39F5> 00:	BRK		;
-$39F6> E0 FF:	CPX #$ff	;
-$39F8> E3:	.byte $e3		; INVALID OPCODE !!!
-
-$39F9> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39FA> DF:	.byte $df		; INVALID OPCODE !!!
-
-$39FB> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$39FC> 1F:	.byte $1f		; INVALID OPCODE !!!
-
-$39FD> 00:	BRK		;
-$39FE> 61 00:	ADC ($00,X)		;
-$3A00> 20 0001:	JSR $0100	;
-$3A03> 00:	BRK		;
-$3A04> E0 FF:	CPX #$ff	;
-$3A06> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A07> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A08> 1F:	.byte $1f		; INVALID OPCODE !!!
-
-$3A09> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3A0A> 23:	.byte $23		; INVALID OPCODE !!!
-
-$3A0B> 3D 2300:	AND $0023,X	;
-$3A0E> E1 FF:	SBC ($FF,X)		;
-$3A10> DF:	.byte $df		; INVALID OPCODE !!!
-
-$3A11> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A12> 5F:	.byte $5f		; INVALID OPCODE !!!
-
-$3A13> 00:	BRK		;
-$3A14> E0 FF:	CPX #$ff	;
-$3A16> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A17> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A18> 20 0001:	JSR $0100	;
-$3A1B> 00:	BRK		;
-$3A1C> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3A1D> 23:	.byte $23		; INVALID OPCODE !!!
-
-$3A1E> 3D 1F01:	AND $011F,X	;
-$3A21> 00:	BRK		;
-$3A22> E0 FF:	CPX #$ff	;
-$3A24> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A25> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A26> 20 0001:	JSR $0100	;
-$3A29> 02:	.byte $02		; INVALID OPCODE !!!
-
-$3A2A> 03:	.byte $03		; INVALID OPCODE !!!
-
-$3A2B> 04:	.byte $04		; INVALID OPCODE !!!
-
-$3A2C> 05 00:	ORA $00		;
-$3A2E> 00:	BRK		;
-$3A2F> 00:	BRK		;
-$3A30> 00:	BRK		;
-$3A31> 00:	BRK		;
-$3A32> E1 FF:	SBC ($FF,X)		;
-$3A34> 1F:	.byte $1f		; INVALID OPCODE !!!
-
-$3A35> 00:	BRK		;
-$3A36> 21 00:	AND ($00,X)		;
-$3A38> 21 00:	AND ($00,X)		;
-$3A3A> 40:	RTI		;
-$3A3B> 00:	BRK		;
-$3A3C> 02:	.byte $02		; INVALID OPCODE !!!
-
-$3A3D> 00:	BRK		;
-$3A3E> C0 FF:	CPY #$ff	;
-$3A40> FE FFFF:	INC $FFFF,X	;
-$3A43> 00:	BRK		;
-$3A44> 01 00:	ORA ($00,X)		;
-$3A46> 00:	BRK		;
-$3A47> 01 00:	ORA ($00,X)		;
-$3A49> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A4A> 01 00:	ORA ($00,X)		;
-$3A4C> E0 FF:	CPX #$ff	;
-$3A4E> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A4F> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A50> 20 0001:	JSR $0100	;
-$3A53> 00:	BRK		;
-$3A54> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A55> 00:	BRK		;
-$3A56> 00:	BRK		;
-$3A57> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A58> 00:	BRK		;
-$3A59> 01 00:	ORA ($00,X)		;
-$3A5B> 01 1F:	ORA ($1F,X)		;
-$3A5D> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3A5E> 23:	.byte $23		; INVALID OPCODE !!!
-
-$3A5F> 3D 0203:	AND $0302,X	;
-$3A62> 00:	BRK		;
-$3A63> 01 1F:	ORA ($1F,X)		;
-$3A65> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3A66> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3A67> 23:	.byte $23		; INVALID OPCODE !!!
-
-$3A68> 23:	.byte $23		; INVALID OPCODE !!!
-
-$3A69> 3D 1F3D:	AND $3D1F,X	;
-$3A6C> 01 03:	ORA ($03,X)		;
-$3A6E> 02:	.byte $02		; INVALID OPCODE !!!
-
-$3A6F> 00:	BRK		;
-$3A70> 03:	.byte $03		; INVALID OPCODE !!!
-
-$3A71> 01 02:	ORA ($02,X)		;
-$3A73> 00:	BRK		;
-$3A74> 01 00:	ORA ($00,X)		;
-$3A76> E0 FF:	CPX #$ff	;
-$3A78> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A79> FF:	.byte $ff		; INVALID OPCODE !!!
-
-$3A7A> 20 0001:	JSR $0100	;
-$3A7D> 23:	.byte $23		; INVALID OPCODE !!!
-
-$3A7E> 01 3D:	ORA ($3D,X)		;
-$3A80> 1F:	.byte $1f		; INVALID OPCODE !!!
-
-$3A81> 00:	BRK		;
-$3A82> 3D 0001:	AND $0100,X	;
-$3A85> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3A86> 01 1F:	ORA ($1F,X)		;
-$3A88> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3A89> 00:	BRK		;
-$3A8A> 23:	.byte $23		; INVALID OPCODE !!!
-
-$3A8B> 00:	BRK		;
-$3A8C> 1F:	.byte $1f		; INVALID OPCODE !!!
-
-$3A8D> 0C:	.byte $0c		; INVALID OPCODE !!!
-
-$3A8E> 23:	.byte $23		; INVALID OPCODE !!!
-
-$3A8F> 3D F011:	AND $11F0,X	;
+;
+;===== SPRITE TILE DATA =====================================================
+; $38EB-$3926: Player car sprite tiles (3 tiles per direction × 4 dirs × frames)
+; $3927-$3962: Enemy car sprite tiles
+; Used by entity renderer ($3391) indexed by direction and animation frame.
+;
+; Player car sprite tiles (60 bytes: 4 directions, 3 tiles per frame, 5 variants)
+$38EB>	.byte $0F, $13, $17, $10, $14, $18, $11, $15, $76, $12, $16, $70, $01, $01, $01
+$38FA>	.byte $03, $07, $0B, $02, $06, $0A, $19, $05, $09, $6F, $04, $08, $00, $00, $00
+$3909>	.byte $10, $14, $18, $0F, $13, $17, $1A, $12, $16, $70, $11, $15, $01, $01, $01
+$3918>	.byte $02, $06, $0A, $03, $07, $0B, $04, $08, $77, $05, $09, $6F, $00, $00, $00
+;
+; $3927: Enemy car sprite tiles (60 bytes)
+$3927>	.byte $5C, $13, $17, $5D, $14, $18, $27, $15, $76, $12, $16, $70, $01, $01, $01
+$3936>	.byte $03, $07, $61, $02, $06, $62, $19, $05, $2D, $6F, $04, $08, $00, $00, $00
+$3945>	.byte $10, $14, $5D, $0F, $13, $5C, $1A, $12, $1C, $70, $11, $15, $01, $01, $01
+$3954>	.byte $62, $06, $0A, $61, $07, $0B, $28, $08, $77, $05, $09, $6F, $00, $00, $00
+;
+;===== ENTITY MOVEMENT / DIRECTION TABLES ===================================
+; All tables below are DATA interpreted as instructions by the disassembler.
+;
+; $3963: Direction -> opposite direction mapping (4 bytes)
+$3963>	.byte $03, $00, $01, $02	; up->down, right->left, down->up, left->right
+; $3967: Entity tile replacement table (direction x 2 x 8 bytes)
+;   Road tile IDs written behind moving entities to maintain trail appearance
+$3967>	.byte $5B, $60, $22, $2C, $0E, $1D, $26, $29	; up direction tiles
+$396F>	.byte $3F, $5F, $21, $2B, $0D, $1E, $25, $2A	; right direction tiles
+$3977>	.byte $3E, $5E, $3B, $2F, $0C, $0C, $24, $23	; down direction tiles
+$397F>	.byte $6E, $6E, $6B, $6B, $6C, $6C, $6D, $6D	; left direction tiles
+; $3987: Entity spawn parameters
+$3987>	.byte $02, $00, $00, $00, $00, $00, $40, $00
+; $398F: Animation frame base offsets per direction (4 entries)
+;   Used by $3391: LDA $398F,Y where Y = direction
+$398F>	.byte $00, $0F, $1E, $2D, $00
+; $3994: Frame variant offsets (5 bytes, indexed by spawn timer $51)
+$3994>	.byte $03, $06, $09, $0C
+; $3998: Screen position init table
+$3998>	.byte $01, $00, $20, $00, $01, $00, $20, $00
+$39A0>	.byte $03, $00, $E0, $FF, $FF, $FF, $60, $00
+; $39A8: Movement offset tables (per direction, signed 16-bit pairs)
+$39A8>	.byte $01, $00, $E0, $FF, $FF, $FF, $20, $00
+$39B0>	.byte $C2, $FF, $02, $00, $FE, $FF, $00, $00
+$39B8>	.byte $00, $00, $C0, $FF, $40, $00, $3E, $00
+$39C0>	.byte $01, $02, $03, $00, $03, $00, $01, $02
+; $39C8: Direction validation tables
+$39C8>	.byte $FF, $FF, $60, $00, $03, $00, $E0, $FF
+$39D0>	.byte $01, $00, $01, $00, $01, $02, $03, $00
+$39D8>	.byte $02, $03, $00, $01, $01, $00, $01, $00
+; $39E0: Road tile classification table
+$39E0>	.byte $0C, $0C, $23, $1F, $1F, $23, $3D, $3D
+$39E8>	.byte $04, $00, $C0, $FF, $FE, $FF, $80, $00
+$39F0>	.byte $FF, $FF, $20, $00, $01, $00, $E0, $FF
+$39F8>	.byte $E3, $FF, $DF, $FF, $1F, $00, $61, $00
+;
+;===== MOVEMENT & DIRECTION DATA TABLES (all data, not code) ================
+; $3A00: Screen offset deltas (signed 16-bit, per direction)
+; $3A08: Road tile IDs for clearing trail
+; $3A0C-$3A27: Various signed offsets for turn/look-ahead detection
+; $3A28: Collectible score values lo (5 entries, indexed by tile-$63)
+; $3A2D: Collectible score values hi
+; $3A32: Look-ahead direction offsets for $36B2 (8 bytes, 4 dirs × 2)
+; $3A3A: Second look-ahead offsets (8 bytes)
+; $3A42: Sprite X movement deltas (4 bytes, per direction: up/right/down/left)
+; $3A46: Sprite Y movement deltas (4 bytes)
+; $3A4A: Screen pointer deltas (signed 16-bit, 4 entries × 2 bytes)
+; $3A52: Sub-tile X accumulator deltas (4 bytes)
+; $3A56: Sub-tile Y accumulator deltas (4 bytes)
+; $3A5A: Road tile table — 6 valid road tiles the car can drive on
+;   Values: $00, $01, $1F, $0C, $23, $3D
+; $3A60: Direction match table for turn validation
+; $3A64: Direction+tile turn validity pairs
+; $3A6C: Direction result after turn
+; $3A74: Steering offset table
+; $3A7C: Tile replacement table for steering
+; $3A8C: Alternate tile for reverse direction
+;
+$3A00>	.byte $20, $00, $01, $00, $E0, $FF, $FF, $FF	; screen offset deltas (4 dirs x 2 bytes)
+; $3A08: Road tile IDs for clearing trail
+$3A08>	.byte $1F, $0C, $23, $3D
+; $3A0C: Various signed offsets for turn/look-ahead detection
+$3A0C>	.byte $23, $00, $E1, $FF, $DF, $FF, $5F, $00
+$3A14>	.byte $E0, $FF, $FF, $FF, $20, $00, $01, $00
+$3A1C>	.byte $0C, $23, $3D, $1F, $01, $00, $E0, $FF
+$3A24>	.byte $FF, $FF, $20, $00
+; $3A28: Collectible score values (5 entries lo, 5 entries hi)
+$3A28>	.byte $01, $02, $03, $04, $05, $00, $00, $00, $00, $00
+; $3A32: Look-ahead direction offsets for $36B2 (8 bytes)
+$3A32>	.byte $E1, $FF, $1F, $00, $21, $00, $21, $00
+; $3A3A: Second look-ahead offsets (8 bytes)
+$3A3A>	.byte $40, $00, $02, $00, $C0, $FF, $FE, $FF
+; $3A42: Sprite movement deltas (X then Y, 4 dirs each)
+$3A42>	.byte $FF, $00, $01, $00	; sprite X: up=-1, right=0, down=1, left=0
+$3A46>	.byte $00, $01, $00, $FF	; sprite Y: up=0, right=1, down=0, left=-1
+; $3A4A: Screen pointer deltas (signed 16-bit, 4 entries)
+$3A4A>	.byte $01, $00, $E0, $FF, $FF, $FF, $20, $00
+$3A52>	.byte $01, $00, $FF, $00	; sub-tile X accumulator deltas
+$3A56>	.byte $00, $FF, $00, $01	; sub-tile Y accumulator deltas
+; $3A5A: Road tile table (6 valid road tiles the car can drive on)
+$3A5A>	.byte $00, $01, $1F, $0C, $23, $3D
+; $3A60: Direction match table for turn validation
+$3A60>	.byte $02, $03, $00, $01
+; $3A64: Direction+tile turn validity pairs
+$3A64>	.byte $1F, $0C, $0C, $23, $23, $3D, $1F, $3D
+; $3A6C: Direction result after turn
+$3A6C>	.byte $01, $03, $02, $00, $03, $01, $02, $00
+; $3A74: Steering offset table
+$3A74>	.byte $01, $00, $E0, $FF, $FF, $FF, $20, $00
+; $3A7C: Tile replacement table for steering
+$3A7C>	.byte $01, $23, $01, $3D, $1F, $00, $3D, $00
+$3A84>	.byte $01, $0C, $01, $1F, $0C, $00, $23, $00
+; $3A8C: Alternate tile for reverse direction
+$3A8C>	.byte $1F, $0C, $23, $3D
 $3A92> EA:	NOP		;
 $3A93> C9 00:	CMP #$00	;
 $3A95> F0 0F:	BEQ $3AA6		;
@@ -2782,6 +2826,125 @@ $3A9E> 85 6A:	STA $6A		;
 $3AA0> 4C 3C2C:	JMP $2C3C	;
 $3AA3> 4C B234:	JMP $34B2	;
 $3AA6> 4C 9F34:	JMP $349F	;
+;
+;=============================================================================
+; UNCOMPILED SOURCE CODE REMNANT ($3AA9-$3FFA)
+;=============================================================================
+; The remainder of ROM chip stl6a-2 (offset $2A9-$7F9) contains a fragment
+; of the original Exidy assembler source listing from 1979.  The assembler
+; (likely a paper-tape / PROM-based cross-assembler) left its listing output
+; in unused ROM space.  Each line is CR-terminated ($0D) with a 2-byte
+; page+line number prefix.  The disassembler below mis-decodes this ASCII
+; text as 6502 instructions (hence all the "INVALID OPCODE" markers).
+;
+; The game's display strings ($3E96-$3FA4: "GAME OVER", "PLAYER 1", etc.)
+; sit within this region and serve double duty: they are both readable
+; source text AND runtime string data referenced by the string pointer
+; table at $2FA5.
+;
+; Recovered source (81 lines of the main game loop, ~lines 79-258):
+;
+;   y  SED                             ; (start of 1-player credit deduct)
+;      LDA CREDIT
+;      SEC
+;      SBC #$01
+;      STA CREDIT
+;      CLD
+;      JSR CLSCOR ;CLEAR SCORES
+;      JSR SRESET ;CLEAR SCREEN
+;      JMP CON6
+;    ;
+;    ST2 LDA #$02 ;2PLAYER PRESSED
+;      JSR START1
+;      BEQ CON7
+;      LDX CREDIT
+;      DEX
+;      DEX
+;      BMI CON7
+;      SED
+;      SEC
+;      LDA CREDIT
+;      SBC #$02
+;      STA CREDIT
+;      CLD
+;    ;
+;    CON5 LDA #$C0 ;ENABLE 2 PLAYER
+;      STA STAT
+;    CON6 LDA #$80
+;      JSR SETAUD
+;      JSR GAMSTR ;GAME SET UP
+;      LDA #$80
+;      JSR SETAUD
+;    GME5 JSR MOTS ;MAIN LOOP PROGRAM
+;      LDA CRAFLG
+;      BMI CNGPLY
+;      BIT STAT
+;      BMI GME5
+;      JMP ENDG ;END OF GAME
+;    ;
+;    CNGPLY BIT STAT
+;      BVC SLPLY
+;      LDA STAT ;MUST BE TWO PLAYER
+;      EOR #$10
+;      STA STAT ;PLAYER CHANGED
+;      AND #$10
+;      BNE NOTEOG ;TO 2ND PLAYER
+;    SLPLY DEC CRNU ;TO 1ST PLAYER
+;      BPL NOTEOG ;NOT EOG
+;      LDA #$00 ;IS EOG
+;      STA STAT
+;      STA CRNU
+;      LDA #$00
+;      STA CRAFLG
+;      LDX #$02
+;      JSR WAIT
+;      JMP ENDG
+;    NOTEOG JSR GAMRST
+;      LDA #$00
+;      STA CRAFLG ;RESET CRASH FLG
+;      LDA #$80
+;      JSR SETAUD ;ENABLE AUDIO
+;      JMP GME5
+;    ;
+;    GAMSTR JSR CLSCOR ;CLEAR SCORE, MAIN START
+;    GAMRST JSR SRESET ;CLEAR SCREEN
+;      JSR WPOS1
+;      LDA STAT
+;      AND #$10
+;      BEQ GAPL1
+;      LDX #$10
+;      JSR WPHR ;PLAYER 2
+;      JMP GAPL21
+;    GAPL1 LDX #$0F
+;      JSR WPHR ;PLAYER 1
+;    GAPL21 JSR GAPL30
+;      LDX #$01
+;      JSR WAIT ;EXPANDED DELAY
+;      JSR BEEP
+;      LDX #$01
+;      JSR WAIT
+;
+; Original Exidy label cross-reference:
+;   STAT   = $02  (game state flags)
+;   CRNU   = $09  (cars remaining)
+;   CREDIT = $13  (credit counter, BCD)
+;   CRAFLG = $8E  (crash flag)
+;   MOTS   = main loop routine (MOTion Scan)
+;   CLSCOR = $2FC8 (clear scores)
+;   SRESET = $29FC (screen reset)
+;   SETAUD = $2BEE (set audio control bits)
+;   GAMSTR = game start init
+;   GAMRST = game restart after crash
+;   ENDG   = $2D26 (end game / attract entry)
+;   WAIT   = $29C5 (delay subroutine)
+;   BEEP   = $30EB (tone generation)
+;   WPHR   = write player header (score labels)
+;   CNGPLY = change player (P1<->P2)
+;   SLPLY  = single/solo player path
+;   NOTEOG = not end of game
+;
+; See: https://tcrf.net/Side_Track
+;
 $3AA9> 79 2020:	ADC $2020,Y	;
 $3AAC> 53:	.byte $53		; INVALID OPCODE !!!
 
@@ -3659,6 +3822,13 @@ $3FF5> 20 3B0D:	JSR $0D3B	;
 $3FF8> 02:	.byte $02		; INVALID OPCODE !!!
 
 $3FF9> 59 0028:	EOR $2800,Y	;
+;
+;===== 6502 INTERRUPT VECTORS ===============================================
+; $FFFC/FFFE mapped to $3FFC/$3FFE in ROM space.
+;   NMI vector ($FFFA): not used (Exidy has no NMI)
+;   RESET vector ($FFFC): $2800
+;   IRQ vector ($FFFE): $2B0E
+;
 $3FFC> 00:	BRK		;
-$3FFD> 28:	PLP		;
-$3FFE> 0E 2B00:	ASL $002B	;
+$3FFD> 28:	PLP		; RESET vector: $2800
+$3FFE> 0E 2B00:	ASL $002B	; IRQ vector: $2B0E

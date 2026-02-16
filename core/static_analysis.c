@@ -57,6 +57,8 @@ extern const uint8_t flash_cache_pc_flags[];
 __zpage extern uint8_t a;
 extern void flash_dispatch_return(void);
 extern void cross_bank_dispatch(void);
+extern void xbank_trampoline(void);
+extern uint8_t xbank_addr;
 
 #ifdef ENABLE_OPTIMIZER_V2
 #include "optimizer_v2_simple.h"
@@ -619,6 +621,25 @@ static uint8_t sa_compile_one_block(void)
         cache_code[0][code_index++] = 0x4C;     // JMP cross_bank_dispatch
         cache_code[0][code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
         cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+        // +21: Cross-bank fast-path setup (18 bytes)
+        cache_code[0][code_index++] = 0x08;     // PHP (re-save guest flags)
+        cache_code[0][code_index++] = 0x85;     // STA _a
+        cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);
+        cache_code[0][code_index++] = 0xA9;     // LDA #$FF (target addr lo, PATCHABLE)
+        cache_code[0][code_index++] = 0xFF;
+        cache_code[0][code_index++] = 0x8D;     // STA xbank_addr (abs)
+        cache_code[0][code_index++] = (uint8_t)((uint16_t)&xbank_addr);
+        cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_addr) >> 8);
+        cache_code[0][code_index++] = 0xA9;     // LDA #$FF (target addr hi, PATCHABLE)
+        cache_code[0][code_index++] = 0xFF;
+        cache_code[0][code_index++] = 0x8D;     // STA xbank_addr+1 (abs)
+        cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_addr) + 1);
+        cache_code[0][code_index++] = (uint8_t)((((uint16_t)&xbank_addr) + 1) >> 8);
+        cache_code[0][code_index++] = 0xA9;     // LDA #$FF (target bank, PATCHABLE)
+        cache_code[0][code_index++] = 0xFF;
+        cache_code[0][code_index++] = 0x4C;     // JMP xbank_trampoline
+        cache_code[0][code_index++] = (uint8_t)((uint16_t)&xbank_trampoline);
+        cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_trampoline) >> 8);
 #else
         cache_code[0][code_index++] = 0x85;     // STA _a
         cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);

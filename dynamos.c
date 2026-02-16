@@ -434,6 +434,27 @@ void run_6502(void)
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP cross_bank_dispatch
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&cross_bank_dispatch));
 		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8));
+		// +21: Cross-bank fast-path setup (18 bytes)
+		// Reached when fast-path JMP is patched to point here for cross-bank targets.
+		// Writes target addr into WRAM self-mod trampoline, passes bank in A.
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x08); // PHP (re-save guest flags)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _a
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&a));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #$FF (target addr lo, PATCHABLE)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF);
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x8D); // STA xbank_addr (abs)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&xbank_addr));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&xbank_addr) >> 8));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #$FF (target addr hi, PATCHABLE)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF);
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x8D); // STA xbank_addr+1 (abs)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&xbank_addr) + 1));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((((uint16_t)&xbank_addr) + 1) >> 8));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #$FF (target bank, PATCHABLE)
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF);
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP xbank_trampoline
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&xbank_trampoline));
+		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&xbank_trampoline) >> 8));
 		// Epilogue chaining is handled by opt2_scan_and_patch_epilogues() — no queue needed
 		// Write epilogue start offset to byte 255 so scanner can find it directly
 		flash_byte_program(flash_code_address + 255, flash_code_bank, epilogue_flash_offset);
@@ -502,6 +523,25 @@ void run_6502(void)
 		cache_code[0][code_index++] = 0x4C;  // JMP cross_bank_dispatch
 		cache_code[0][code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
 		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+		// +21: Cross-bank fast-path setup (18 bytes)
+		cache_code[0][code_index++] = 0x08;  // PHP (re-save guest flags)
+		cache_code[0][code_index++] = 0x85;  // STA _a
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);
+		cache_code[0][code_index++] = 0xA9;  // LDA #$FF (target addr lo, PATCHABLE)
+		cache_code[0][code_index++] = 0xFF;
+		cache_code[0][code_index++] = 0x8D;  // STA xbank_addr (abs)
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&xbank_addr);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_addr) >> 8);
+		cache_code[0][code_index++] = 0xA9;  // LDA #$FF (target addr hi, PATCHABLE)
+		cache_code[0][code_index++] = 0xFF;
+		cache_code[0][code_index++] = 0x8D;  // STA xbank_addr+1 (abs)
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_addr) + 1);
+		cache_code[0][code_index++] = (uint8_t)((((uint16_t)&xbank_addr) + 1) >> 8);
+		cache_code[0][code_index++] = 0xA9;  // LDA #$FF (target bank, PATCHABLE)
+		cache_code[0][code_index++] = 0xFF;
+		cache_code[0][code_index++] = 0x4C;  // JMP xbank_trampoline
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&xbank_trampoline);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_trampoline) >> 8);
 #else
 		// Standard epilogue (14 bytes) — built in buffer, written by loop below
 		cache_code[0][code_index++] = 0x85;  // STA _a

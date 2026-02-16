@@ -194,6 +194,30 @@ _cross_bank_dispatch:
 
 ;=======================================================	
 	section "data"
+	global _xbank_trampoline, _xbank_addr
+;-------------------------------------------------------
+; Cross-bank fast trampoline (WRAM, single instance, self-modifying)
+;
+; Called from the cross-bank setup code appended to patchable epilogues.
+; The setup code (in flash) writes xbank_addr before jumping here,
+; and passes the target bank in A.
+;
+; On entry:
+;   A = target flash bank number
+;   _a = saved guest A (saved by setup code)
+;   Stack: [guest PHP from setup code] [.dispatch_addr JSR return] [run_6502 return]
+;
+; Performs the bankswitch from WRAM (always reachable), restores guest
+; A and flags, then jumps directly to the target native code.
+_xbank_trampoline:
+	sta $C000			; bankswitch (A = target bank)
+	lda _a				; restore guest A
+	plp					; restore guest flags
+_xbank_addr = * + 1
+	jmp $FFFF			; self-mod: target native address
+
+;=======================================================	
+	section "data"
 	global _dispatch_on_pc, _flash_cache_index, _flash_dispatch_return, _flash_dispatch_return_no_regs
 	zpage addr_lo, addr_hi, target_bank, temp, temp2
 ;-------------------------------------------------------

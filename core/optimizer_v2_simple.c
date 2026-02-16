@@ -243,27 +243,22 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
         
         // Read epilogue offset and signature from code bank (via peek)
         uint8_t off = peek_bank_byte(code_bank, code_base + 255);
-        uint8_t valid = 1;
-        uint16_t exit_pc = 0;
-        if (off == 0xFF) { valid = 0; }
-        else {
-            uint8_t jmp_lo = peek_bank_byte(code_bank, code_base + off + 6);
-            uint8_t jmp_hi = peek_bank_byte(code_bank, code_base + off + 7);
-            if (jmp_lo != 0xFF || jmp_hi != 0xFF) { valid = 0; }
-            else {
-                // Read exit_pc from embedded LDA immediates
-                exit_pc = peek_bank_byte(code_bank, code_base + off + 11)
-                        | ((uint16_t)peek_bank_byte(code_bank, code_base + off + 15) << 8);
-            }
-        }
-        if (!valid) continue;
+        if (off == 0xFF) continue;
+        
+        // Check if fast-path JMP operand is still unpatched ($FFFF)
+        uint8_t jmp_lo = peek_bank_byte(code_bank, code_base + off + 6);
+        uint8_t jmp_hi = peek_bank_byte(code_bank, code_base + off + 7);
+        if (jmp_lo != 0xFF || jmp_hi != 0xFF) continue;  // already patched
+        
+        // Read exit_pc from embedded LDA immediates at +11 and +15
+        uint16_t exit_pc = peek_bank_byte(code_bank, code_base + off + 11)
+                | ((uint16_t)peek_bank_byte(code_bank, code_base + off + 15) << 8);
         
         // Check if exit_pc is compiled (peek from PC_FLAGS bank)
         uint8_t flag = peek_bank_byte(
             (exit_pc >> 14) + BANK_PC_FLAGS,
             (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
         if (flag & RECOMPILED) continue;
-        if ((flag & 0x1F) != code_bank) continue;
         
         // Read native address (peek from PC bank)
         uint16_t pc_addr = (exit_pc << 1) & FLASH_BANK_MASK;
@@ -278,12 +273,26 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
         // Let self-referencing blocks go through the regular path instead.
         if (na >= code_base && na < code_base + 256) continue;
         
-        // Patch — flash_byte_program lives in WRAM, handles its own bankswitching.
-        // mapper_prg_bank is still 2 (set by trampoline), so flash_byte_program
-        // restores to bank 2 when done.
-        flash_byte_program(code_base + off + 3, code_bank, 0);
-        flash_byte_program(code_base + off + 6, code_bank, na & 0xFF);
-        flash_byte_program(code_base + off + 7, code_bank, (na >> 8) & 0xFF);
+        uint8_t target_bank = flag & 0x1F;
+        
+        if (target_bank == code_bank) {
+            // Same-bank: patch fast-path JMP directly to native address
+            // BCC offset 4→0 activates fast path: PLP / JMP native_addr
+            flash_byte_program(code_base + off + 3, code_bank, 0);
+            flash_byte_program(code_base + off + 6, code_bank, na & 0xFF);
+            flash_byte_program(code_base + off + 7, code_bank, (na >> 8) & 0xFF);
+        } else {
+            // Cross-bank: patch fast-path JMP to +21 (xbank setup code),
+            // then patch the three LDA immediates in the setup code:
+            //   +25 = target addr lo, +30 = target addr hi, +35 = target bank
+            uint16_t setup_addr = code_base + off + 21;
+            flash_byte_program(code_base + off + 3, code_bank, 0);
+            flash_byte_program(code_base + off + 6, code_bank, setup_addr & 0xFF);
+            flash_byte_program(code_base + off + 7, code_bank, (setup_addr >> 8) & 0xFF);
+            flash_byte_program(code_base + off + 25, code_bank, na & 0xFF);
+            flash_byte_program(code_base + off + 30, code_bank, (na >> 8) & 0xFF);
+            flash_byte_program(code_base + off + 35, code_bank, target_bank);
+        }
         opt2_stat_direct++;
     }
 }

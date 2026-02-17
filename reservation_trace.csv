@@ -1,0 +1,4 @@
+event,frame,nativePC,phase,emPC,emA,emX,emY,emSP,emStatus,mapperBank,resCount,resEnabled,nextFree,flashAddr,flashBank,flashCacheIdx,codeIdx,extra
+# Trace script loaded at Sun Feb 15 22:51:20 2026
+# Triggering emu.reset() to capture sa_run from boot
+RES_COUNT_WRITE,5,0000,BOOT,0000,00,00,00,00,00,86,0,0,0,0000,00,0,0,newval=31

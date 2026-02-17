@@ -116,6 +116,8 @@
 #include <stdint.h>
 #include "config.h"
 
+extern uint8_t decimal_mode;  // dynamos.c: forces interpret while in BCD mode
+
 //6502 defines
 //#define UNDOCUMENTED //when this is defined, undocumented opcodes are handled.
                      //otherwise, they're simply treated as NOPs.
@@ -535,6 +537,7 @@ static void clc() {
 
 static void cld() {
     cleardecimal();
+    decimal_mode = 0;
 }
 
 static void cli() {
@@ -828,6 +831,7 @@ static void sec() {
 
 static void sed() {
     setdecimal();
+    decimal_mode = 1;
 }
 
 static void sei() {

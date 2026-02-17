@@ -13,6 +13,10 @@
 #include "core/optimizer_v2_simple.h"
 #endif
 
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+extern uint8_t lnPPUMASK;  // lazynes shadow for $2001
+#endif
+
 // Address mode table - must be in accessible memory during recompilation.
 // Stored in WRAM (data section) which is always accessible regardless of bank switching.
 #pragma section data
@@ -94,6 +98,10 @@ __zpage uint8_t next_new_cache = 0;
 __zpage uint8_t matched = 0;
 __zpage uint8_t decimal_mode = 0;
 __zpage uint8_t block_has_jsr = 0;  // set when JSR/NJSR compiled in current block
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+__zpage uint8_t compile_ppu_effect = 0;  // PPU emphasis bits toggled during compile
+__zpage uint8_t compile_ppu_active = 0;  // 1 = PPU effect enabled (SA boot only)
+#endif
 __zpage uint16_t flash_cache_index;
 uint8_t flash_enabled = 0;
 
@@ -337,7 +345,7 @@ void run_6502(void)
 	
 	// Compile directly to flash
 	cache_misses++;
-	
+
 	// Save the entry PC before compilation
 	uint16_t entry_pc = pc;
 	
@@ -447,7 +455,7 @@ void run_6502(void)
 		}
 		
 	} while (cache_flag[0] & READY_FOR_NEXT);
-	
+
 	if (code_index)
 	{
 		// Exit PC is the current pc value (instruction to interpret or continue from)
@@ -1453,17 +1461,20 @@ static uint8_t recompile_opcode_b2()
 		case opPLP:
 		{
 			enable_interpret();
+			break;
 		}		
 		case opSTX_ZPY:
 		case opSTY_ZPX:
 		{			
 			enable_interpret();
+			break;
 		}
 		
 		case opSED:
 		{
 			decimal_mode = 1;
 			enable_interpret();
+			break;
 		}		
 
 		case opNOP:
@@ -1662,6 +1673,16 @@ uint8_t recompile_opcode(void)
 	bankswitch_prg(2);
 	uint8_t result = recompile_opcode_b2();
 	bankswitch_prg(saved_bank);
+
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+	// Toggle red emphasis (bit 5) per instruction compiled (SA boot only)
+	if (compile_ppu_active) {
+		compile_ppu_effect ^= 0x20;
+		lnPPUMASK = 0x3B | compile_ppu_effect;
+		*(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame
+	}
+#endif
+
 	return result;
 }
 

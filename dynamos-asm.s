@@ -75,10 +75,10 @@ _SCREEN_RAM_BASE: reserve $400
 	if (GAME_NUMBER == 0)
 	align 8
 _rom_sidetrac:	
-	incbin "cpu_6502_test.bin"
-	;incbin "roms\sidetrac\stl8a-1"
-	;incbin "roms\sidetrac\stl7a-2"
-	;incbin "roms\sidetrac\stl6a-2"	
+	;incbin "cpu_6502_test.bin"
+	incbin "roms\sidetrac\stl8a-1"
+	incbin "roms\sidetrac\stl7a-2"
+	incbin "roms\sidetrac\stl6a-2"	
 	align 8
 _chr_sidetrac:
 	incbin "roms\sidetrac\stl9c-1"

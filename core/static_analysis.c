@@ -36,6 +36,12 @@ extern void run_6502(void);
 
 extern uint8_t addrmodes[];
 
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+extern uint8_t compile_ppu_effect;
+extern uint8_t compile_ppu_active;
+extern uint8_t lnPPUMASK;  // lazynes shadow for $2001
+#endif
+
 // From dynamos.c — needed for batch compile
 __zpage extern uint16_t pc;
 __zpage extern uint8_t code_index;
@@ -386,10 +392,23 @@ static void sa_walk_b2(void)
         sa_enqueue_if_valid(tgt);
     }
 
+    // Enable monochrome during BFS walk
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+    lnPPUMASK = 0x3B | compile_ppu_effect;
+    *(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame
+#endif
+
     // BFS loop
     while (!q_empty())
     {
         uint16_t cur_pc = q_pop();
+
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+        // Toggle blue emphasis (bit 7) per BFS node
+        compile_ppu_effect ^= 0x80;
+        lnPPUMASK = 0x3B | compile_ppu_effect;
+        *(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame
+#endif
 
         // Walk linear code from cur_pc
         while (cur_pc >= ROM_ADDR_MIN && cur_pc <= ROM_ADDR_MAX)
@@ -540,6 +559,13 @@ uint16_t sa_blocks_total = 0;
 
 static uint8_t sa_compile_one_block(void)
 {
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+    // Toggle green emphasis (bit 6) per block compiled
+    compile_ppu_effect ^= 0x40;
+    lnPPUMASK = 0x3B | compile_ppu_effect;
+    *(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame
+#endif
+
     // Allocate space in a flash sector for max-size block.
     // flash_sector_alloc sets flash_code_bank and flash_code_address (header start).
     if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
@@ -880,6 +906,11 @@ void sa_run(void)
     // The batch compile pass uses pc as scratch, so we must restore it.
     uint16_t saved_pc = pc;
 
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+    // Enable PPU compile effect for boot-time visual feedback
+    compile_ppu_active = 1;
+#endif
+
     // Run BFS walker (bank 2) — includes header check and sector erase
     uint8_t saved_bank = mapper_prg_bank;
     bankswitch_prg(2);
@@ -974,6 +1005,14 @@ void sa_run(void)
 #endif
 
 #endif // ENABLE_STATIC_COMPILE
+
+    // Restore normal PPU rendering after static analysis
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+    compile_ppu_active = 0;
+    compile_ppu_effect = 0;
+    lnPPUMASK = 0x3A;
+    *(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame restore
+#endif
 
     // Restore pc — reset6502() set it to the game's entry point before
     // sa_run() was called.  The batch compile pass clobbered it.

@@ -60,7 +60,7 @@
 // When disabled (default), zpx/zpy are compiled as absolute indexed (absx/absy),
 // which is faster but won't wrap at the zero page boundary.
 // Most games don't rely on ZP index wrapping, so leaving this off is usually safe.
-//#define ENABLE_ZP_INDEX_WRAP
+#define ENABLE_ZP_INDEX_WRAP
 
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)
@@ -82,6 +82,11 @@
 // After the walk, compile every discovered entry point in address order.
 // Gated separately so the walker can be tested without the compile pass.
 #define ENABLE_STATIC_COMPILE
+
+// Visual PPU effect during static analysis: monochrome + toggling
+// emphasis bits during BFS walk and batch compile.  Writes the lazynes
+// lnPPUMASK shadow so the effect takes effect from the top of screen.
+#define ENABLE_COMPILE_PPU_EFFECT
 
 // --- Pointer swizzling (per-game) ---
 // Replace Exidy high-byte immediates (LDA #$4x) with NES-translated values

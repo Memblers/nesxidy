@@ -75,10 +75,10 @@ _SCREEN_RAM_BASE: reserve $400
 	if (GAME_NUMBER == 0)
 	align 8
 _rom_sidetrac:	
-	;incbin "cpu_6502_test.bin"
-	incbin "roms\sidetrac\stl8a-1"
-	incbin "roms\sidetrac\stl7a-2"
-	incbin "roms\sidetrac\stl6a-2"	
+	incbin "cpu_6502_test.bin"
+	;incbin "roms\sidetrac\stl8a-1"
+	;incbin "roms\sidetrac\stl7a-2"
+	;incbin "roms\sidetrac\stl6a-2"	
 	align 8
 _chr_sidetrac:
 	incbin "roms\sidetrac\stl9c-1"
@@ -220,6 +220,7 @@ _xbank_addr = * + 1
 	section "data"
 	global _dispatch_on_pc, _flash_cache_index, _flash_dispatch_return, _flash_dispatch_return_no_regs
 	zpage addr_lo, addr_hi, target_bank, temp, temp2
+	zpage _clockticks6502
 ;-------------------------------------------------------
 _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	lda _pc+1		; D14-D15 - bank number
@@ -278,12 +279,41 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	; Address is $8000 - treat as invalid
 	jmp not_recompiled
 .addr_valid:
-	
+
 	lda target_bank
 	sta $C000
-	
+
+	; --- Block cycle counting ---
+	; Header byte +6 = pre-computed 6502 cycle count.
+	; Code starts at header + 8, so cycles = *(dispatch_addr - 2).
+	; Add to 32-bit clockticks6502 for frame timing.
+	; Cost: ~25 NES cycles per dispatch (~0.2% overhead).
+	lda .dispatch_addr
+	sec
+	sbc #2
+	sta addr_lo
+	lda .dispatch_addr + 1
+	sbc #0
+	sta addr_hi
+	ldy #0
+	lda (addr_lo),y
+	cmp #$FF			; $FF = erased flash (no cycle data)
+	beq .no_cycles
+	clc
+	adc _clockticks6502
+	sta _clockticks6502
+	bcc .no_cycles
+	inc _clockticks6502+1
+	bne .no_cycles
+	inc _clockticks6502+2
+.no_cycles:
+
 	lda _status
-	ora #$04	; hide IRQ/BRK flag during JIT execution
+	;ora #$04	; REMOVED: was hiding IRQ flag during JIT, but this
+	;           ; corrupted _status on block exit — the epilogue's PHP
+	;           ; captured the forced I=1 and stored it back, clobbering
+	;           ; the guest's CLI.  NES IRQ handler ($C140) is RTI, so
+	;           ; no protection needed.
 	pha	
 
 	;lda #$26	
@@ -311,6 +341,14 @@ _flash_dispatch_return_no_regs:
 	pla
 	sta _status
 
+	; Restore PRG bank — native code ran in a flash bank (4-18),
+	; but our caller (run_6502/main loop) expects the fixed bank (0).
+	; Without this, any subsequent call to banked code (irq6502 at $90B3
+	; in bank 2, etc.) would execute garbage from the flash bank.
+	lda _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+
 	lda #0	; return 0 = executed from flash
 	rts	
 
@@ -322,17 +360,53 @@ _flash_dispatch_return_no_regs:
 ; The RTS returns to the outer dispatch_on_pc's JSR .dispatch_addr_instruction.
 ; If a block needs recompile/interpret, bails with A=non-zero.
 ;
+; VBLANK HANDLING: Every iteration, compare lazyNES NMI counter (ZP $26)
+; with _last_nmi_frame.  If different, a real vblank has occurred.  Instead
+; of bailing to C (which destroys NJSR context and makes subsequent loop
+; iterations run at the slow C-dispatch rate), we simply absorb the vblank
+; by updating _last_nmi_frame and continue looping.  This means no rendering
+; or IRQ dispatch during the subroutine, but delay loops have static screens
+; and the IRQ handler just mutes audio during delays — both acceptable.
+; After the subroutine returns, the main loop catches up normally.
+;
 ; On entry:  _pc = target, _sp = post-push SP, _native_jsr_saved_sp = pre-push SP
 ; On exit:   A = 0 if subroutine completed, non-zero if needs C
 ;-------------------------------------------------------
+	zpage _last_nmi_frame
 	global _native_jsr_trampoline
 _native_jsr_trampoline:
+	; Save outer _native_jsr_saved_sp on NES stack for nesting safety.
+	; If an inner NJSR fires, it overwrites _native_jsr_saved_sp;
+	; we restore the outer value on exit so the caller's trampoline
+	; still checks against the correct SP threshold.
+	lda _native_jsr_saved_sp
+	pha
 .njsr_loop:
 	jsr _dispatch_on_pc		; dispatch current _pc block
 	; A = 0: block ran from flash
 	; A = 1: needs recompile
 	; A = 2: needs interpret
 	bne .njsr_exit			; non-zero → can't handle natively, bail to C
+	
+	; Check for vblank: if NMI counter ($26) != last_nmi_frame, absorb it
+	; and continue looping.  Previously we bailed to C here, but that
+	; destroyed the NJSR context — every subsequent iteration of the
+	; inner delay loop ran through the slow C dispatch path (2 dispatches
+	; × 300+ real NES cycles each), making 65536-iteration loops take
+	; 65+ seconds instead of ~3.4 seconds.
+	;
+	; New approach: absorb the vblank by updating last_nmi_frame and
+	; continue the trampoline loop.  The main loop won't fire IRQs or
+	; render during the subroutine, but:
+	;   - Screen is static during delay loops (no visible difference)
+	;   - IRQ handler just mutes audio during delays (acceptable skip)
+	;   - lazyNES tolerates missing lnSync for several seconds
+	;   - After subroutine returns, main loop renders and fires IRQ normally
+	lda $26					; lazyNES NMI counter (incremented every vblank)
+	cmp _last_nmi_frame		; has a new vblank occurred?
+	beq .njsr_no_vblank		; no → skip absorb
+	sta _last_nmi_frame		; absorb vblank: update last_nmi_frame
+.njsr_no_vblank:
 	
 	; Block executed. Check if subroutine returned.
 	; If emulated SP >= saved_sp, the RTS has popped back to (or past) entry level.
@@ -341,31 +415,37 @@ _native_jsr_trampoline:
 	bcc .njsr_loop			; SP < saved_sp → still in subroutine, dispatch next block
 	
 	; Subroutine completed (SP restored). _pc and _status are already
-	; set correctly by the nrts template's inner dispatch. Pop the
-	; njsr template's PHP without clobbering _status, then return 0.
+	; set correctly by the nrts template's inner dispatch.
+	; Restore outer saved_sp, pop njsr's PHP, return 0.
+	pla						; restore outer saved_sp
+	sta _native_jsr_saved_sp
 	pla						; discard njsr's PHP (don't overwrite _status!)
 	lda #0					; return 0 = executed from flash
 	rts						; return to outer dispatch_on_pc's JSR .dispatch_addr_instruction
-	
+
 .njsr_exit:
 	; Bail to C — subroutine hit something that needs recompile/interpret.
 	; _status was already saved by the last block's epilogue.
-	; Pop njsr's PHP without clobbering _status, return non-zero.
+	; Restore outer saved_sp, pop njsr's PHP, return non-zero.
+	pla						; restore outer saved_sp
+	sta _native_jsr_saved_sp
 	pla						; discard njsr's PHP
-	; A still has non-zero result from dispatch_on_pc (1=recompile, 2=interpret)
-	; But dispatch_on_pc already returned here with non-zero A, and we did
-	; lda _sp / cmp which changed A. We need to return non-zero to the caller.
 	lda #1					; return non-zero = needs C handling
 	rts
 	
 not_recompiled:
+	; A still holds the flag byte ($00 for uninitialized, or a value with bit 7 set)
+	; $00 = never seen before → compile (return 1)
+	; INTERPRETED bit ($40) CLEAR but non-zero → was explicitly marked interpret-only (return 2)
+	; INTERPRETED bit ($40) SET → not yet processed, needs recompile (return 1)
+	beq .needs_compile    ; $00 = uninitialized → compile
 	and #INTERPRETED
-	beq needs_interpret   ; If INTERPRETED bit CLEAR, interpret (was marked for interpretation)
-	lda #1 ; INTERPRETED bit SET = not yet processed, needs recompile
-	rts
-	
-needs_interpret:
+	bne .needs_compile    ; INTERPRETED bit SET → compile
 	lda #2	; interpret this PC
+	rts
+
+.needs_compile:
+	lda #1 ; needs recompile
 	rts
 
 

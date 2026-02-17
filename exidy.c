@@ -62,7 +62,6 @@ extern uint8_t write_50xx_count;  // Debug: writes to $50xx from interpreter
 extern uint8_t last_interpreted_opcode;  // Debug: last opcode interpreted
 extern uint8_t indy_hit_count;  // Debug: from dynamos.c
 extern uint8_t sta_indy_interpret_count;  // Debug: from fake6502.c
-extern uint8_t pc_2b27_count;  // Debug: from dynamos.c - count PC=$2B27
 extern uint16_t last_indy_ea;  // Debug: from fake6502.c
 extern uint8_t sta_5000_count;  // Debug: STA to $5000 specifically
 #ifdef ENABLE_DEBUG_STATS
@@ -72,6 +71,9 @@ extern void debug_stats_update(void);  // Debug: write stats to WRAM $7E00
 __zpage uint8_t interrupt_condition;
 __zpage uint8_t character_ram_updated = 0;
 __zpage uint8_t screen_ram_updated = 0;
+
+// Forward declarations
+void render_video(void);
 
 // Sprite 1 (player/motion object 1)
 __zpage uint8_t sprite1_xpos = 0;
@@ -91,6 +93,7 @@ __zpage uint8_t sprite_enable = 0;   // $5101: bit 7 = enable sprite1, bit 6 = e
 __zpage uint8_t irq_count = 0;       // Debug: count IRQs triggered
 
 __zpage uint32_t frame_time;
+__zpage uint8_t last_nmi_frame = 0;  // Tracks lazyNES NMI frame counter (ZP $26)
 __zpage uint8_t audio = 0;
 __zpage uint8_t sprites_converted = 0;
 
@@ -199,6 +202,11 @@ int main(void)
 	lnSync(0);
 	reset6502();		
 	
+	// Disable APU frame IRQ — lazynes doesn't do this and the frame
+	// counter defaults to 4-step mode which generates IRQs.  The NES I
+	// flag is set during JIT dispatch, but belt-and-suspenders.
+	IO8(0x4017) = 0x40;
+	
 	lnPPUCTRL &= ~0x08;
 	lnPPUMASK = 0x3A;
 
@@ -207,6 +215,7 @@ int main(void)
 #else
 	flash_format();
 #endif
+	flash_cache_init_sectors();
 	
 	// Reservation system disabled — init_reservations() removed.
 	
@@ -224,6 +233,8 @@ int main(void)
 	
 	interrupt_condition = 0;
 
+	last_nmi_frame = *(volatile uint8_t*)0x26;  // sync with lazyNES NMI counter
+
 #ifdef TRACK_TICKS
 	frame_time = clockticks6502 + FRAME_LENGTH;
 #else
@@ -237,7 +248,7 @@ int main(void)
 		#else
 		run_6502();
 		#endif
-		
+
 #ifdef ENABLE_OPTIMIZER
 		// Check if optimization should run (periodically from main loop)
 		// This catches dispatches even if flash blocks aren't being executed
@@ -245,15 +256,23 @@ int main(void)
 #endif
 		
 		
-#ifndef TRACK_TICKS		
-		if (frame_time++ > FRAME_LENGTH)
+#ifndef TRACK_TICKS
+		// NMI-driven frame timing: lazyNES NMI handler increments ZP $26
+		// every vblank (60Hz). This decouples frame timing from instruction
+		// count, so JIT blocks with tight native loops don't starve the IRQ.
 		{
-			frame_time = 0;
-			interrupt_condition |= FLAG_EXIDY_IRQ;
+			uint8_t cur_nmi = *(volatile uint8_t*)0x26;
+			if (cur_nmi != last_nmi_frame)
+			{
+				interrupt_condition |= FLAG_EXIDY_IRQ;
 #ifdef ENABLE_DEBUG_STATS
-			debug_stats_update();
+				debug_stats_update();
 #endif
-			render_video();
+				render_video();
+				// Re-read AFTER render_video: lnSync waits for vblank,
+				// advancing $26. Absorb it so we don't re-trigger.
+				last_nmi_frame = *(volatile uint8_t*)0x26;
+			}
 		}
 #else
 		if (clockticks6502 > frame_time)
@@ -264,7 +283,37 @@ int main(void)
 			debug_stats_update();
 #endif
 			render_video();
-		}	
+			// Re-read AFTER render_video: lnSync waits for vblank,
+			// advancing $26. Absorb it so the backstop doesn't
+			// immediately re-trigger a second render.
+			last_nmi_frame = *(volatile uint8_t*)0x26;
+		}
+		// NMI backstop: even if the cycle counter hasn't reached frame_time
+		// (e.g. during very tight delay loops where DISPATCH_OVERHEAD under-
+		// estimates), the real NES vblank still fires.  Checking ZP $26
+		// ensures we never fall more than one real vblank behind.
+		// This also catches cases where SEI disables IRQs for thousands
+		// of iterations (crash animation) — the frame counter still advances.
+		{
+			uint8_t cur_nmi = *(volatile uint8_t*)0x26;
+			if (cur_nmi != last_nmi_frame)
+			{
+				last_nmi_frame = cur_nmi;
+				// If IRQ handler is executing (I flag set), don't render —
+				// the handler is mid-dispatch and will RTI soon. Rendering
+				// here would burn a frame waiting for vblank, starving the
+				// handler and causing 2 renders per 3 frames.
+				if (!(interrupt_condition & FLAG_EXIDY_IRQ) && !(status & FLAG_INTERRUPT))
+				{
+					interrupt_condition |= FLAG_EXIDY_IRQ;
+					// Sync cycle counter to avoid double-firing when
+					// the next cycle-based frame would also trigger
+					frame_time = clockticks6502 + FRAME_LENGTH;
+					render_video();
+					last_nmi_frame = *(volatile uint8_t*)0x26;
+				}
+			}
+		}
 #endif	
 		// Fire emulated IRQ once per frame (if interrupts are enabled).
 		// The Side Track IRQ handler at $2B0E is the game's frame tick —
@@ -325,7 +374,7 @@ uint8_t read6502(uint16_t address)
 	{
 		uint8_t vblank = interrupt_condition;
 		interrupt_condition &= ~FLAG_EXIDY_IRQ;
-		if (nes_gamepad() && TARG_COIN1)
+		if (nes_gamepad() & TARG_COIN1)
 			return (0x40 | vblank);
 		else
 			return (0x00 | vblank);

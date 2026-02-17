@@ -17,17 +17,39 @@
 
 // Flash configuration
 #define FLASH_CACHE_MEMORY_SIZE   0x3C000
-#define FLASH_CACHE_BLOCK_SIZE    0x100
 #define FLASH_ERASE_SECTOR_SIZE   0x1000
 #define FLASH_BANK_BASE           0x8000
 #define FLASH_BANK_SIZE           0x4000
 #define FLASH_BANK_MASK           0x3FFF
-#define FLASH_CACHE_BLOCKS        (FLASH_CACHE_MEMORY_SIZE / FLASH_CACHE_BLOCK_SIZE)
 #define FLASH_CACHE_BANKS         (FLASH_CACHE_MEMORY_SIZE / FLASH_BANK_SIZE)
 
-#define BLOCK_CONFIG_BASE 250
+// Sector-based allocation
+#define FLASH_SECTORS_PER_BANK    (FLASH_BANK_SIZE / FLASH_ERASE_SECTOR_SIZE)   // 4
+#define FLASH_CACHE_SECTORS       (FLASH_CACHE_BANKS * FLASH_SECTORS_PER_BANK)  // 60
+#define FLASH_SECTOR_MASK         0x0FFF  // offset within 4KB sector
 
-// Block status flags
+// Code entry point alignment (16 bytes for future $FFF0 patching)
+#define BLOCK_ALIGNMENT           16
+#define BLOCK_ALIGNMENT_MASK      (BLOCK_ALIGNMENT - 1)
+
+// Block header — stored immediately before native code in flash.
+// PC table entries point past the header (to native code start).
+// Total: 8 bytes.  Pad to 8 so header+alignment is predictable.
+#define BLOCK_HEADER_SIZE         8
+
+typedef struct {
+    uint16_t entry_pc;        // +0: guest PC at block start
+    uint16_t exit_pc;         // +2: guest PC at block end (for epilogue scanner)
+    uint8_t  code_len;        // +4: bytes of native code + epilogue (for walking)
+    uint8_t  epilogue_offset; // +5: offset from code start to patchable epilogue
+    uint8_t  flags;           // +6: reserved for future use
+    uint8_t  reserved;        // +7: pad to 8 bytes
+} block_header_t;
+
+// Sector free-pointer table — WRAM, 2 bytes per sector (next free offset 0..4095)
+extern uint16_t sector_free_offset[FLASH_CACHE_SECTORS];
+
+// Legacy compatibility
 #define FLASH_AVAILABLE     0x01
 
 // PC flags
@@ -91,8 +113,11 @@ extern uint8_t flash_cache_pc[];
 extern const uint8_t flash_cache_pc_flags[];
 extern uint8_t flash_block_flags[];
 
+// Sector-based cache management
+uint8_t flash_sector_alloc(uint8_t total_size);  // returns 1 on success, 0 if full
+void flash_cache_init_sectors(void);             // erase all code cache sectors, zero table
+
 // Cache management functions
-uint16_t cache_allocate_block(void);
 void cache_setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
 void cache_pc_update(uint8_t code_address, uint8_t flags);
 void cache_pc_flag_clear(uint16_t emulated_pc, uint8_t flag);

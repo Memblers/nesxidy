@@ -42,14 +42,16 @@ __zpage extern uint8_t code_index;
 __zpage extern uint8_t cache_index;
 extern uint8_t cache_flag[];
 extern uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
-extern uint16_t flash_cache_select(void);
+extern uint8_t flash_sector_alloc(uint8_t total_size);
 extern void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
+extern void setup_flash_pc_tables(uint16_t emulated_pc);
 extern void flash_cache_pc_update(uint8_t code_address, uint8_t flags);
-extern uint16_t next_free_block;
 extern uint8_t recompile_opcode(void);
 __zpage extern uint16_t flash_cache_index;
 extern uint16_t flash_code_address;
 extern uint8_t flash_code_bank;
+extern uint16_t sector_free_offset[];
+extern uint8_t next_free_sector;
 
 extern uint8_t flash_block_flags[];
 extern uint8_t flash_cache_pc[];
@@ -59,6 +61,12 @@ extern void flash_dispatch_return(void);
 extern void cross_bank_dispatch(void);
 extern void xbank_trampoline(void);
 extern uint8_t xbank_addr;
+
+// Intra-block backward branch support (from dynamos.c)
+extern uint8_t block_ci_map[];
+__zpage extern uint8_t block_has_jsr;
+__zpage extern uint8_t cache_entry_pc_lo[];
+__zpage extern uint8_t cache_entry_pc_hi[];
 
 #ifdef ENABLE_OPTIMIZER_V2
 #include "optimizer_v2_simple.h"
@@ -532,29 +540,28 @@ uint16_t sa_blocks_total = 0;
 
 static uint8_t sa_compile_one_block(void)
 {
-    // Check if this PC has a reserved block from a prior branch/JMP
-    // reservation.  If so, use the pre-allocated block instead of
-    // selecting a new one.  The block is already marked used and PC
-    // flags are already written, so we just need to compile into it.
-    int16_t reserved = consume_reservation(pc);
-    if (reserved >= 0)
-    {
-        flash_cache_index = (uint16_t)reserved;
-    }
-    else
-    {
-        flash_cache_index = flash_cache_select();
-        if (!flash_cache_index)
-            return 0;           // cache full
-        flash_cache_index--;
-    }
+    // Allocate space in a flash sector for max-size block.
+    // flash_sector_alloc sets flash_code_bank and flash_code_address (header start).
+    if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
+        return 0;           // cache full
+
+    uint16_t entry_pc = pc;
 
     // Use cache index 0 as temporary compilation buffer (same as run_6502)
     cache_index = 0;
     code_index = 0;
     cache_flag[0] = 0;
+    block_has_jsr = 0;  // reset for new block
 
-    setup_flash_address(pc, flash_cache_index);
+    // Set entry PC so try_intra_block_branch can find block start
+    cache_entry_pc_lo[0] = (uint8_t)entry_pc;
+    cache_entry_pc_hi[0] = (uint8_t)(entry_pc >> 8);
+
+    // Clear intra-block code_index map
+    for (uint8_t ci_i = 0; ci_i < 64; ci_i++)
+        block_ci_map[ci_i] = 0;
+
+    setup_flash_pc_tables(pc);
 
     // Compile loop — same as in run_6502 but without dispatch
     do
@@ -562,14 +569,20 @@ static uint8_t sa_compile_one_block(void)
         uint16_t pc_old = pc;
         uint8_t code_index_old = code_index;
 
+        // Record this instruction's code_index for intra-block branch lookup.
+        {
+            uint8_t ci_slot = (uint8_t)(pc_old - entry_pc) & 0x3F;
+            block_ci_map[ci_slot] = code_index_old + 1;
+        }
+
         recompile_opcode();
 
         uint8_t instr_len = code_index - code_index_old;
 
-        setup_flash_address(pc_old, flash_cache_index);
+        setup_flash_pc_tables(pc_old);
         for (uint8_t i = 0; i < instr_len; i++)
         {
-            flash_byte_program(flash_code_address + code_index_old + i,
+            flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index_old + i,
                                flash_code_bank, cache_code[0][code_index_old + i]);
         }
 
@@ -586,7 +599,7 @@ static uint8_t sa_compile_one_block(void)
             flash_cache_pc_update(code_index_old, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
             opt2_notify_block_compiled(pc_old,
-                flash_code_address + code_index_old + BLOCK_PREFIX_SIZE,
+                flash_code_address + BLOCK_HEADER_SIZE + code_index_old,
                 flash_code_bank);
 #endif
         }
@@ -596,7 +609,6 @@ static uint8_t sa_compile_one_block(void)
     if (code_index)
     {
         uint16_t exit_pc = pc;
-        setup_flash_address(pc, flash_cache_index);
         uint8_t epilogue_start = code_index;
 
 #ifdef ENABLE_PATCHABLE_EPILOGUE
@@ -657,22 +669,24 @@ static uint8_t sa_compile_one_block(void)
         cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 #endif
 
+        // --- Write block header to flash ---
+        flash_byte_program(flash_code_address + 0, flash_code_bank, (uint8_t)entry_pc);
+        flash_byte_program(flash_code_address + 1, flash_code_bank, (uint8_t)(entry_pc >> 8));
+        flash_byte_program(flash_code_address + 2, flash_code_bank, (uint8_t)exit_pc);
+        flash_byte_program(flash_code_address + 3, flash_code_bank, (uint8_t)(exit_pc >> 8));
+        flash_byte_program(flash_code_address + 4, flash_code_bank, code_index);  // code_len
+        flash_byte_program(flash_code_address + 5, flash_code_bank, epilogue_start);  // epilogue_offset
+        // +6 flags, +7 reserved: leave as 0xFF (erased)
+
+        // --- Write code + epilogue to flash ---
         for (uint8_t i = epilogue_start; i < code_index; i++)
         {
-            flash_byte_program(flash_code_address + i, flash_code_bank,
-                               cache_code[0][i]);
+            flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + i,
+                               flash_code_bank, cache_code[0][i]);
         }
-#ifdef ENABLE_PATCHABLE_EPILOGUE
-        flash_byte_program(flash_code_address + 255, flash_code_bank,
-                           epilogue_start);
-#endif
 
-        // Mark block as used
-        bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
-        flash_byte_program(
-            (uint16_t)&flash_block_flags[0] + flash_cache_index,
-            mapper_prg_bank,
-            flash_block_flags[flash_cache_index] & ~FLASH_AVAILABLE);
+        // Shrink sector allocation to actual size used (avoid wasting space)
+        sector_free_offset[next_free_sector] = (flash_code_address & FLASH_SECTOR_MASK) + BLOCK_HEADER_SIZE + code_index;
     }
 
     return 1;
@@ -950,7 +964,9 @@ void sa_run(void)
 #ifdef ENABLE_PATCHABLE_EPILOGUE
     for (uint8_t pass = 0; pass < 2; pass++)
     {
-        for (uint16_t s = 0; s < (FLASH_CACHE_BLOCKS + 31) / 32; s++)
+        // Scan all sectors — each call processes EPILOGUE_SCAN_BATCH blocks,
+        // so iterate enough times to cover all 60 sectors generously.
+        for (uint16_t s = 0; s < (FLASH_CACHE_SECTORS + 31) / 32; s++)
             opt2_scan_and_patch_epilogues();
         opt2_sweep_pending_patches();
     }

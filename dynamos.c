@@ -93,15 +93,20 @@ __zpage uint8_t cache_index = BLOCK_COUNT-1;
 __zpage uint8_t next_new_cache = 0;
 __zpage uint8_t matched = 0;
 __zpage uint8_t decimal_mode = 0;
+__zpage uint8_t block_has_jsr = 0;  // set when JSR/NJSR compiled in current block
 __zpage uint16_t flash_cache_index;
-__zpage uint8_t pc_2b27_count = 0;  // Debug: count when PC = $2B27 (STA $5000)
 uint8_t flash_enabled = 0;
 
-// Monotonic cursor for flash_cache_select: remembers where the last
-// allocation was, so subsequent calls skip already-used blocks.
-// Blocks are never freed (flash can only clear bits), so previously
-// scanned entries are guaranteed to still be occupied.
-uint16_t next_free_block = 0;
+// Intra-block backward branch map: maps (guest_pc - entry_pc) → code_index+1
+// during compilation.  Index by offset & 0x3F (64-entry table).
+// Value 0 = no entry at that offset.  Otherwise code_index = value - 1.
+uint8_t block_ci_map[64];
+
+// Sector-based free-form allocator:
+// Each 4KB flash sector has a bump pointer tracking the next free offset.
+// Stored in WRAM (mutable).  Zeroed at boot by flash_cache_init_sectors().
+uint16_t sector_free_offset[FLASH_CACHE_SECTORS];
+uint8_t next_free_sector = 0;  // monotonic sector cursor
 
 // Block reservation system: pre-allocate flash blocks for branch/JMP targets
 // so the compiler can emit direct native jumps instead of patchable templates.
@@ -191,10 +196,9 @@ static void debug_stats_update_b2(void)
 	                                | (peek_bank_byte(1, (uint16_t)&opt2_stat_pending + 1) << 8);
 #endif
 
-	// Blocks in use: next_free_block is a monotonic cursor — all entries
-	// below it are used (blocks are never freed on flash).
-	extern uint16_t next_free_block;
-	*(volatile uint16_t*)(p + 0x26) = next_free_block;
+	// Blocks in use: report next_free_sector as a proxy for cache utilization
+	extern uint8_t next_free_sector;
+	*(volatile uint16_t*)(p + 0x26) = next_free_sector;
 
 	// Frame counter (global in BSS/WRAM — static in bank2 flash would be read-only)
 	extern uint16_t stats_frame;
@@ -205,8 +209,12 @@ static void debug_stats_update_b2(void)
 	p[0x2B] = 0x57;
 
 	// SA compile counter
+#ifdef ENABLE_STATIC_ANALYSIS
 	extern uint16_t sa_blocks_total;
 	*(volatile uint16_t*)(p + 0x2C) = sa_blocks_total;
+#else
+	*(volatile uint16_t*)(p + 0x2C) = 0;
+#endif
 }
 #pragma section default
 
@@ -255,9 +263,11 @@ search cache for entrance matching the current program counter
 void run_6502(void)
 {		
 	//cache_test();
-	
-	// Debug: track when we enter IRQ handler
-	if (pc == 0x2B0E) pc_2b27_count++;
+
+#ifdef ENABLE_BLOCK_CYCLES
+	// interpret_6502() already adds to clockticks6502 via ticktable.
+	// JIT blocks add their pre-computed cycle count in dispatch_on_pc (asm).
+#endif
 	
 #ifdef DEBUG_OUT
 	static uint8_t print_delay = 0;
@@ -292,11 +302,32 @@ void run_6502(void)
 			cache_interpret++;
 			bankswitch_prg(0);
 			interpret_6502();
+#ifdef TRACK_TICKS
+			// Dispatch overhead compensation: each dispatch round-trip costs
+			// ~200+ real NES cycles in C/asm overhead (function calls, bank
+			// switching, dispatch_on_pc lookup, etc.), but interpret_6502()
+			// only executes one guest instruction (~3-7 guest cycles).
+			// Adding DISPATCH_OVERHEAD compensates so that busy-wait delay
+			// loops (DEX;BNE, DEC zp;BNE, LDA $5101 polling) advance the
+			// cycle counter proportionally to wall-clock time elapsed.
+			// Without this, tight delay loops run 40-100x slower than on
+			// real hardware because each iteration pays the full dispatch
+			// round-trip cost but only counts a few guest cycles.
+			clockticks6502 += DISPATCH_OVERHEAD;
+#endif
 			return;
 		}
 		case 0:  // executed from flash
 		{
 			cache_hits++;
+#ifdef TRACK_TICKS
+			// JIT blocks already have accurate cycle counts in the header,
+			// but the dispatch round-trip overhead (~200 NES cycles) isn't
+			// reflected.  Adding DISPATCH_OVERHEAD keeps frame timing
+			// proportional to wall time even for short blocks (e.g.
+			// DEX;BNE = 4 guest cycles + 80 overhead = 84 per dispatch).
+			clockticks6502 += DISPATCH_OVERHEAD;
+#endif
 			return;
 		}
 		case 1:  // recompile needed
@@ -307,12 +338,33 @@ void run_6502(void)
 	// Compile directly to flash
 	cache_misses++;
 	
-	flash_cache_index = flash_cache_select();
-	if (flash_cache_index)
-	{
-		flash_cache_index--;
-	}
-	else
+	// Save the entry PC before compilation
+	uint16_t entry_pc = pc;
+	
+	// Store entry PC in global arrays so recompile_opcode_b2 can detect
+	// backward branches that target the same block's entry (self-loops).
+	cache_entry_pc_lo[0] = (uint8_t)entry_pc;
+	cache_entry_pc_hi[0] = (uint8_t)(entry_pc >> 8);
+	
+	// Use cache index 0 as temporary compilation buffer
+	cache_index = 0;
+	code_index = 0;		
+
+	cache_flag[0] = 0;
+	block_has_jsr = 0;  // reset for new block
+
+	// Clear intra-block code_index map
+	for (uint8_t ci_i = 0; ci_i < 64; ci_i++)
+		block_ci_map[ci_i] = 0;
+
+#ifdef ENABLE_BLOCK_CYCLES
+	uint16_t block_cycles_acc = 0;  // accumulated 6502 cycles for this block
+#endif
+	
+	// Tentatively allocate space for max-size block.
+	// We'll write the actual size to the header after compilation.
+	// flash_sector_alloc sets flash_code_bank and flash_code_address (to header start).
+	if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
 	{
 		// No flash available, fall back to interpreter
 		bankswitch_prg(0);
@@ -320,17 +372,10 @@ void run_6502(void)
 		return;
 	}
 	
-	// Save the entry PC before compilation
-	uint16_t entry_pc = pc;
-	
-	// Use cache index 0 as temporary compilation buffer
-	cache_index = 0;
-	code_index = 0;		
-
-	cache_flag[0] = 0;
-	
-	// Set up flash address BEFORE compilation loop so flash_code_bank is valid
-	setup_flash_address(pc, flash_cache_index);
+	// flash_code_address now points to header start.
+	// Native code starts at flash_code_address + BLOCK_HEADER_SIZE.
+	// Set up PC table pointers for the entry PC.
+	setup_flash_pc_tables(pc);
 
 #if OPT_BLOCK_METADATA
 	// Track branches for metadata
@@ -344,9 +389,24 @@ void run_6502(void)
 		uint16_t pc_old = pc;
 		uint8_t code_index_old = code_index;
 		
+		// Record this instruction's code_index for intra-block branch lookup.
+		// Index by (guest_pc - entry_pc) & 0x3F.  Store code_index + 1 (0 = empty).
+		{
+			uint8_t ci_slot = (uint8_t)(pc_old - entry_pc) & 0x3F;
+			block_ci_map[ci_slot] = code_index_old + 1;
+		}
+		
 		recompile_opcode();
 		
 		uint8_t instr_len = code_index - code_index_old;
+
+#ifdef ENABLE_BLOCK_CYCLES
+		// Add this opcode's base cycle count to the block total.
+		// Uses the same ticktable as the interpreter.
+		// Note: doesn't account for page-crossing penalties (acceptable approx).
+		if (instr_len > 0)
+			block_cycles_acc += ticktable[read6502(pc_old)];
+#endif
 
 #if OPT_BLOCK_METADATA
 		// Track branches for metadata
@@ -355,19 +415,17 @@ void run_6502(void)
 		    && branch_count < 16) {
 			int8_t off = read6502(pc_old + 1);
 			uint16_t target = pc_old + 2 + off;
-			// The branch operand is at code_index_old + 1 (opcode at +0, operand at +1)
 			branch_offsets[branch_count] = code_index_old + 1;
 			branch_targets[branch_count] = target;
 			branch_count++;
 		}
-		// Must call setup_flash_address to update pc_jump_address for flash_cache_pc_update
-		setup_flash_address(pc_old, flash_cache_index);
+		setup_flash_pc_tables(pc_old);
 #else
-		// Write this instruction's bytes to flash immediately (old behavior)
-		setup_flash_address(pc_old, flash_cache_index);
+		// Write this instruction's bytes to flash immediately
+		setup_flash_pc_tables(pc_old);
 		for (uint8_t i = 0; i < instr_len; i++)
 		{
-			flash_byte_program(flash_code_address + code_index_old + i, flash_code_bank, cache_code[0][code_index_old + i]);
+			flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index_old + i, flash_code_bank, cache_code[0][code_index_old + i]);
 		}
 #endif
 		
@@ -394,110 +452,7 @@ void run_6502(void)
 	{
 		// Exit PC is the current pc value (instruction to interpret or continue from)
 		uint16_t exit_pc = pc;
-		
-#if OPT_BLOCK_METADATA
-		setup_flash_address(entry_pc, flash_cache_index);  // Get flash address base
-		
-		// --- Write everything to flash at once with prefix and metadata ---
-		uint8_t flash_offset = 0;
-		
-		// 1. Write code length prefix
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, code_index);
-		
-		// 2. Write compiled code
-		for (uint8_t i = 0; i < code_index; i++) {
-			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, cache_code[0][i]);
-		}
-		
-		// 3. Write epilogue
-#ifdef ENABLE_PATCHABLE_EPILOGUE
-		uint8_t epilogue_flash_offset = flash_offset;  // save for byte 255 marker
-		// Patchable epilogue (21 bytes)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x08); // PHP
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x18); // CLC
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x90); // BCC
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 4);    // offset → regular at +8
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x28); // PLP (fast)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP (fast)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF); // JMP lo (PATCHABLE)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF); // JMP hi (PATCHABLE)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _a (regular)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&a));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #<exit_pc
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)exit_pc);
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _pc
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&pc));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #>exit_pc
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(exit_pc >> 8));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _pc+1
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&pc) + 1));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP cross_bank_dispatch
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&cross_bank_dispatch));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8));
-		// +21: Cross-bank fast-path setup (18 bytes)
-		// Reached when fast-path JMP is patched to point here for cross-bank targets.
-		// Writes target addr into WRAM self-mod trampoline, passes bank in A.
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x08); // PHP (re-save guest flags)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA _a
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&a));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #$FF (target addr lo, PATCHABLE)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF);
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x8D); // STA xbank_addr (abs)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&xbank_addr));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&xbank_addr) >> 8));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #$FF (target addr hi, PATCHABLE)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF);
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x8D); // STA xbank_addr+1 (abs)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&xbank_addr) + 1));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((((uint16_t)&xbank_addr) + 1) >> 8));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #$FF (target bank, PATCHABLE)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xFF);
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP xbank_trampoline
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&xbank_trampoline));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&xbank_trampoline) >> 8));
-		// Epilogue chaining is handled by opt2_scan_and_patch_epilogues() — no queue needed
-		// Write epilogue start offset to byte 255 so scanner can find it directly
-		flash_byte_program(flash_code_address + 255, flash_code_bank, epilogue_flash_offset);
-#else
-		// Standard epilogue (14 bytes)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA zp
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&a));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x08); // PHP
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)exit_pc);
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA zp
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&pc));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0xA9); // LDA #
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(exit_pc >> 8));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x85); // STA zp
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&pc) + 1));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0x4C); // JMP
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)((uint16_t)&cross_bank_dispatch));
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8));
-#endif  // ENABLE_PATCHABLE_EPILOGUE
-		
-		// 4. Write metadata: exit_pc
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)exit_pc);
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(exit_pc >> 8));
-		
-#if OPT_TRACK_CYCLES
-		// 5. Write cycle count (TODO: implement actual cycle tracking)
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0);
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, 0);
-#endif
-		
-		// 6. Write branch info
-		flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, branch_count);
-		for (uint8_t i = 0; i < branch_count; i++) {
-			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, branch_offsets[i]);
-			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)branch_targets[i]);
-			flash_byte_program(flash_code_address + flash_offset++, flash_code_bank, (uint8_t)(branch_targets[i] >> 8));
-		}
-		
-#else
-		// --- Old behavior: epilogue only, no prefix ---
-		// Build epilogue into cache_code buffer, then write everything to flash at once
-		setup_flash_address(pc, flash_cache_index);  // Get flash address base
+		// --- Build epilogue into cache_code buffer, then write header + all code to flash ---
 		uint8_t epilogue_start = code_index;
 
 #ifdef ENABLE_PATCHABLE_EPILOGUE
@@ -560,21 +515,32 @@ void run_6502(void)
 		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 #endif  // ENABLE_PATCHABLE_EPILOGUE
 
-		// Write epilogue to flash
-		for (uint8_t i = epilogue_start; i < code_index; i++) {
-			flash_byte_program(flash_code_address + i, flash_code_bank, cache_code[0][i]);
-		}
-#ifdef ENABLE_PATCHABLE_EPILOGUE
-		// Write epilogue start offset to byte 255 so scanner can find it directly
-		flash_byte_program(flash_code_address + 255, flash_code_bank, epilogue_start);
+		// --- Write block header to flash ---
+		// flash_code_address points to header start; code starts at +BLOCK_HEADER_SIZE
+		flash_byte_program(flash_code_address + 0, flash_code_bank, (uint8_t)entry_pc);        // entry_pc lo
+		flash_byte_program(flash_code_address + 1, flash_code_bank, (uint8_t)(entry_pc >> 8));  // entry_pc hi
+		flash_byte_program(flash_code_address + 2, flash_code_bank, (uint8_t)exit_pc);          // exit_pc lo
+		flash_byte_program(flash_code_address + 3, flash_code_bank, (uint8_t)(exit_pc >> 8));   // exit_pc hi
+		flash_byte_program(flash_code_address + 4, flash_code_bank, code_index);                // code_len (code+epilogue)
+		flash_byte_program(flash_code_address + 5, flash_code_bank, epilogue_start);            // epilogue_offset
+#ifdef ENABLE_BLOCK_CYCLES
+		// Store pre-computed 6502 cycle count (capped at 255).
+		// Read by dispatch_on_pc asm before executing the block.
+		flash_byte_program(flash_code_address + 6, flash_code_bank,
+			(uint8_t)(block_cycles_acc > 255 ? 255 : block_cycles_acc));  // cycles
+#else
+		// flash_code_address + 6 = flags (leave 0xFF = erased)
 #endif
-		// Epilogue chaining is handled by opt2_scan_and_patch_epilogues() — no queue needed
-#endif  // OPT_BLOCK_METADATA
-		
-		// Mark block as used
-		bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
-		flash_byte_program((uint16_t) &flash_block_flags[0] + flash_cache_index, mapper_prg_bank, flash_block_flags[flash_cache_index] & ~FLASH_AVAILABLE);
-		
+		// flash_code_address + 7 = reserved (leave 0xFF = erased)
+
+		// --- Write code + epilogue to flash ---
+		for (uint8_t i = 0; i < code_index; i++) {
+			flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + i, flash_code_bank, cache_code[0][i]);
+		}
+
+		// Shrink sector allocation to actual size used (avoid wasting space)
+		sector_free_offset[next_free_sector] = (flash_code_address & FLASH_SECTOR_MASK) + BLOCK_HEADER_SIZE + code_index;
+
 #ifdef ENABLE_OPTIMIZER
 		// Notify optimizer that a new unique block was compiled
 		opt_notify_block_compiled();
@@ -663,18 +629,44 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 
 //============================================================================================================
 
-uint16_t flash_cache_select()
+uint8_t flash_sector_alloc(uint8_t total_size)
 {
-	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
-	for (uint16_t i = next_free_block; i < FLASH_CACHE_BLOCKS; i++)
+	// total_size = code + epilogue bytes (header added internally)
+	uint16_t need = (uint16_t)total_size + BLOCK_HEADER_SIZE;
+	
+	uint8_t s = next_free_sector;
+	for (uint8_t i = 0; i < FLASH_CACHE_SECTORS; i++)
 	{
-		if (flash_block_flags[i] & FLASH_AVAILABLE)
+		if (s >= FLASH_CACHE_SECTORS) s = 0;  // wrap without modulo
+		uint16_t cur = sector_free_offset[s];
+		
+		// Align code entry to 16-byte boundary:
+		// header goes at (aligned - BLOCK_HEADER_SIZE), code at aligned
+		uint16_t code_start = (cur + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT_MASK) & ~BLOCK_ALIGNMENT_MASK;
+		uint16_t header_start = code_start - BLOCK_HEADER_SIZE;
+		uint16_t end = code_start + total_size;
+		
+		if (end > FLASH_ERASE_SECTOR_SIZE)
 		{
-			next_free_block = i + 1;
-			return (i + 1);
+			s++;
+			continue;  // doesn't fit in this sector
 		}
+		
+		// Compute bank and address from sector index
+		// Use >>2 and &3 instead of /4 and %4 to avoid 32-bit division
+		uint8_t bank = (s >> 2) + BANK_CODE;
+		uint16_t sector_base = FLASH_BANK_BASE + (uint16_t)(s & 3) * FLASH_ERASE_SECTOR_SIZE;
+		
+		flash_code_bank = bank;
+		flash_code_address = sector_base + header_start;  // points to header start
+		
+		// Advance the free pointer past this allocation
+		sector_free_offset[s] = end;
+		next_free_sector = s;  // start next search here
+		
+		return 1;  // success
 	}
-	return 0;
+	return 0;  // all sectors full
 }	
 
 //============================================================================================================
@@ -693,49 +685,14 @@ uint16_t flash_cache_select()
 // if the cache is full, reservation table is full, or target is not
 // in the bitmap.
 // Must be called from fixed bank context (default section).
+// Reserve a flash block for a target PC.
+// NOTE: Currently disabled (reserve_block_for_pc_safe returns 0).
+// Needs rework for sector-based allocation.
 uint16_t reserve_block_for_pc(uint16_t target_pc)
 {
-	// Check for duplicate: if target_pc is already reserved, return the
-	// existing block.  Multiple blocks can branch/JMP to the same target;
-	// all should use the same reserved block.
-	for (uint8_t i = 0; i < reservation_count; i++)
-	{
-		if (reserved_pc[i] == target_pc)
-			return reserved_block[i] + 1;  // return 1-based
-	}
-
-	// Verify target is in the bitmap (BFS identified it as code).
-	// This guarantees the forward scan will reach it and compile it.
-	{
-		uint16_t byte_offset = target_pc >> 3;
-		uint8_t bit_mask = 1 << (target_pc & 7);
-		extern uint8_t sa_code_bitmap[];
-		uint8_t val = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS,
-		                             (uint16_t)&sa_code_bitmap[0] + byte_offset);
-		if (val & bit_mask)
-			return 0;  // target not in bitmap — can't guarantee compilation
-	}
-
-	if (reservation_count >= MAX_RESERVATIONS)
-		return 0;
-
-	uint16_t block_1based = flash_cache_select();
-	if (!block_1based)
-		return 0;
-	uint16_t block = block_1based - 1;
-
-	// Mark block as used in flash_block_flags
-	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
-	flash_byte_program((uint16_t)&flash_block_flags[0] + block,
-	                   mapper_prg_bank,
-	                   flash_block_flags[block] & ~FLASH_AVAILABLE);
-
-	// Record the reservation (no PC flags — written when block is compiled)
-	reserved_pc[reservation_count] = target_pc;
-	reserved_block[reservation_count] = block;
-	reservation_count++;
-
-	return block_1based;
+	// Reservation system disabled — needs rework for sector-based cache.
+	(void)target_pc;
+	return 0;
 }
 
 // Initialize reservation system. Called once at boot before sa_run.
@@ -811,22 +768,23 @@ uint8_t reserve_block_for_pc_safe(uint16_t target_pc)
 
 void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 {
-	// With metadata, code starts at offset 1 (after length prefix)
+	// Code starts at flash_code_address + BLOCK_PREFIX_SIZE (after header)
 	uint16_t native_addr = flash_code_address + code_address + BLOCK_PREFIX_SIZE;
 	
 	// Guard against flash AND corruption: flash can only clear bits (1→0).
-	// If this PC was already programmed as RECOMPILED (bit 7 clear, non-zero),
-	// reprogramming would AND the old and new values, corrupting both the
-	// native address and the bank/flag byte.  This happens when the same
-	// emulated PC appears in two different compiled blocks (e.g. a conditional
-	// branch merges into a shared instruction).  Skip the update — the
-	// existing entry is still valid.
+	// If this PC slot was already programmed (flag != $FF), reprogramming
+	// would AND the old and new values, corrupting both the native address
+	// and the bank/flag byte.  This happens when the same emulated PC
+	// appears in two different compiled blocks (e.g. a conditional branch
+	// merges into a shared instruction, or the same PC is first INTERPRETED
+	// then RECOMPILED in a later block).  Skip the update — the existing
+	// entry is still valid.
 	uint8_t saved_bank = mapper_prg_bank;
 	bankswitch_prg(pc_jump_flag_bank);
 	uint8_t current_flag = flash_cache_pc_flags[pc_jump_flag_address];
 	bankswitch_prg(saved_bank);
-	if (current_flag != 0xFF && !(current_flag & RECOMPILED))
-		return;  // already a valid RECOMPILED entry — don't corrupt it
+	if (current_flag != 0xFF)
+		return;  // slot already programmed — don't AND-corrupt it
 	
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t)native_addr);
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t)(native_addr >> 8));			
@@ -842,20 +800,33 @@ void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 
 //============================================================================================================
 
-void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
+void setup_flash_pc_tables(uint16_t emulated_pc)
 {
 	uint32_t full_address;
-	//full_address = (block_number * FLASH_CACHE_BLOCK_SIZE);
-	
-	flash_code_bank = (block_number / 0x40) + BANK_CODE ; // 64 blocks per 16KB bank (256 bytes each)
-	flash_code_address = ((block_number % 0x40) << 8) + FLASH_BANK_BASE; // block * 256
-	
 	full_address = (emulated_pc << 1);
 	pc_jump_bank = ((emulated_pc >> 13) + BANK_PC);
-	pc_jump_address = (full_address & FLASH_BANK_MASK);	
+	pc_jump_address = (full_address & FLASH_BANK_MASK);
 
-	lookup_pc_jump_flag(emulated_pc);	
-	//bankswitch_prg((jump_target / FLASH_BANK_SIZE) + BANK_PC);	
+	lookup_pc_jump_flag(emulated_pc);
+}
+
+void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
+{
+	// Legacy: block_number is no longer used for flash address computation.
+	// flash_code_bank and flash_code_address are set by flash_sector_alloc().
+	// This function now only sets up PC table pointers.
+	(void)block_number;
+	setup_flash_pc_tables(emulated_pc);
+}
+
+//============================================================================================================
+
+void flash_cache_init_sectors(void)
+{
+	// Zero the free-pointer table
+	for (uint8_t i = 0; i < FLASH_CACHE_SECTORS; i++)
+		sector_free_offset[i] = 0;
+	next_free_sector = 0;
 }
 
 //============================================================================================================
@@ -868,6 +839,52 @@ static uint8_t invert_branch(uint8_t opcode) {
     return opcode ^ 0x20;  // XOR with 0x20 inverts branch condition
 }
 #endif
+
+//============================================================================================================
+// Intra-block backward branch helper (fixed bank — callable from bank2).
+// If target_pc is within the current block being compiled and conditions
+// are met, emits a native 2-byte backward branch and updates state.
+// Returns 1 if native branch was emitted, 0 if caller should fall through.
+//============================================================================================================
+uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
+{
+	if (block_has_jsr)
+		return 0;
+	
+	uint16_t block_entry = (uint16_t)cache_entry_pc_lo[cache_index]
+	                     | ((uint16_t)cache_entry_pc_hi[cache_index] << 8);
+	
+	if (target_pc < block_entry || target_pc >= pc)
+		return 0;
+	
+	// Look up the target's code_index from the in-block map.
+	// The map is populated during compilation (indexed by guest-PC offset & 0x3F).
+	// Value 0 = no entry (hash collision or out-of-range), otherwise code_index+1.
+	uint8_t ci_slot = (uint8_t)(target_pc - block_entry) & 0x3F;
+	uint8_t ci_val = block_ci_map[ci_slot];
+	if (ci_val == 0)
+		return 0;  // no entry — can't resolve target's code_index
+	uint8_t target_code_index = ci_val - 1;
+	
+	// Compute native branch offset
+	int16_t offset16 = (int16_t)target_code_index - (int16_t)(code_index + 2);
+	
+	if (offset16 < -128 || offset16 > 127)
+		return 0;
+	
+	// Emit native backward branch
+	cache_code[cache_index][code_index+0] = branch_opcode;
+	cache_code[cache_index][code_index+1] = (uint8_t)(int8_t)offset16;
+	
+	setup_flash_address(pc, flash_cache_index);
+	flash_cache_pc_update(code_index, RECOMPILED);
+	
+	pc += 2;
+	code_index += 2;
+	cache_branches++;
+	cache_flag[cache_index] |= READY_FOR_NEXT;
+	return 1;
+}
 
 // ==========================================================================
 // recompile_opcode — moved to bank 2 to save ~6KB of fixed-bank space.
@@ -1136,68 +1153,72 @@ static uint8_t recompile_opcode_b2()
 			}
 			else
 			{
-				// Target IS compiled - check if same flash code bank
-				uint8_t target_code_bank = target_flag & 0x1F;
-				if (target_code_bank != flash_code_bank)
+				// Target IS compiled.
+				//
+				// INTRA-BLOCK BACKWARD BRANCH: if the target is within
+				// this block, emit a native 2-byte branch (fixed-bank helper).
+				if (try_intra_block_branch(target_pc, op_buffer_0))
+					return cache_flag[cache_index];
+				
+				// Non-intra-block backward branch (target outside this block):
+				// exit to dispatcher so NJSR trampoline can check vblank
+				// and the main loop can fire emulated IRQs.
+				//
+				// 16-byte exit-to-dispatcher pattern:
+				//   inverted_branch +14  (skip if NOT taken)
+				//   STA _a               (save A)
+				//   PHP                  (save flags)
+				//   LDA #<target_pc      (set _pc low)
+				//   STA _pc
+				//   LDA #>target_pc      (set _pc high)
+				//   STA _pc+1
+				//   JMP cross_bank_dispatch
+				if ((code_index + 16 + 14) < CODE_SIZE)
 				{
-					// Different bank - cannot direct jump, must interpret
-					branch_wrong_bank++;
-					enable_interpret();
-					// Fall through to emit interpreted branch - don't try to optimize!
+					// +0: Inverted branch +14 (skip 14 bytes to not-taken path at +16)
+					code_ptr[code_index+0] = invert_branch(op_buffer_0);
+					code_ptr[code_index+1] = 14;
+					
+					// +2: STA _a
+					code_ptr[code_index+2] = 0x85;  // STA zp
+					code_ptr[code_index+3] = (uint8_t)((uint16_t)&a);
+					
+					// +4: PHP
+					code_ptr[code_index+4] = 0x08;
+					
+					// +5: LDA #<target_pc
+					code_ptr[code_index+5] = 0xA9;
+					code_ptr[code_index+6] = target_pc & 0xFF;
+					
+					// +7: STA _pc
+					code_ptr[code_index+7] = 0x85;
+					code_ptr[code_index+8] = (uint8_t)((uint16_t)&pc);
+					
+					// +9: LDA #>target_pc
+					code_ptr[code_index+9] = 0xA9;
+					code_ptr[code_index+10] = (target_pc >> 8) & 0xFF;
+					
+					// +11: STA _pc+1
+					code_ptr[code_index+11] = 0x85;
+					code_ptr[code_index+12] = (uint8_t)(((uint16_t)&pc) + 1);
+					
+					// +13: JMP cross_bank_dispatch
+					code_ptr[code_index+13] = 0x4C;
+					code_ptr[code_index+14] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+					code_ptr[code_index+15] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+					
+					// Update PC table
+					setup_flash_address(pc, flash_cache_index);
+					flash_cache_pc_update(code_index, RECOMPILED);
+					
+					pc += 2;
+					code_index += 16;
+					cache_branches++;
+					cache_flag[cache_index] |= READY_FOR_NEXT;
+					return cache_flag[cache_index];
 				}
-				else
-				{
-				
-				// Get target's native address via peek_bank_byte (safe from bank2)
-				uint8_t target_pc_bank = ((target_pc >> 13) + BANK_PC);
-				uint16_t target_pc_addr = ((target_pc << 1) & FLASH_BANK_MASK);
-			uint16_t target_native = peek_bank_byte(target_pc_bank, (uint16_t)&flash_cache_pc[target_pc_addr])
-			                         | (peek_bank_byte(target_pc_bank, (uint16_t)&flash_cache_pc[target_pc_addr + 1]) << 8);
-			
-			// Calculate native branch offset
-			uint16_t current_native = flash_code_address + code_index + 2;
-			int16_t native_offset = (int16_t)(target_native - current_native);
-			
-			// Check if offset fits in signed byte (-128 to +127)
-			if (native_offset >= -128 && native_offset <= 127)
-			{
-				// Emit native branch!
-				code_ptr[code_index] = op_buffer_0;
-				code_ptr[code_index+1] = (uint8_t) native_offset;
-				pc += 2;
-				code_index += 2;
-				cache_branches++;
-				cache_flag[cache_index] |= READY_FOR_NEXT;
-				return cache_flag[cache_index];
-			}
-			
-			// Out of range - just interpret (both V1 and V2)
-			branch_out_of_range++;
-			enable_interpret();
-
-#if 1  // 5-byte pattern - re-enabled with space check fix
-			// V2: Out of range - use inverted branch + JMP pattern
-			// Check space: need 5 bytes + epilogue
-			if ((code_index + 5 + 14) < CODE_SIZE)
-			{
-				// Emit: inverted_branch +3 (skip over JMP)
-				code_ptr[code_index] = invert_branch(op_buffer_0);
-				code_ptr[code_index+1] = 3;
-				
-				// Emit: JMP target_native (target is compiled, we know address)
-				code_ptr[code_index+2] = 0x4C;  // JMP
-				code_ptr[code_index+3] = target_native & 0xFF;
-				code_ptr[code_index+4] = (target_native >> 8) & 0xFF;
-				
-				pc += 2;
-				code_index += 5;
-				cache_branches++;
-				cache_flag[cache_index] |= READY_FOR_NEXT;
-				return cache_flag[cache_index];
-			}
-			// else: not enough space, fall through to interpreted epilogue
-#endif
-				}  // end else (same bank)
+				// else: not enough space, fall through to interpreted epilogue
+				enable_interpret();
 			}  // end else (target is compiled)
 			}  // end else (backward branch)
 		}
@@ -1258,7 +1279,7 @@ static uint8_t recompile_opcode_b2()
 		}
 		
 		case opJSR:
-		{
+		{			
 			// JSR: push return address onto emulated stack, set _pc to target.
 			//
 			// Stack-clean subroutines (no TSX/TXS) use the native JSR template
@@ -1289,6 +1310,7 @@ static uint8_t recompile_opcode_b2()
 				
 				pc += 3;
 				code_index += opcode_6502_njsr_size;
+				block_has_jsr = 1;
 				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}
@@ -1307,6 +1329,7 @@ static uint8_t recompile_opcode_b2()
 				
 				pc += 3;
 				code_index += opcode_6502_jsr_size;
+				block_has_jsr = 1;
 				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}

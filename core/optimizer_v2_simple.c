@@ -38,6 +38,7 @@ extern uint8_t mapper_prg_bank;
 extern uint8_t flash_block_flags[];
 extern uint8_t flash_cache_pc[];
 extern const uint8_t flash_cache_pc_flags[];
+extern uint16_t sector_free_offset[];
 
 // WRAM helper: reads one byte from an arbitrary bank and restores the
 // caller's bank mapping before returning.  Lives in WRAM ($6000-$7FFF)
@@ -56,6 +57,10 @@ extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
 
 // Alignment for direct patching (must be power of 2)
 #define PATCH_ALIGNMENT 16
+
+// First header offset in each sector: code aligned to 16 means header at
+// ((BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(BLOCK_ALIGNMENT - 1)) - BLOCK_HEADER_SIZE = 8
+#define SECTOR_FIRST_HEADER  (((BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(BLOCK_ALIGNMENT - 1)) - BLOCK_HEADER_SIZE)
 
 // Maximum pending patches to track (branches only — epilogues use scan)
 #define MAX_PENDING_PATCHES 32
@@ -135,7 +140,9 @@ void opt2_record_pending_branch_safe(uint16_t branch_offset_addr,
 // CRITICAL: Must NOT be inside bank2 pragma — static variables there
 // land in flash and are read-only at runtime (writes silently ignored).
 // -------------------------------------------------------------------------
-static uint16_t opt2_epilogue_cursor;
+// Sector-based cursor: which sector (0..59) and byte offset within sector.
+static uint8_t opt2_epilogue_sector;
+static uint16_t opt2_epilogue_offset;
 
 //============================================================================
 // Bank 2 implementations
@@ -179,8 +186,13 @@ static void opt2_sweep_pending_patches_b2(void) {
         {
             uint16_t gap = pp_jmp_addr[i] - pp_branch_addr[i];
             if (gap == 3) {  // unconditional (opJMP / epilogue pattern)
-                uint16_t blk_base = pp_jmp_addr[i] & 0xFF00;
-                if (na >= blk_base && na < blk_base + 256) {
+                // Check if target is in the same block as the pattern.
+                // The JMP operand is within the block; a block's max total
+                // size is BLOCK_HEADER_SIZE + CODE_SIZE + EPILOGUE_SIZE +
+                // XBANK_EPILOGUE_SIZE ≈ 258 bytes.  If na is close to the
+                // pattern address, assume it's the same block.
+                uint16_t jmp_addr = pp_jmp_addr[i];
+                if (na >= jmp_addr - 250 && na <= jmp_addr + 8) {
                     i++;
                     continue;
                 }
@@ -225,34 +237,63 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
     uint8_t remaining = EPILOGUE_SCAN_BATCH;
     
     while (remaining--) {
-        if (opt2_epilogue_cursor >= FLASH_CACHE_BLOCKS)
-            opt2_epilogue_cursor = 0;
+        // Wrap around sectors
+        if (opt2_epilogue_sector >= FLASH_CACHE_SECTORS) {
+            opt2_epilogue_sector = 0;
+            opt2_epilogue_offset = SECTOR_FIRST_HEADER;
+        }
         
-        uint16_t block = opt2_epilogue_cursor++;
+        uint8_t sector = opt2_epilogue_sector;
+        uint16_t free_off = sector_free_offset[sector];
         
-        // Check if block is in use (peek from block-flags bank)
-        uint8_t bflag = peek_bank_byte(
-            BANK_FLASH_BLOCK_FLAGS,
-            (uint16_t)&flash_block_flags[block]);
-        if (bflag & FLASH_AVAILABLE)
+        // If this sector is empty or cursor is past allocated data, advance
+        if (free_off == 0 || opt2_epilogue_offset >= free_off) {
+            opt2_epilogue_sector++;
+            opt2_epilogue_offset = SECTOR_FIRST_HEADER;
             continue;
+        }
         
-        // Compute block's flash address and bank
-        uint8_t code_bank = (block >> 6) + BANK_CODE;
-        uint16_t code_base = ((block & 0x3F) << 8) + FLASH_BANK_BASE;
+        // Compute flash bank and base address for this sector
+        // Use >>2 and &3 instead of /4 and %4 to avoid 32-bit division
+        uint8_t code_bank = (sector >> 2) + BANK_CODE;
+        uint16_t sector_base = FLASH_BANK_BASE + (uint16_t)(sector & 3) * FLASH_ERASE_SECTOR_SIZE;
+        uint16_t hdr_addr = sector_base + opt2_epilogue_offset;
         
-        // Read epilogue offset and signature from code bank (via peek)
-        uint8_t off = peek_bank_byte(code_bank, code_base + 255);
-        if (off == 0xFF) continue;
+        // Read block header from flash via peek_bank_byte
+        uint8_t code_len = peek_bank_byte(code_bank, hdr_addr + 4);
+        uint8_t epi_off = peek_bank_byte(code_bank, hdr_addr + 5);
+        
+        // Validate header: code_len must be nonzero and reasonable
+        if (code_len == 0 || code_len == 0xFF) {
+            // Corrupt or unwritten — skip to next sector
+            opt2_epilogue_sector++;
+            opt2_epilogue_offset = 0;
+            continue;
+        }
+        
+        // Advance cursor past this block to next header.
+        // Must mirror flash_sector_alloc's layout: next code_start is
+        // 16-byte aligned after (cur + BLOCK_HEADER_SIZE), then header
+        // sits at code_start - BLOCK_HEADER_SIZE.
+        // cur = opt2_epilogue_offset + BLOCK_HEADER_SIZE + code_len
+        uint16_t cur_end = opt2_epilogue_offset + BLOCK_HEADER_SIZE + code_len;
+        uint16_t next_code = (cur_end + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(uint16_t)(BLOCK_ALIGNMENT - 1);
+        opt2_epilogue_offset = next_code - BLOCK_HEADER_SIZE;
+        
+        // Skip if no valid epilogue offset
+        if (epi_off == 0xFF || epi_off == 0) continue;
+        
+        // Code starts at hdr_addr + BLOCK_HEADER_SIZE
+        uint16_t code_base = hdr_addr + BLOCK_HEADER_SIZE;
         
         // Check if fast-path JMP operand is still unpatched ($FFFF)
-        uint8_t jmp_lo = peek_bank_byte(code_bank, code_base + off + 6);
-        uint8_t jmp_hi = peek_bank_byte(code_bank, code_base + off + 7);
+        uint8_t jmp_lo = peek_bank_byte(code_bank, code_base + epi_off + 6);
+        uint8_t jmp_hi = peek_bank_byte(code_bank, code_base + epi_off + 7);
         if (jmp_lo != 0xFF || jmp_hi != 0xFF) continue;  // already patched
         
-        // Read exit_pc from embedded LDA immediates at +11 and +15
-        uint16_t exit_pc = peek_bank_byte(code_bank, code_base + off + 11)
-                | ((uint16_t)peek_bank_byte(code_bank, code_base + off + 15) << 8);
+        // Read exit_pc from header (+2, +3)
+        uint16_t exit_pc = peek_bank_byte(code_bank, hdr_addr + 2)
+                | ((uint16_t)peek_bank_byte(code_bank, hdr_addr + 3) << 8);
         
         // Check if exit_pc is compiled (peek from PC_FLAGS bank)
         uint8_t flag = peek_bank_byte(
@@ -270,28 +311,27 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
         // unconditional (CLC+BCC always taken), so patching it to jump back
         // into the same block creates a tight infinite loop that never returns
         // to the dispatcher (preventing interrupt handling and timing updates).
-        // Let self-referencing blocks go through the regular path instead.
-        if (na >= code_base && na < code_base + 256) continue;
+        if (na >= code_base && na < code_base + code_len) continue;
         
         uint8_t target_bank = flag & 0x1F;
         
         if (target_bank == code_bank) {
             // Same-bank: patch fast-path JMP directly to native address
             // BCC offset 4→0 activates fast path: PLP / JMP native_addr
-            flash_byte_program(code_base + off + 3, code_bank, 0);
-            flash_byte_program(code_base + off + 6, code_bank, na & 0xFF);
-            flash_byte_program(code_base + off + 7, code_bank, (na >> 8) & 0xFF);
+            flash_byte_program(code_base + epi_off + 3, code_bank, 0);
+            flash_byte_program(code_base + epi_off + 6, code_bank, na & 0xFF);
+            flash_byte_program(code_base + epi_off + 7, code_bank, (na >> 8) & 0xFF);
         } else {
             // Cross-bank: patch fast-path JMP to +21 (xbank setup code),
             // then patch the three LDA immediates in the setup code:
             //   +25 = target addr lo, +30 = target addr hi, +35 = target bank
-            uint16_t setup_addr = code_base + off + 21;
-            flash_byte_program(code_base + off + 3, code_bank, 0);
-            flash_byte_program(code_base + off + 6, code_bank, setup_addr & 0xFF);
-            flash_byte_program(code_base + off + 7, code_bank, (setup_addr >> 8) & 0xFF);
-            flash_byte_program(code_base + off + 25, code_bank, na & 0xFF);
-            flash_byte_program(code_base + off + 30, code_bank, (na >> 8) & 0xFF);
-            flash_byte_program(code_base + off + 35, code_bank, target_bank);
+            uint16_t setup_addr = code_base + epi_off + 21;
+            flash_byte_program(code_base + epi_off + 3, code_bank, 0);
+            flash_byte_program(code_base + epi_off + 6, code_bank, setup_addr & 0xFF);
+            flash_byte_program(code_base + epi_off + 7, code_bank, (setup_addr >> 8) & 0xFF);
+            flash_byte_program(code_base + epi_off + 25, code_bank, na & 0xFF);
+            flash_byte_program(code_base + epi_off + 30, code_bank, (na >> 8) & 0xFF);
+            flash_byte_program(code_base + epi_off + 35, code_bank, target_bank);
         }
         opt2_stat_direct++;
     }
@@ -348,4 +388,6 @@ void opt2_reset(void) {
     opt2_stat_total = 0;
     opt2_stat_direct = 0;
     opt2_stat_pending = 0;
+    opt2_epilogue_sector = 0;
+    opt2_epilogue_offset = SECTOR_FIRST_HEADER;
 }

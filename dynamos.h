@@ -5,15 +5,22 @@
 
 #define	BLOCK_COUNT 8
 
-// Block layout:
-// +0: code_len (1 byte) - if OPT_BLOCK_METADATA
-// +1: native code (variable)
-// +N: epilogue (14 or 21 bytes)
-// +N+14/21: metadata - if OPT_BLOCK_METADATA
-//   exit_pc (2 bytes)
-//   cycle_count (2 bytes) - if OPT_TRACK_CYCLES  
-//   branch_count (1 byte)
-//   branches[] (3 bytes each: offset, target_lo, target_hi)
+// Free-form flash code cache layout:
+//
+// Each compiled block is stored contiguously in a 4KB flash sector:
+//   [header (8 bytes)] [native code (variable)] [epilogue (21+18 bytes)]
+//
+// Block header (block_header_t, 8 bytes):
+//   +0: entry_pc   (2B) - guest PC at block start
+//   +2: exit_pc    (2B) - guest PC at block end
+//   +4: code_len   (1B) - total bytes of native code + epilogue
+//   +5: epilogue_offset (1B) - offset from code start to patchable epilogue
+//   +6: flags      (1B) - reserved for future use
+//   +7: reserved   (1B) - pad to 8 bytes
+//
+// PC table entries point past the header to native code start.
+// Code entry points are aligned to 16-byte boundaries.
+// Header starts at (aligned_addr - BLOCK_HEADER_SIZE).
 //
 // Patchable epilogue layout (21 bytes, ENABLE_PATCHABLE_EPILOGUE):
 //   +0: PHP           ; 1B  save flags
@@ -30,9 +37,6 @@
 //
 // Patching: BCC offset 4→0 (clear bits ✓), JMP $FFFF→$XXYY (clear bits ✓)
 // Fast path cost: PHP+CLC+BCC+PLP+JMP = 15 cycles (vs ~130 for full dispatch)
-//
-// Byte 255 of each block stores the epilogue start offset (0..~229).
-// $FF = no patchable epilogue.  Used by opt2_scan_and_patch_epilogues().
 
 #ifdef ENABLE_PATCHABLE_EPILOGUE
 #define EPILOGUE_SIZE 21
@@ -40,13 +44,21 @@
 #define EPILOGUE_SIZE 14
 #endif
 
-#if OPT_BLOCK_METADATA
-#define BLOCK_PREFIX_SIZE 1 // 1 byte for code length
-#define CODE_SIZE (256 - BLOCK_PREFIX_SIZE - EPILOGUE_SIZE - 16) // room for prefix + epilogue + metadata
-#else
-#define BLOCK_PREFIX_SIZE 0
-#define CODE_SIZE (256 - EPILOGUE_SIZE - 6) // room for epilogue + safety margin
-#endif
+// XBANK epilogue stub size (cross-bank fast-path setup)
+#define XBANK_EPILOGUE_SIZE 18
+
+// Block header size (must match block_header_t in core/cache.h)
+#define BLOCK_HEADER_SIZE 8
+
+// Code entry point alignment (16 bytes)
+#define BLOCK_ALIGNMENT      16
+#define BLOCK_ALIGNMENT_MASK (BLOCK_ALIGNMENT - 1)
+
+// Block prefix = header size (PC table points past header to code)
+#define BLOCK_PREFIX_SIZE BLOCK_HEADER_SIZE
+
+// Max native code per block (keep staging buffer <= 256 for now)
+#define CODE_SIZE (256 - EPILOGUE_SIZE - XBANK_EPILOGUE_SIZE - 6)
 
 #define CACHE_L1_CODE_SIZE 256
 
@@ -63,15 +75,16 @@
 #define READY_FOR_NEXT	32
 
 #define FLASH_CACHE_MEMORY_SIZE	0x3C000
-#define FLASH_CACHE_BLOCK_SIZE	0x100
 #define	FLASH_ERASE_SECTOR_SIZE	0x1000
 #define FLASH_BANK_BASE			0x8000
 #define FLASH_BANK_SIZE			0x4000
 #define FLASH_BANK_MASK			0x3FFF
-#define FLASH_CACHE_BLOCKS		(FLASH_CACHE_MEMORY_SIZE / FLASH_CACHE_BLOCK_SIZE)
 #define FLASH_CACHE_BANKS		(FLASH_CACHE_MEMORY_SIZE / FLASH_BANK_SIZE)
 
-#define BLOCK_CONFIG_BASE 250
+// Sector-based allocation (from cache.h)
+#define FLASH_SECTORS_PER_BANK    (FLASH_BANK_SIZE / FLASH_ERASE_SECTOR_SIZE)
+#define FLASH_CACHE_SECTORS       (FLASH_CACHE_BANKS * FLASH_SECTORS_PER_BANK)
+#define FLASH_SECTOR_MASK         0x0FFF
 
 #define FLASH_AVAILABLE		0x01
 
@@ -191,9 +204,11 @@ extern const uint8_t flash_cache_pc_flags[];
 uint8_t recompile_opcode();
 void cache_bit_enable(uint16_t addr);
 uint8_t cache_bit_check(uint16_t addr);
-uint16_t flash_cache_select();
+uint8_t flash_sector_alloc(uint8_t total_size);  // allocate space in a sector; sets flash_code_bank/address
 void flash_cache_pc_update(uint8_t code_address, uint8_t flags);
-void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
+void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);  // legacy, kept for PC-table side
+void setup_flash_pc_tables(uint16_t emulated_pc);  // set up PC table pointers only
+void flash_cache_init_sectors(void);  // erase code cache sectors, zero free-pointer table
 uint8_t flash_cache_search(uint16_t emulated_pc);
 
 // Block reservation API for eager allocation

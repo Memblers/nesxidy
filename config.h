@@ -11,7 +11,20 @@
 // Disable to eliminate per-frame overhead when not debugging.
 //#define ENABLE_DEBUG_STATS
 
+// Block cycle counting — pre-compute 6502 cycle count per JIT block
+// and add to clockticks6502 at dispatch time.  Provides accurate-enough
+// frame timing without per-instruction overhead.  Cycle count is stored
+// in block header byte +6 (uint8_t, max 255).  Over-counts when a
+// branch exits the block early (acceptable approximation).
+#define ENABLE_BLOCK_CYCLES
+
+// TRACK_TICKS: enable cycle-based frame timing.  Auto-enabled by
+// ENABLE_BLOCK_CYCLES.  Can also be enabled standalone for interpreter.
+#ifdef ENABLE_BLOCK_CYCLES
+#define TRACK_TICKS
+#else
 //#define TRACK_TICKS	//disable this to stop tracking run clock cycles
+#endif
 
 // Normal build (linking + optimizer enabled)
 #define ENABLE_LINKING

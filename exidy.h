@@ -7,11 +7,22 @@
 // ******************************************************************************************
 
 #ifndef TRACK_TICKS
-#define FRAME_LENGTH	(const uint16_t) ((705562 / 59.996811) / 4)	// estimate number of instructions
+#define FRAME_LENGTH	(const uint16_t) ((705562 / 59.996811) / 24)	// estimate number of instructions
 //#define FRAME_LENGTH	(const uint16_t) ((705562 / 59.996811) / 4)	// estimate number of instructions
 #else
 #define FRAME_LENGTH	(const uint16_t) (705562 / 59.996811)
 #endif
+
+// Dispatch overhead compensation: each main-loop dispatch (run_6502 call)
+// costs ~200+ real NES CPU cycles in C overhead, dispatch_on_pc assembly,
+// bank switching, etc.  But the guest cycle counter only advances by the
+// emulated instruction count (~3-7 cycles for a tight loop iteration).
+// This constant adds extra guest-equivalent cycles per dispatch so that
+// busy-wait delay loops (DEX;BNE, DEC zp;BNE) consume their correct
+// proportion of frame time instead of running 40-100x slower than real
+// hardware.  Tuned so a 65536-iteration delay loop takes ~4 seconds
+// (matching the ~4.3s on real Exidy hardware at 705 kHz).
+#define DISPATCH_OVERHEAD	80
 
 #define TARG_1START 1
 #define TARG_2START 2

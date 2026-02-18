@@ -217,8 +217,6 @@ int main(void)
 #endif
 	flash_cache_init_sectors();
 	
-	// Reservation system disabled — init_reservations() removed.
-	
 #ifdef ENABLE_OPTIMIZER
 	// Initialize optimizer with debug thresholds
 	// Requires OPT_MIN_BLOCKS_DEBUG unique blocks before optimizer can run

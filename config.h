@@ -16,7 +16,7 @@
 // frame timing without per-instruction overhead.  Cycle count is stored
 // in block header byte +6 (uint8_t, max 255).  Over-counts when a
 // branch exits the block early (acceptable approximation).
-#define ENABLE_BLOCK_CYCLES
+//#define ENABLE_BLOCK_CYCLES
 
 // TRACK_TICKS: enable cycle-based frame timing.  Auto-enabled by
 // ENABLE_BLOCK_CYCLES.  Can also be enabled standalone for interpreter.
@@ -60,7 +60,7 @@
 // When disabled (default), zpx/zpy are compiled as absolute indexed (absx/absy),
 // which is faster but won't wrap at the zero page boundary.
 // Most games don't rely on ZP index wrapping, so leaving this off is usually safe.
-#define ENABLE_ZP_INDEX_WRAP
+//#define ENABLE_ZP_INDEX_WRAP
 
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)

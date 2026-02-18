@@ -74,7 +74,7 @@
 #define BRANCH_LINKED	16
 #define READY_FOR_NEXT	32
 
-#define FLASH_CACHE_MEMORY_SIZE	0x3C000
+#define FLASH_CACHE_MEMORY_SIZE	0x38000
 #define	FLASH_ERASE_SECTOR_SIZE	0x1000
 #define FLASH_BANK_BASE			0x8000
 #define FLASH_BANK_SIZE			0x4000
@@ -95,6 +95,7 @@
 
 #define BANK_FLASH_BLOCK_FLAGS	3
 #define BANK_CODE		4
+#define BANK_ENTRY_LIST	18	// Two-pass: block entry list (8B per entry)
 #define	BANK_PC			19
 #define BANK_PC_FLAGS	27
 
@@ -211,17 +212,36 @@ void setup_flash_pc_tables(uint16_t emulated_pc);  // set up PC table pointers o
 void flash_cache_init_sectors(void);  // erase code cache sectors, zero free-pointer table
 uint8_t flash_cache_search(uint16_t emulated_pc);
 
-// Block reservation API for eager allocation
-#define MAX_RESERVATIONS 32
-extern uint16_t reserved_pc[];
-extern uint16_t reserved_block[];
-extern uint8_t reservation_count;
-extern uint8_t reservations_enabled;
-uint16_t reserve_block_for_pc(uint16_t target_pc);
-int16_t consume_reservation(uint16_t target_pc);
-uint8_t reserve_block_for_pc_safe(uint16_t target_pc);
+// Static compilation pass flag (0=dynamic/pass1, 2=pass2-emit-with-knowledge)
+extern uint8_t sa_compile_pass;
+
+// Pass 2: forced exit PC for the current block being compiled.
+// When sa_compile_pass==2 and pc >= sa_block_exit_pc, the compile loop
+// forces block termination to match pass 1's block boundaries.
+extern uint16_t sa_block_exit_pc;
+
+// Entry list write cursor (offset within BANK_ENTRY_LIST, in bytes).
+// 8 bytes per entry: entry_pc(2), exit_pc(2), native_addr(2), bank(1), code_len(1).
+extern uint16_t entry_list_offset;
+
+// Pass 2: allocation size for the current block (set from entry list's code_len).
+// sa_compile_one_block uses this instead of max-size in pass 2.
+extern uint8_t sa_block_alloc_size;
+
+// Native address lookup result globals (set by lookup_native_addr_safe / lookup_entry_list)
 extern uint16_t reserve_result_addr;
 extern uint8_t  reserve_result_bank;
+
+// Look up the native address for a compiled PC.
+// On success, sets reserve_result_addr and reserve_result_bank, returns 1.
+// Returns 0 if target not compiled.  Safe to call from bank2.
+uint8_t lookup_native_addr_safe(uint16_t target_pc);
+
+// Look up a block entry point in the two-pass entry list (BANK_ENTRY_LIST).
+// Only finds block ENTRY PCs (code_index=0), not mid-block instructions.
+// On success, sets reserve_result_addr and reserve_result_bank, returns 1.
+// Safe to call from bank2.  Used in pass 2 for forward branch resolution.
+uint8_t lookup_entry_list(uint16_t target_pc);
 
 enum 6502op
 {

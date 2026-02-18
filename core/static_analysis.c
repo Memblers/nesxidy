@@ -557,6 +557,27 @@ static void sa_compile_b2(void)
 
 uint16_t sa_blocks_total = 0;
 
+// -------------------------------------------------------------------------
+// sa_compile_one_block — compile a single block to flash.
+//
+// Pass 1 (sa_compile_pass == 0):
+//   Compile to RAM buffer.  Allocate a max-size flash slot.  Write PC
+//   table entries (needed for backward branch resolution within pass 1).
+//   Do NOT write code to flash.  Forward branches use 21-byte patchable
+//   template (pessimistic size).  After return, caller records the entry
+//   in the entry list (entry_pc, exit_pc, native_addr, bank, code_len).
+//
+// Pass 2 (sa_compile_pass == 2):
+//   Recompile with full knowledge of all block entry addresses (via
+//   lookup_entry_list).  Allocates max-size (same as pass 1) to keep
+//   sector-skip decisions identical.  Forward branches can now use
+//   2-byte native branches or 5-byte direct JMP for same-bank targets.
+//   Write code + header to flash.  Write PC tables fresh (they were
+//   erased between passes).  Block termination is forced at
+//   sa_block_exit_pc to match pass 1's block boundaries.
+//
+// Returns 1 if a block was processed, 0 if cache full.
+// -------------------------------------------------------------------------
 static uint8_t sa_compile_one_block(void)
 {
 #ifdef ENABLE_COMPILE_PPU_EFFECT
@@ -567,9 +588,30 @@ static uint8_t sa_compile_one_block(void)
 #endif
 
     // Allocate space in a flash sector for max-size block.
-    // flash_sector_alloc sets flash_code_bank and flash_code_address (header start).
+    // BOTH passes use max-size so that flash_sector_alloc makes identical
+    // sector-skip decisions.  This guarantees every block lands at the
+    // same flash address in both passes, keeping entry list native_addr
+    // values correct.  The wasted space per block is reclaimed after
+    // pass 2 by a sector compaction sweep.
+    //
+    // Allocate space in a flash sector for max-size block.
+    // BOTH passes use max-size so that flash_sector_alloc makes identical
+    // sector-skip decisions, keeping entry list native_addr values correct.
+    //
+    // Save allocator state to undo if the block produces no code (rare:
+    // first instruction is interpreted).  Empty blocks must not appear in
+    // the entry list or consume flash, or pass 1/2 addresses will diverge.
+    extern uint16_t sector_free_offset[];
+    extern uint8_t next_free_sector;
+    uint8_t pre_alloc_next_free = next_free_sector;
+
     if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
         return 0;           // cache full
+
+    // For undo: restore allocated sector's free pointer to header_start
+    // (conservative — may waste a few alignment bytes, but correct).
+    uint8_t alloc_sector = next_free_sector;
+    uint16_t undo_free_offset = flash_code_address & FLASH_SECTOR_MASK;
 
     uint16_t entry_pc = pc;
 
@@ -606,10 +648,15 @@ static uint8_t sa_compile_one_block(void)
         uint8_t instr_len = code_index - code_index_old;
 
         setup_flash_pc_tables(pc_old);
-        for (uint8_t i = 0; i < instr_len; i++)
+
+        if (sa_compile_pass == 2)
         {
-            flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index_old + i,
-                               flash_code_bank, cache_code[0][code_index_old + i]);
+            // Pass 2: write code bytes to flash immediately
+            for (uint8_t i = 0; i < instr_len; i++)
+            {
+                flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index_old + i,
+                                   flash_code_bank, cache_code[0][code_index_old + i]);
+            }
         }
 
         if (code_index > (CODE_SIZE - 6))
@@ -618,21 +665,44 @@ static uint8_t sa_compile_one_block(void)
             cache_flag[0] &= ~READY_FOR_NEXT;
         }
 
+        // Pass 2: force block termination at the same exit_pc as pass 1.
+        // This prevents block boundary drift when shorter forward branches
+        // leave more room in the code buffer.
+        if (sa_compile_pass == 2 && pc >= sa_block_exit_pc)
+        {
+            cache_flag[0] &= ~READY_FOR_NEXT;
+        }
+
         if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
+        {
             flash_cache_pc_update(code_index_old, INTERPRETED);
+        }
         else if (instr_len || pc != pc_old)
         {
             flash_cache_pc_update(code_index_old, RECOMPILED);
+
 #ifdef ENABLE_OPTIMIZER_V2
-            opt2_notify_block_compiled(pc_old,
-                flash_code_address + BLOCK_HEADER_SIZE + code_index_old,
-                flash_code_bank);
+            if (sa_compile_pass == 2)
+            {
+                opt2_notify_block_compiled(pc_old,
+                    flash_code_address + BLOCK_HEADER_SIZE + code_index_old,
+                    flash_code_bank);
+            }
 #endif
         }
 
     } while (cache_flag[0] & READY_FOR_NEXT);
 
-    if (code_index)
+    if (code_index == 0)
+    {
+        // Block produced no native code (first instruction was interpreted).
+        // Undo the flash allocation so the empty slot doesn't consume space
+        // or cause address divergence between passes.
+        sector_free_offset[alloc_sector] = undo_free_offset;
+        next_free_sector = pre_alloc_next_free;
+        return 1;  // success (block handled as interpreted), but no entry
+    }
+
     {
         uint16_t exit_pc = pc;
         uint8_t epilogue_start = code_index;
@@ -695,24 +765,25 @@ static uint8_t sa_compile_one_block(void)
         cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 #endif
 
-        // --- Write block header to flash ---
-        flash_byte_program(flash_code_address + 0, flash_code_bank, (uint8_t)entry_pc);
-        flash_byte_program(flash_code_address + 1, flash_code_bank, (uint8_t)(entry_pc >> 8));
-        flash_byte_program(flash_code_address + 2, flash_code_bank, (uint8_t)exit_pc);
-        flash_byte_program(flash_code_address + 3, flash_code_bank, (uint8_t)(exit_pc >> 8));
-        flash_byte_program(flash_code_address + 4, flash_code_bank, code_index);  // code_len
-        flash_byte_program(flash_code_address + 5, flash_code_bank, epilogue_start);  // epilogue_offset
-        // +6 flags, +7 reserved: leave as 0xFF (erased)
-
-        // --- Write code + epilogue to flash ---
-        for (uint8_t i = epilogue_start; i < code_index; i++)
+        if (sa_compile_pass == 2)
         {
-            flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + i,
-                               flash_code_bank, cache_code[0][i]);
+            // Pass 2: write header + epilogue to flash
+            flash_byte_program(flash_code_address + 0, flash_code_bank, (uint8_t)entry_pc);
+            flash_byte_program(flash_code_address + 1, flash_code_bank, (uint8_t)(entry_pc >> 8));
+            flash_byte_program(flash_code_address + 2, flash_code_bank, (uint8_t)exit_pc);
+            flash_byte_program(flash_code_address + 3, flash_code_bank, (uint8_t)(exit_pc >> 8));
+            flash_byte_program(flash_code_address + 4, flash_code_bank, code_index);
+            flash_byte_program(flash_code_address + 5, flash_code_bank, epilogue_start);
+
+            for (uint8_t i = epilogue_start; i < code_index; i++)
+            {
+                flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + i,
+                                   flash_code_bank, cache_code[0][i]);
+            }
         }
 
-        // Shrink sector allocation to actual size used (avoid wasting space)
-        sector_free_offset[next_free_sector] = (flash_code_address & FLASH_SECTOR_MASK) + BLOCK_HEADER_SIZE + code_index;
+        // After pass 2, a sector compaction sweep reclaims the wasted
+        // space by scanning block headers and adjusting sector_free_offset.
     }
 
     return 1;
@@ -898,6 +969,21 @@ static void sa_analyze_all_subroutines(void)
 
 // -------------------------------------------------------------------------
 // Main entry point — fixed-bank trampoline
+//
+// Two-pass static compilation:
+//   Pass 1 (allocate): Scan bitmap, allocate max-size flash slots for
+//     every block entry, write PC table entries.  No code emitted.
+//     This establishes every block's native address in the PC tables.
+//   Between passes: Erase code sectors (banks 4-18).  Reset allocator.
+//     PC tables (banks 19-30) survive — they're in different sectors.
+//   Pass 2 (emit): Recompile every block.  Now all native addresses are
+//     known, so forward branches can use 2-byte native branches (when
+//     in ±127 range) or 5-byte direct JMP (same bank).  Write code +
+//     headers to flash.  Shrink allocations.
+//
+// Dynamic recompiler (run_6502) is unaffected — sa_compile_pass==0
+// during runtime, so forward branches still use 21-byte patchable
+// templates that opt2 patches post-compile.
 // -------------------------------------------------------------------------
 
 void sa_run(void)
@@ -923,67 +1009,197 @@ void sa_run(void)
     sa_analyze_all_subroutines();
 
 #ifdef ENABLE_STATIC_COMPILE
-    // Batch compilation: scan bitmap from fixed bank, compile each hit.
-    // All bitmap/flag reads use peek_bank_byte (WRAM helper), so this
-    // runs entirely from the fixed bank — no bank2 trampoline needed.
-    // Reservation system disabled — no reservation list to check.
+    // =====================================================================
+    // Two-pass static compilation with entry list.
+    //
+    // Architecture overview:
+    //   Bank 18 (BANK_ENTRY_LIST) holds a sequential table of 8-byte entries
+    //   written during pass 1.  Each entry records: entry_pc, exit_pc,
+    //   native_addr (code_index=0), code_bank, and code_len.  Pass 2
+    //   iterates this list (not the bitmap) to find block entry points and
+    //   uses lookup_entry_list() for forward branch resolution.
+    //
+    //   Between passes, ALL code sectors (4-17), PC address sectors (19-26),
+    //   and PC flag sectors (27-30) are erased.  Only the entry list (bank 18)
+    //   and the SA metadata (bank 3) survive.  Pass 2 rewrites everything
+    //   fresh, with correct code_index values for the final native layout.
+    //
+    // Why this works:
+    //   - Both passes allocate max-size (258 bytes) in the same bitmap
+    //     order, so flash_sector_alloc makes identical sector-skip
+    //     decisions and returns identical addresses.
+    //   - Pass 2 forces block termination at pass 1's exit_pc, so block
+    //     boundaries match even when forward branches produce shorter code.
+    //   - Entry list stores code_index=0 native addresses, which are stable
+    //     between passes (flash_code_address + BLOCK_PREFIX_SIZE).
+    //   - After pass 2, a sector compaction sweep reclaims wasted space
+    //     by reading block headers and adjusting sector_free_offset.
+    // =====================================================================
+
+    // --- Erase entry list bank before pass 1 ---
+    for (uint16_t sector = FLASH_BANK_BASE; sector < FLASH_BANK_BASE + FLASH_BANK_SIZE; sector += FLASH_ERASE_SECTOR_SIZE)
+        flash_sector_erase(sector, BANK_ENTRY_LIST);
+    entry_list_offset = 0;
+
+    // =====================================================================
+    // PASS 1: Compile to RAM, allocate flash slots, populate PC tables,
+    //         and build the entry list.
+    //
+    // For each bitmap-marked code address that hasn't been processed yet,
+    // compile the block to the RAM buffer (no flash writes).  This:
+    //   1. Discovers block boundaries — the compile loop sets PC flags for
+    //      EVERY instruction within the block, so subsequent bitmap entries
+    //      that fall mid-block see flag != 0xFF and are skipped.
+    //   2. Populates PC tables — needed for backward branch resolution
+    //      within pass 1 itself (lookup_native_addr_safe).
+    //   3. Records each block's entry_pc, exit_pc, native_addr, and bank
+    //      in the entry list for pass 2 to iterate.
+    // =====================================================================
+    sa_compile_pass = 0;
+    sa_blocks_total = 0;
+
     for (uint16_t scan_cursor = ROM_ADDR_MIN; scan_cursor <= ROM_ADDR_MAX; scan_cursor++)
     {
-        // Check bitmap: is this address known code?
         if (sa_bitmap_is_unknown(scan_cursor))
             continue;
 
-        // Check PC flags: already compiled or interpreted?
+        // Check PC flags: already handled?  The compile loop in
+        // sa_compile_one_block sets flags for every instruction within
+        // a block, so mid-block addresses are auto-skipped here.
         uint8_t flag = peek_bank_byte(
             (scan_cursor >> 14) + BANK_PC_FLAGS,
             (uint16_t)&flash_cache_pc_flags[scan_cursor & FLASH_BANK_MASK]);
         if (flag != 0xFF)
-            continue;   // already handled
+            continue;
 
-        // Compile this address
+        // Compile block to RAM (no flash writes when sa_compile_pass==0).
+        // This allocates a max-size flash slot and updates PC tables for
+        // all instructions within the block.
         pc = scan_cursor;
         if (!sa_compile_one_block())
-            break;              // cache full
+            break;  // cache full
+
+        // Record block in entry list: entry_pc, exit_pc, native_addr, bank, code_len.
+        // After sa_compile_one_block returns:
+        //   pc = exit_pc (guest PC after last compiled instruction)
+        //   flash_code_address = allocated slot address (set by flash_sector_alloc)
+        //   flash_code_bank = allocated bank
+        //   code_index = total bytes (code + epilogue)
+        //
+        // Skip blocks with code_index==0 — these are "interpreted" entries
+        // (first instruction hit enable_interpret()).  They have PC flags
+        // set but no native code.  Recording them would create entry list
+        // entries pointing to unwritten flash, causing JMP-to-BRK crashes.
+        if (code_index > 0)
+        {
+            uint16_t entry_native = flash_code_address + BLOCK_PREFIX_SIZE;
+            uint16_t addr = FLASH_BANK_BASE + entry_list_offset;
+            flash_byte_program(addr + 0, BANK_ENTRY_LIST, (uint8_t)scan_cursor);
+            flash_byte_program(addr + 1, BANK_ENTRY_LIST, (uint8_t)(scan_cursor >> 8));
+            flash_byte_program(addr + 2, BANK_ENTRY_LIST, (uint8_t)pc);       // exit_pc lo
+            flash_byte_program(addr + 3, BANK_ENTRY_LIST, (uint8_t)(pc >> 8)); // exit_pc hi
+            flash_byte_program(addr + 4, BANK_ENTRY_LIST, (uint8_t)entry_native);
+            flash_byte_program(addr + 5, BANK_ENTRY_LIST, (uint8_t)(entry_native >> 8));
+            flash_byte_program(addr + 6, BANK_ENTRY_LIST, flash_code_bank);
+            flash_byte_program(addr + 7, BANK_ENTRY_LIST, code_index);  // code_len
+            entry_list_offset += 8;
+        }
+
         sa_blocks_total++;
+    }
+
+    // =====================================================================
+    // Between passes: erase code sectors + PC table sectors, reset allocator.
+    //
+    // Code banks 4-17 (14 banks, 56 sectors): erased so pass 2 can
+    //   rewrite code with correct branch encodings.
+    // PC address banks 19-26 (8 banks, 32 sectors): erased because
+    //   mid-block code_index values shift when pass 2 uses shorter branches.
+    //   flash_cache_pc_update's AND-corruption guard requires erased (0xFF)
+    //   flag bytes before writing.
+    // PC flag banks 27-30 (4 banks, 16 sectors): erased for the same
+    //   reason — pass 2 rewrites all PC flags fresh.
+    //
+    // Entry list (bank 18) survives.  SA metadata (bank 3) survives.
+    // =====================================================================
+
+    // Erase code sectors
+    for (uint8_t bank = BANK_CODE; bank < BANK_CODE + FLASH_CACHE_BANKS; bank++)
+    {
+        for (uint16_t sector = FLASH_BANK_BASE; sector < FLASH_BANK_BASE + FLASH_BANK_SIZE; sector += FLASH_ERASE_SECTOR_SIZE)
+            flash_sector_erase(sector, bank);
+    }
+
+    // Erase PC address sectors (banks 19-26)
+    for (uint8_t bank = BANK_PC; bank < BANK_PC + 8; bank++)
+    {
+        for (uint16_t sector = FLASH_BANK_BASE; sector < FLASH_BANK_BASE + FLASH_BANK_SIZE; sector += FLASH_ERASE_SECTOR_SIZE)
+            flash_sector_erase(sector, bank);
+    }
+
+    // Erase PC flag sectors (banks 27-30)
+    for (uint8_t bank = BANK_PC_FLAGS; bank < BANK_PC_FLAGS + 4; bank++)
+    {
+        for (uint16_t sector = FLASH_BANK_BASE; sector < FLASH_BANK_BASE + FLASH_BANK_SIZE; sector += FLASH_ERASE_SECTOR_SIZE)
+            flash_sector_erase(sector, bank);
+    }
+
+    flash_cache_init_sectors();
+
+    // =====================================================================
+    // PASS 2: Recompile with full knowledge of all block entry addresses.
+    //
+    // Iterates the entry list (not the bitmap).  For each block:
+    //   - Sets sa_block_exit_pc so the compile loop terminates at the
+    //     same guest PC as pass 1 (prevents block boundary drift when
+    //     shorter forward branches leave more room in the code buffer).
+    //   - sa_compile_pass==2 tells recompile_opcode_b2() to use
+    //     lookup_entry_list() for forward branches, emitting 2-byte
+    //     native branches or 5-byte Bxx_inv+JMP where possible.
+    //   - Writes code + headers to flash.  Writes PC tables fresh.
+    //
+    // Allocation uses max-size (same as pass 1) so blocks land at the
+    // SAME flash addresses — the entry list's native_addr values remain
+    // correct.
+    // =====================================================================
+    sa_compile_pass = 2;
+
+    for (uint16_t i = 0; i < entry_list_offset; i += 8)
+    {
+        // Read entry from the list
+        uint16_t addr = FLASH_BANK_BASE + i;
+        uint8_t  ep_lo = peek_bank_byte(BANK_ENTRY_LIST, addr + 0);
+        uint8_t  ep_hi = peek_bank_byte(BANK_ENTRY_LIST, addr + 1);
+        uint8_t  ex_lo = peek_bank_byte(BANK_ENTRY_LIST, addr + 2);
+        uint8_t  ex_hi = peek_bank_byte(BANK_ENTRY_LIST, addr + 3);
+
+        if (ep_lo == 0xFF && ep_hi == 0xFF)
+            break;  // end sentinel
+
+        uint16_t entry_pc_val = ep_lo | ((uint16_t)ep_hi << 8);
+        sa_block_exit_pc = ex_lo | ((uint16_t)ex_hi << 8);
+
+        pc = entry_pc_val;
+        if (!sa_compile_one_block())
+            break;  // cache full
 
 #ifdef ENABLE_OPTIMIZER_V2
-        // Periodic sweep: drain pending-branch queue only.
-        // This is safe — each block is fully compiled (code + epilogue +
-        // flags) before we get here.  We MUST drain periodically because
-        // the queue is only 32 entries and batch compile generates many
-        // branches.
-        //
-        // Epilogue scanning is deliberately NOT done here.  The epilogue
-        // scanner patches the BCC offset (4→0) to enable the fast-JMP
-        // path.  During batch compile this caused corrupt graphics —
-        // likely because the scanner's static cursor and batch-size
-        // interact poorly with partially-filled flash banks.  The final
-        // full epilogue sweep after the loop is sufficient.
-        static uint8_t sa_blocks_compiled = 0;
-        if (++sa_blocks_compiled >= 4)
+        // Periodic sweep: drain pending-branch queue (for any cross-bank
+        // forward branches that fell through to the 21-byte template).
         {
-            sa_blocks_compiled = 0;
-            opt2_sweep_pending_patches();
+            static uint8_t sa_blocks_compiled = 0;
+            if (++sa_blocks_compiled >= 4)
+            {
+                sa_blocks_compiled = 0;
+                opt2_sweep_pending_patches();
+            }
         }
 #endif
     }
 
-    // Disable new reservations before draining — compiling a drained
-    // block's branches/JMPs would otherwise create more reservations,
-    // cascading until all flash blocks are consumed.
-    reservations_enabled = 0;
-
-    // Drain any unfulfilled reservations.  Forward targets the scan
-    // didn't reach (cache full) or edge cases leave reservations
-    // unconsumed — the direct JMP already points at the reserved
-    // flash block, so we MUST compile code there.
-    while (reservation_count > 0)
-    {
-        pc = reserved_pc[0];   // consume_reservation will remove [0]
-        if (!sa_compile_one_block())
-            break;             // cache full
-        sa_blocks_total++;
-    }
+    // Restore dynamic mode
+    sa_compile_pass = 0;
+    sa_block_exit_pc = 0xFFFF;
 
     // Final sweep after all blocks are compiled.
     // Sequence: pending → full epilogue scan → pending again.
@@ -996,13 +1212,62 @@ void sa_run(void)
     for (uint8_t pass = 0; pass < 2; pass++)
     {
         // Scan all sectors — each call processes EPILOGUE_SCAN_BATCH blocks,
-        // so iterate enough times to cover all 60 sectors generously.
+        // so iterate enough times to cover all sectors generously.
         for (uint16_t s = 0; s < (FLASH_CACHE_SECTORS + 31) / 32; s++)
             opt2_scan_and_patch_epilogues();
         opt2_sweep_pending_patches();
     }
 #endif
 #endif
+
+    // =====================================================================
+    // Sector compaction: reclaim wasted space from max-size allocations.
+    //
+    // Both passes used max-size allocations (258 bytes) to guarantee
+    // identical sector-skip decisions.  Now that pass 2 is complete,
+    // we scan each sector's block headers to find the actual end of the
+    // last block and adjust sector_free_offset accordingly.  This lets
+    // the dynamic path (run_6502) pack new blocks tightly in the
+    // leftover space.
+    //
+    // Block header format: byte +4 = code_len (code + epilogue total).
+    // Walking: start at offset 0, align to find header_start, read code_len,
+    // advance by BLOCK_HEADER_SIZE + code_len, repeat.
+    // =====================================================================
+    {
+        extern uint16_t sector_free_offset[];
+        for (uint8_t s = 0; s < FLASH_CACHE_SECTORS; s++)
+        {
+            if (sector_free_offset[s] == 0)
+                continue;  // empty sector
+
+            uint8_t bank = (s >> 2) + BANK_CODE;
+            uint16_t sector_base = FLASH_BANK_BASE + (uint16_t)(s & 3) * FLASH_ERASE_SECTOR_SIZE;
+
+            uint16_t offset = 0;
+            uint16_t last_end = 0;
+            while (offset < FLASH_ERASE_SECTOR_SIZE)
+            {
+                // Align to find next block's code_start
+                uint16_t code_start = (offset + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT_MASK)
+                                    & ~BLOCK_ALIGNMENT_MASK;
+                uint16_t header_start = code_start - BLOCK_HEADER_SIZE;
+                if (code_start >= FLASH_ERASE_SECTOR_SIZE)
+                    break;
+
+                // Read code_len from header byte +4
+                uint8_t code_len = peek_bank_byte(bank, sector_base + header_start + 4);
+                if (code_len == 0xFF || code_len == 0)
+                    break;  // no more blocks (erased or empty)
+
+                last_end = code_start + code_len;
+                offset = last_end;
+            }
+
+            if (last_end > 0 && last_end < sector_free_offset[s])
+                sector_free_offset[s] = last_end;
+        }
+    }
 
 #endif // ENABLE_STATIC_COMPILE
 

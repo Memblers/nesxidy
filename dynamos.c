@@ -105,6 +105,27 @@ __zpage uint8_t compile_ppu_active = 0;  // 1 = PPU effect enabled (SA boot only
 __zpage uint16_t flash_cache_index;
 uint8_t flash_enabled = 0;
 
+// Static compilation pass indicator:
+//   0 = dynamic (runtime) or pass-1 measure — forward branches use 21-byte patchable template
+//   2 = pass-2 emit — forward branches use lookup_entry_list() for direct branches
+uint8_t sa_compile_pass = 0;
+
+// Pass 2: forced exit PC for the current block being compiled.
+// Set by sa_run before calling sa_compile_one_block in pass 2.
+// The compile loop checks pc >= sa_block_exit_pc to force block termination,
+// ensuring pass 2's block boundaries match pass 1's even when forward
+// branches produce shorter native code.
+uint16_t sa_block_exit_pc = 0xFFFF;
+
+// Entry list write cursor (offset within BANK_ENTRY_LIST, in bytes).
+// Each entry is 8 bytes: entry_pc(2), exit_pc(2), native_addr(2), bank(1), code_len(1).
+// Reset to 0 before pass 1.
+uint16_t entry_list_offset = 0;
+
+// Pass 2: allocation size for current block (from entry list code_len).
+// sa_compile_one_block calls flash_sector_alloc(sa_block_alloc_size) in pass 2.
+uint8_t sa_block_alloc_size = 0;
+
 // Intra-block backward branch map: maps (guest_pc - entry_pc) → code_index+1
 // during compilation.  Index by offset & 0x3F (64-entry table).
 // Value 0 = no entry at that offset.  Otherwise code_index = value - 1.
@@ -115,15 +136,6 @@ uint8_t block_ci_map[64];
 // Stored in WRAM (mutable).  Zeroed at boot by flash_cache_init_sectors().
 uint16_t sector_free_offset[FLASH_CACHE_SECTORS];
 uint8_t next_free_sector = 0;  // monotonic sector cursor
-
-// Block reservation system: pre-allocate flash blocks for branch/JMP targets
-// so the compiler can emit direct native jumps instead of patchable templates.
-// Used during batch compile (sa_run) where all targets are compiled in-order.
-#define MAX_RESERVATIONS 32
-uint16_t reserved_pc[MAX_RESERVATIONS];
-uint16_t reserved_block[MAX_RESERVATIONS];
-uint8_t reservation_count = 0;
-uint8_t reservations_enabled = 0;  // gate: only allow reservations during batch compile
 
 uint8_t l1_cache_code[CACHE_L1_CODE_SIZE];
 uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
@@ -643,9 +655,19 @@ uint8_t flash_sector_alloc(uint8_t total_size)
 	uint16_t need = (uint16_t)total_size + BLOCK_HEADER_SIZE;
 	
 	uint8_t s = next_free_sector;
-	for (uint8_t i = 0; i < FLASH_CACHE_SECTORS; i++)
+	uint8_t start_sector = s;
+	uint8_t checked_any = 0;
+	
+	// Loop through all sectors looking for one with enough space.
+	// Use start_sector wrap-around detection instead of a separate counter,
+	// because vbcc optimizes away unused loop counters causing infinite loops.
+	for (;;)
 	{
 		if (s >= FLASH_CACHE_SECTORS) s = 0;  // wrap without modulo
+		if (checked_any && s == start_sector)
+			break;  // wrapped all the way around — no space
+		checked_any = 1;
+		
 		uint16_t cur = sector_free_offset[s];
 		
 		// Align code entry to 16-byte boundary:
@@ -691,85 +713,78 @@ uint8_t flash_sector_alloc(uint8_t total_size)
 //
 // Returns the 1-based block number (same as flash_cache_select), or 0
 // if the cache is full, reservation table is full, or target is not
-// in the bitmap.
-// Must be called from fixed bank context (default section).
-// Reserve a flash block for a target PC.
-// NOTE: Currently disabled (reserve_block_for_pc_safe returns 0).
-// Needs rework for sector-based allocation.
-uint16_t reserve_block_for_pc(uint16_t target_pc)
-{
-	// Reservation system disabled — needs rework for sector-based cache.
-	(void)target_pc;
-	return 0;
-}
+// Reservation system removed — two-pass static compilation (sa_compile_pass)
+// handles forward branches in the static path, and the dynamic path uses
+// 21-byte patchable templates with opt2 post-patching.
 
-// Initialize reservation system. Called once at boot before sa_run.
-// Clears all reservation state and disables new reservations.
-void init_reservations(void)
+// Result globals for lookup_native_addr_safe (and formerly reserve_block_for_pc)
+uint16_t reserve_result_addr;    // native entry address of looked-up block
+uint8_t  reserve_result_bank;    // flash bank of looked-up block
+
+// Fixed-bank helper: look up native address for a compiled PC.
+// Caller (bank2) passes target_pc; on success sets reserve_result_addr
+// and reserve_result_bank, returns 1.  Returns 0 if target not compiled
+// or on failure.  Safe to call from bank2.
+uint8_t lookup_native_addr_safe(uint16_t target_pc)
 {
-	uint8_t i;
-	reservation_count = 0;
-	reservations_enabled = 0;
-	
-	// Zero out reservation arrays to ensure clean state
-	for (i = 0; i < 32; i++)
-	{
-		reserved_pc[i] = 0;
-		reserved_block[i] = 0;
+	uint8_t saved_bank = mapper_prg_bank;
+
+	// Read flag
+	uint8_t flag_bank = (target_pc >> 14) + BANK_PC_FLAGS;
+	bankswitch_prg(flag_bank);
+	uint8_t flag = flash_cache_pc_flags[target_pc & FLASH_BANK_MASK];
+	if (flag & RECOMPILED) {
+		bankswitch_prg(saved_bank);
+		return 0;  // not compiled
 	}
+	reserve_result_bank = flag & 0x1F;
+
+	// Read native address
+	uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
+	uint8_t pc_bank = (target_pc >> 13) + BANK_PC;
+	bankswitch_prg(pc_bank);
+	uint16_t na = flash_cache_pc[pa] | ((uint16_t)flash_cache_pc[pa + 1] << 8);
+	reserve_result_addr = na;
+
+	bankswitch_prg(saved_bank);
+	return 1;
 }
 
-// Check if target_pc has a reservation.  If so, remove it from the
-// reservation list and return the 0-based block number.  Returns -1 if
-// no reservation exists.
-int16_t consume_reservation(uint16_t target_pc)
+// Fixed-bank helper: look up a block entry point in the two-pass entry list.
+// The entry list (in BANK_ENTRY_LIST) is a sequential table written during
+// pass 1 with 8-byte entries:
+//   byte 0-1: entry_pc (little-endian)
+//   byte 2-3: exit_pc  (little-endian)
+//   byte 4-5: native_addr (= flash_code_address + BLOCK_PREFIX_SIZE)
+//   byte 6:   code_bank
+//   byte 7:   code_len (total bytes: code + epilogue)
+// Only finds block ENTRY PCs (code_index=0).  Returns 1 on hit (sets
+// reserve_result_addr and reserve_result_bank), 0 on miss.
+// Safe to call from bank2.
+uint8_t lookup_entry_list(uint16_t target_pc)
 {
-	for (uint8_t i = 0; i < reservation_count; i++)
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_ENTRY_LIST);
+
+	uint8_t target_lo = (uint8_t)target_pc;
+	uint8_t target_hi = (uint8_t)(target_pc >> 8);
+	uint8_t *base = (uint8_t *)FLASH_BANK_BASE;
+
+	for (uint16_t i = 0; i < entry_list_offset; i += 8)
 	{
-		if (reserved_pc[i] == target_pc)
+		if (base[i] == 0xFF && base[i + 1] == 0xFF)
+			break;  // end sentinel
+		if (base[i] == target_lo && base[i + 1] == target_hi)
 		{
-			int16_t block = (int16_t)reserved_block[i];
-			// Swap-remove
-			reservation_count--;
-			reserved_pc[i] = reserved_pc[reservation_count];
-			reserved_block[i] = reserved_block[reservation_count];
-			return block;
+			reserve_result_addr = base[i + 4] | ((uint16_t)base[i + 5] << 8);
+			reserve_result_bank = base[i + 6];
+			bankswitch_prg(saved_bank);
+			return 1;
 		}
 	}
-	return -1;
-}
 
-// Fixed-bank trampoline for reserve_block_for_pc — callable from bank 2.
-// Reserves a block, sets reserve_result_* globals with the native address
-// info so the caller can emit direct branches/jumps.
-// Returns non-zero on success, 0 on failure.
-uint16_t reserve_result_addr;    // native entry address of reserved block
-uint8_t  reserve_result_bank;    // flash bank of reserved block
-
-uint8_t reserve_block_for_pc_safe(uint16_t target_pc)
-{
-	// Reservation system disabled — to be re-evaluated later.
-	// The patchable epilogue handles forward branches fine;
-	// reservations saved 16 bytes/block but caused boot crashes.
-	(void)target_pc;
+	bankswitch_prg(saved_bank);
 	return 0;
-
-	uint8_t saved_prg_bank = mapper_prg_bank;
-
-	// reserve_block_for_pc no longer calls setup_flash_address, so it
-	// doesn't clobber flash_code_address / flash_code_bank.
-	uint16_t block_1based = reserve_block_for_pc(target_pc);
-
-	if (!block_1based)
-	{
-		bankswitch_prg(saved_prg_bank);
-		return 0;
-	}
-	uint16_t block = block_1based - 1;
-	reserve_result_bank = (block / 0x40) + BANK_CODE;
-	reserve_result_addr = ((block % 0x40) << 8) + FLASH_BANK_BASE + BLOCK_PREFIX_SIZE;
-	bankswitch_prg(saved_prg_bank);
-	return 1;
 }
 
 //============================================================================================================
@@ -894,6 +909,42 @@ uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
 	return 1;
 }
 
+//============================================================================================================
+// Pass-2 forward/backward branch helper (fixed bank — callable from bank2).
+// For static pass 2 only: looks up target_pc in the entry list and emits
+// a 2-byte native branch or 5-byte Bxx_inv+JMP if same-bank.
+// Returns the emit length (2 or 5) on success, 0 if unable to resolve.
+// The caller provides the branch opcode and code buffer pointer.
+//============================================================================================================
+uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *code_ptr)
+{
+	if (!lookup_entry_list(target_pc))
+		return 0;
+	if (reserve_result_bank != flash_code_bank)
+		return 0;
+
+	int16_t native_offset = (int16_t)reserve_result_addr
+	    - (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + code_index + 2);
+
+	if (native_offset >= -128 && native_offset <= 127 &&
+	    (code_index + 2 + EPILOGUE_SIZE + 6) < CODE_SIZE)
+	{
+		code_ptr[code_index+0] = branch_opcode;
+		code_ptr[code_index+1] = (uint8_t)(int8_t)native_offset;
+		return 2;
+	}
+	if ((code_index + 5 + EPILOGUE_SIZE + 6) < CODE_SIZE)
+	{
+		code_ptr[code_index+0] = branch_opcode ^ 0x20;  // invert
+		code_ptr[code_index+1] = 3;
+		code_ptr[code_index+2] = 0x4C;
+		code_ptr[code_index+3] = reserve_result_addr & 0xFF;
+		code_ptr[code_index+4] = (reserve_result_addr >> 8) & 0xFF;
+		return 5;
+	}
+	return 0;
+}
+
 // ==========================================================================
 // recompile_opcode — moved to bank 2 to save ~6KB of fixed-bank space.
 // This is the single largest consumer (37% of fixed bank).
@@ -935,36 +986,28 @@ static uint8_t recompile_opcode_b2()
 			int8_t branch_offset = (int8_t) op_buffer_1;
 			if (branch_offset >= 0)
 			{
-				// Forward branch — target not yet compiled.
-				// Try to reserve a flash block for the target so we can emit
-				// a direct native branch/JMP instead of a 21-byte template.
+				// Forward branch
 				uint16_t target_pc = pc + 2 + branch_offset;
 
 #ifdef ENABLE_OPTIMIZER_V2
 				branch_forward++;
 
-				// --- Try reservation: emit 5-byte direct pattern ---
-				// reserve_block_for_pc_safe is a fixed-bank trampoline (safe from bank2)
-				if ((code_index + 5 + EPILOGUE_SIZE + 6) < CODE_SIZE &&
-				    reserve_block_for_pc_safe(target_pc) &&
-				    reserve_result_bank == flash_code_bank)
+				// --- Static pass 2: all native addresses known, emit direct ---
+				if (sa_compile_pass == 2)
 				{
-					// Same bank — emit inverted branch + direct JMP (5 bytes)
-					code_ptr[code_index+0] = invert_branch(op_buffer_0);
-					code_ptr[code_index+1] = 3;  // skip over JMP
-
-					code_ptr[code_index+2] = 0x4C;  // JMP
-					code_ptr[code_index+3] = reserve_result_addr & 0xFF;
-					code_ptr[code_index+4] = (reserve_result_addr >> 8) & 0xFF;
-
-					pc += 2;
-					code_index += 5;
-					cache_branches++;
-					cache_flag[cache_index] |= READY_FOR_NEXT;
-					return cache_flag[cache_index];
+					uint8_t emit_len = try_direct_branch(target_pc, op_buffer_0, code_ptr);
+					if (emit_len)
+					{
+						pc += 2;
+						code_index += emit_len;
+						cache_branches++;
+						cache_flag[cache_index] |= READY_FOR_NEXT;
+						return cache_flag[cache_index];
+					}
+					// Not resolved — fall through to patchable template
 				}
 
-				// --- Fallback: 21-byte patchable template ---
+				// --- Dynamic / pass-1: 21-byte patchable template ---
 				{
 				uint16_t pattern_flash_address = flash_code_address;
 				uint8_t pattern_flash_bank = flash_code_bank;
@@ -1168,64 +1211,45 @@ static uint8_t recompile_opcode_b2()
 				if (try_intra_block_branch(target_pc, op_buffer_0))
 					return cache_flag[cache_index];
 				
-				// Non-intra-block backward branch (target outside this block):
-				// exit to dispatcher so NJSR trampoline can check vblank
-				// and the main loop can fire emulated IRQs.
-				//
-				// 16-byte exit-to-dispatcher pattern:
-				//   inverted_branch +14  (skip if NOT taken)
-				//   STA _a               (save A)
-				//   PHP                  (save flags)
-				//   LDA #<target_pc      (set _pc low)
-				//   STA _pc
-				//   LDA #>target_pc      (set _pc high)
-				//   STA _pc+1
-				//   JMP cross_bank_dispatch
-				if ((code_index + 16 + 14) < CODE_SIZE)
+				// INTER-BLOCK BACKWARD BRANCH: target is compiled in a
+				// different block.  Same-bank: try 2-byte native branch
+				// first, then 5-byte Bxx_inv+JMP.
+				// Cross-bank: fall through to interpret.
+				if ((target_flag & 0x1F) == flash_code_bank &&
+				    (code_index + 2 + EPILOGUE_SIZE + 6) < CODE_SIZE &&
+				    lookup_native_addr_safe(target_pc))
 				{
-					// +0: Inverted branch +14 (skip 14 bytes to not-taken path at +16)
-					code_ptr[code_index+0] = invert_branch(op_buffer_0);
-					code_ptr[code_index+1] = 14;
-					
-					// +2: STA _a
-					code_ptr[code_index+2] = 0x85;  // STA zp
-					code_ptr[code_index+3] = (uint8_t)((uint16_t)&a);
-					
-					// +4: PHP
-					code_ptr[code_index+4] = 0x08;
-					
-					// +5: LDA #<target_pc
-					code_ptr[code_index+5] = 0xA9;
-					code_ptr[code_index+6] = target_pc & 0xFF;
-					
-					// +7: STA _pc
-					code_ptr[code_index+7] = 0x85;
-					code_ptr[code_index+8] = (uint8_t)((uint16_t)&pc);
-					
-					// +9: LDA #>target_pc
-					code_ptr[code_index+9] = 0xA9;
-					code_ptr[code_index+10] = (target_pc >> 8) & 0xFF;
-					
-					// +11: STA _pc+1
-					code_ptr[code_index+11] = 0x85;
-					code_ptr[code_index+12] = (uint8_t)(((uint16_t)&pc) + 1);
-					
-					// +13: JMP cross_bank_dispatch
-					code_ptr[code_index+13] = 0x4C;
-					code_ptr[code_index+14] = (uint8_t)((uint16_t)&cross_bank_dispatch);
-					code_ptr[code_index+15] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
-					
-					// Update PC table
-					setup_flash_address(pc, flash_cache_index);
-					flash_cache_pc_update(code_index, RECOMPILED);
-					
-					pc += 2;
-					code_index += 16;
-					cache_branches++;
-					cache_flag[cache_index] |= READY_FOR_NEXT;
-					return cache_flag[cache_index];
+					// Same bank — try native 2-byte branch, else 5-byte
+					int16_t native_offset = (int16_t)reserve_result_addr
+					    - (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + code_index + 2);
+					uint8_t emit_len = 0;
+					if (native_offset >= -128 && native_offset <= 127)
+					{
+						code_ptr[code_index+0] = op_buffer_0;
+						code_ptr[code_index+1] = (uint8_t)(int8_t)native_offset;
+						emit_len = 2;
+					}
+					else if ((code_index + 5 + EPILOGUE_SIZE + 6) < CODE_SIZE)
+					{
+						code_ptr[code_index+0] = invert_branch(op_buffer_0);
+						code_ptr[code_index+1] = 3;
+						code_ptr[code_index+2] = 0x4C;
+						code_ptr[code_index+3] = reserve_result_addr & 0xFF;
+						code_ptr[code_index+4] = (reserve_result_addr >> 8) & 0xFF;
+						emit_len = 5;
+					}
+					if (emit_len)
+					{
+						setup_flash_address(pc, flash_cache_index);
+						flash_cache_pc_update(code_index, RECOMPILED);
+						pc += 2;
+						code_index += emit_len;
+						cache_branches++;
+						cache_flag[cache_index] |= READY_FOR_NEXT;
+						return cache_flag[cache_index];
+					}
 				}
-				// else: not enough space, fall through to interpreted epilogue
+				// Cross-bank or no space — interpret
 				enable_interpret();
 			}  // end else (target is compiled)
 			}  // end else (backward branch)
@@ -1235,23 +1259,24 @@ static uint8_t recompile_opcode_b2()
 		{
 			uint16_t target_pc = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
 
-			// --- Try reservation: emit direct JMP (3 bytes) ---
-			// Only for forward targets — backward targets that aren't
-			// already compiled are not in the bitmap.
-			if (0 && target_pc > pc &&
+			// --- Static pass 2: target address known, emit direct JMP ---
+			if (sa_compile_pass == 2 &&
 			    code_index + 3 < CODE_SIZE &&
-			    reserve_block_for_pc_safe(target_pc) &&
-			    reserve_result_bank == flash_code_bank)
+			    lookup_entry_list(target_pc))
 			{
-				// Same bank — direct JMP to reserved block (3 bytes)
-				code_ptr[code_index+0] = 0x4C;  // JMP
-				code_ptr[code_index+1] = reserve_result_addr & 0xFF;
-				code_ptr[code_index+2] = (reserve_result_addr >> 8) & 0xFF;
+				if (reserve_result_bank == flash_code_bank)
+				{
+					// Same bank — direct JMP (3 bytes)
+					code_ptr[code_index+0] = 0x4C;
+					code_ptr[code_index+1] = reserve_result_addr & 0xFF;
+					code_ptr[code_index+2] = (reserve_result_addr >> 8) & 0xFF;
 
-				pc = target_pc;
-				code_index += 3;
-				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // JMP ends the block
-				return cache_flag[cache_index];
+					pc = target_pc;
+					code_index += 3;
+					cache_flag[cache_index] &= ~READY_FOR_NEXT;
+					return cache_flag[cache_index];
+				}
+				// Cross-bank — fall through to patchable
 			}
 
 			// --- Fallback: 9-byte patchable JMP pattern ---

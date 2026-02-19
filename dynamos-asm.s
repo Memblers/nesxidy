@@ -720,7 +720,7 @@ _sta_indy_template_size: db (_sta_indy_template_end - _sta_indy_template)
 ;   offset $000-$3BF → nametable 0 ($2000 + offset)
 ;   offset $3C0-$3FF → nametable 2 ($2800 + (offset - $3C0))
 
-VRAM_UPDATE_MAX = 144	; 48 tiles × 3 bytes
+VRAM_UPDATE_MAX = 96	; 32 tiles × 3 bytes (must fit in vblank: 32×40≈1280 cyc)
 
 	section "zpage"
 _vram_list_pos:	reserve 1	; current write position in update list

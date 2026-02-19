@@ -72,6 +72,10 @@ __zpage uint8_t interrupt_condition;
 __zpage uint8_t character_ram_updated = 0;
 __zpage uint8_t screen_ram_updated = 0;
 
+// 64-byte zero buffer for re-clearing the attribute table after
+// full-screen nametable pushes (Exidy has no attribute concept).
+static const uint8_t attr_zeros[64] = {0};
+
 // Shadow buffer and VRAM update list are in dynamos-asm.s (BSS/WRAM)
 extern uint8_t screen_shadow[];
 extern uint8_t vram_update_list[];
@@ -108,6 +112,11 @@ __zpage uint32_t frame_time;
 __zpage uint8_t last_nmi_frame = 0;  // Tracks lazyNES NMI frame counter (ZP $26)
 __zpage uint8_t audio = 0;
 __zpage uint8_t sprites_converted = 0;
+
+// FPS counter: count render_video calls per 60 NMI ticks (1 second)
+__zpage uint8_t fps_counter = 0;
+__zpage uint8_t fps_display = 0;
+__zpage uint8_t fps_nmi_start = 0;
 
 
 // ******************************************************************************************
@@ -197,7 +206,22 @@ void convert_sprites(const uint8_t *src)
 int main(void)
 {	
 	lnSync(1);
+
+	// lnSync's first call sets PPUCTRL = $88 (NMI enable + increment-
+	// by-32).  We must clear the increment bit BEFORE lnPush, otherwise
+	// the palette push scatters data every 32 PPU addresses — only
+	// writing palette index 0 and spilling palette values into CHR-RAM
+	// ($0000, $0020, ... $02E0), corrupting tile patterns.
+	lnPPUCTRL &= ~0x08;
+	IO8(0x2000) = lnPPUCTRL;
+
 	lnPush(0x3F00, 32, palette);
+
+	// Disable NMIs while doing direct $2006/$2007 writes.
+	// The CHR-RAM clear takes ~98K cycles (3+ frames), so LazyNES's
+	// NMI handler would fire multiple times and corrupt the PPU address
+	// register, leaving random CHR-RAM bytes un-cleared.
+	IO8(0x2000) = 0x00;
 
 	// Clear all CHR-RAM ($0000-$1FFF) so unwritten bit-planes are zero.
 	// convert_chr only writes one plane per tile group; without this,
@@ -225,7 +249,9 @@ int main(void)
 	convert_chr(CHARACTER_RAM_BASE);
 	convert_sprites(CHARACTER_RAM_BASE + 1024);
 #endif
-	IO8(0x201) = 0x01;
+
+	// Re-enable NMIs now that all direct PPU writes are done.
+	IO8(0x2000) = lnPPUCTRL;
 	
 	lnSync(0);
 	reset6502();		
@@ -500,6 +526,18 @@ void render_video_b2(void)
 {
 	uint8_t list_active = 0;
 
+	// --- FPS counter: measure emulated frames per second ---
+	fps_counter++;
+	{
+		uint8_t cur_nmi = *(volatile uint8_t*)0x26;
+		uint8_t elapsed = (uint8_t)(cur_nmi - fps_nmi_start);
+		if (elapsed >= 60) {
+			fps_display = fps_counter;
+			fps_counter = 0;
+			fps_nmi_start = cur_nmi;
+		}
+	}
+
 	// --- Character RAM: requires blank mode, must be handled first ---
 	// If char RAM changed, go blank and push everything (screen too).
 #ifndef ENABLE_CHR_ROM
@@ -507,7 +545,14 @@ void render_video_b2(void)
 	{
 		lnSync(1);
 		character_ram_updated = 0;
+		// Disable NMIs while convert_chr writes $2006/$2007 directly.
+		// convert_chr processes 256 tiles (thousands of cycles); without
+		// this, the NMI handler fires mid-write and reads $2002, resetting
+		// the $2006 hi/lo latch.  That sends tile data to random PPU
+		// addresses, corrupting the attribute table.
+		IO8(0x2000) = lnPPUCTRL & 0x7F;
 		convert_chr(CHARACTER_RAM_BASE);
+		IO8(0x2000) = lnPPUCTRL;
 		// While blanked, push screen RAM too if dirty
 		if (screen_ram_updated)
 		{
@@ -516,6 +561,10 @@ void render_video_b2(void)
 			lnPush(0x2100, 0, SCREEN_RAM_BASE+0x100);
 			lnPush(0x2200, 0, SCREEN_RAM_BASE+0x200);
 			lnPush(0x2300, 0xC0, SCREEN_RAM_BASE+0x300);
+			// lnPush left PPU address at $23C0 (attribute table).
+			// Re-clear attributes so any stray $2007 write between
+			// here and the NMI address-reset can't corrupt them.
+			lnPush(0x23C0, 64, attr_zeros);
 			memcpy(screen_shadow, SCREEN_RAM_BASE, 0x400);
 		}
 	}
@@ -535,6 +584,8 @@ void render_video_b2(void)
 			lnPush(0x2100, 0, SCREEN_RAM_BASE+0x100);
 			lnPush(0x2200, 0, SCREEN_RAM_BASE+0x200);
 			lnPush(0x2300, 0xC0, SCREEN_RAM_BASE+0x300);
+			// Re-clear attribute table (Exidy has no attributes).
+			lnPush(0x23C0, 64, attr_zeros);
 			// Shadow already updated by asm helper
 		}
 		else if (result == 1)
@@ -575,13 +626,16 @@ void render_video_b2(void)
 	};
 	lnAddSpr(spr1_meta, spr1_x, spr1_y);
 
-	// Debug sprite
-	uint8_t rti_count_char = (sta_indy_interpret_count & 0x0F);
-	uint8_t debug_meta[5] = {
-		0, 0, (rti_count_char < 10) ? (rti_count_char + '0') : (rti_count_char - 10 + 'A'), 1,
+	// FPS display: two-digit emulated FPS
+	// lnAddSpr subtracts 1 from Y (NES OAM quirk), so Y=1 displays at scanline 0.
+	uint8_t fps_tens = fps_display / 10;
+	uint8_t fps_ones = fps_display % 10;
+	uint8_t debug_meta[9] = {
+		0, 0, fps_tens + '0', 1,
+		8, 0, fps_ones + '0', 1,
 		128
 	};
-	lnAddSpr(debug_meta, 120, 8);
+	lnAddSpr(debug_meta, 120, 1);
 
 	// --- Final sync (screen on) ---
 	lnSync(0);

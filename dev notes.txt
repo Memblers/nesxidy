@@ -10,3 +10,6 @@ Mesen is at e:\drive-e\nes\mesen2a\
 launch Mesen with the rom name and LUA script name.
 you won't be able to see lua console output, so you may need to use a sentinal value to check if your revised script even loaded.  you may have to fix syntax errors blind.
 refer to this for Mesen 2.2.2 LUA API https://pastebin.com/z9w7Dj5Q
+
+find lazynes.h here:
+C:\proj\c\vbcc6502\vbcc6502_win\vbcc\targets\6502-nes\include

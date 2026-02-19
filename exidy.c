@@ -72,6 +72,18 @@ __zpage uint8_t interrupt_condition;
 __zpage uint8_t character_ram_updated = 0;
 __zpage uint8_t screen_ram_updated = 0;
 
+// Shadow buffer and VRAM update list are in dynamos-asm.s (BSS/WRAM)
+extern uint8_t screen_shadow[];
+extern uint8_t vram_update_list[];
+__zpage extern uint8_t vram_list_pos;
+
+// WRAM-resident assembly diff helper (dynamos-asm.s)
+// Returns: 0 = no changes, 1 = list built, $FF = overflow
+extern uint8_t screen_diff_build_list(void);
+
+// Empty update list to clear lnList after processing
+static const uint8_t empty_update_list[] = {0xFF};
+
 // Forward declarations
 void render_video(void);
 
@@ -186,6 +198,22 @@ int main(void)
 {	
 	lnSync(1);
 	lnPush(0x3F00, 32, palette);
+
+	// Clear all CHR-RAM ($0000-$1FFF) so unwritten bit-planes are zero.
+	// convert_chr only writes one plane per tile group; without this,
+	// stray non-zero bytes in the other plane cause pixel artifacts.
+	IO8(0x2006) = 0x00;
+	IO8(0x2006) = 0x00;
+	for (uint16_t i = 0; i < 0x2000; i++) IO8(0x2007) = 0;
+
+	// Clear nametable 0 attribute table ($23C0-$23FF, 64 bytes).
+	// Ensures palette-0 everywhere.  Without this, a power-cycle in
+	// the emulator can leave random attribute data that never gets
+	// overwritten (the Exidy has no attribute-table concept).
+	IO8(0x2006) = 0x23;
+	IO8(0x2006) = 0xC0;
+	for (uint8_t i = 0; i < 64; i++) IO8(0x2007) = 0;
+
 #ifdef ENABLE_CHR_ROM
 	// Copy ROM CHR/sprite data from bank1 to WRAM before converting,
 	// because convert_chr/convert_sprites trampolines switch to bank2
@@ -469,72 +497,85 @@ uint8_t nes_gamepad(void)
 #pragma section bank2
 
 void render_video_b2(void)
-{		
-	if (screen_ram_updated)
-	{		
-		lnSync(1);
-		screen_ram_updated = 0;
-		lnPush(0x2000, 0, SCREEN_RAM_BASE);
-		lnPush(0x2100, 0, SCREEN_RAM_BASE+0x100);
-		lnPush(0x2200, 0, SCREEN_RAM_BASE+0x200);
-		lnPush(0x2300, 0xC0, SCREEN_RAM_BASE+0x300);
-		lnPush(0x2800, 0x40, SCREEN_RAM_BASE+0x3C0);
-	}	
+{
+	uint8_t list_active = 0;
 
+	// --- Character RAM: requires blank mode, must be handled first ---
+	// If char RAM changed, go blank and push everything (screen too).
 #ifndef ENABLE_CHR_ROM
 	if (character_ram_updated)
 	{
 		lnSync(1);
 		character_ram_updated = 0;
-		convert_chr(CHARACTER_RAM_BASE);		
+		convert_chr(CHARACTER_RAM_BASE);
+		// While blanked, push screen RAM too if dirty
+		if (screen_ram_updated)
+		{
+			screen_ram_updated = 0;
+			lnPush(0x2000, 0, SCREEN_RAM_BASE);
+			lnPush(0x2100, 0, SCREEN_RAM_BASE+0x100);
+			lnPush(0x2200, 0, SCREEN_RAM_BASE+0x200);
+			lnPush(0x2300, 0xC0, SCREEN_RAM_BASE+0x300);
+			memcpy(screen_shadow, SCREEN_RAM_BASE, 0x400);
+		}
 	}
-#endif	
+	else
+#endif
+	// --- Screen RAM: incremental update via shadow-buffer diff ---
+	if (screen_ram_updated)
+	{
+		screen_ram_updated = 0;
+		uint8_t result = screen_diff_build_list();
+		if (result == 0xFF)
+		{
+			// Too many changes for one vblank (screen transition).
+			// Blank for one frame and push everything.
+			lnSync(1);
+			lnPush(0x2000, 0, SCREEN_RAM_BASE);
+			lnPush(0x2100, 0, SCREEN_RAM_BASE+0x100);
+			lnPush(0x2200, 0, SCREEN_RAM_BASE+0x200);
+			lnPush(0x2300, 0xC0, SCREEN_RAM_BASE+0x300);
+			// Shadow already updated by asm helper
+		}
+		else if (result == 1)
+		{
+			// Incremental update: screen stays on, no flicker!
+			lnList(vram_update_list);
+			list_active = 1;
+		}
+	}
 
-	// Calculate sprite positions (MAME: sx = 236 - xpos - 4, sy = 244 - ypos - 4)
-	// For NES: adjust coordinates to screen space
+	// --- Sprites (unchanged) ---
 	uint8_t spr1_x = 236 - sprite1_xpos - 4;
 	uint8_t spr1_y = 244 - sprite1_ypos - 4;
 	uint8_t spr2_x = 236 - sprite2_xpos - 4;
 	uint8_t spr2_y = 244 - sprite2_ypos - 4;
-	
-	// Get Exidy sprite tile numbers
-	// Sprite 1: (spriteno & 0x0f) + 16 * sprite_set_1  
-	// Sprite 2: ((spriteno >> 4) & 0x0f) + 32 + 16 * sprite_set_2
-	// Note: Sidetrac only has 16 sprites total, so sprite_set doesn't apply
-	uint8_t spr1_exidy_tile = (spriteno & 0x0F);  // 0-15
-	uint8_t spr2_exidy_tile = ((spriteno >> 4) & 0x0F);  // 0-15
-	
-	// Convert Exidy tile number to NES tile number
-	// Each 16x16 Exidy sprite = 4 NES tiles starting at 0x80 + (exidy_tile * 4)
-	// NES tiles are arranged: TL, TR, BL, BR (offsets 0, 1, 2, 3)
+
+	uint8_t spr1_exidy_tile = (spriteno & 0x0F);
+	uint8_t spr2_exidy_tile = ((spriteno >> 4) & 0x0F);
+
 	uint8_t spr1_nes_base = 0x80 + (spr1_exidy_tile * 4);
 	uint8_t spr2_nes_base = 0x80 + (spr2_exidy_tile * 4);
-	
-	// Draw sprite 2 first (behind sprite 1) - always enabled
-	// Metasprite format: x-offset, y-offset, tile, attributes, ..., 128 (end)
-	// 4 NES sprites in a 2x2 grid: TL(+0,+0), TR(+8,+0), BL(+0,+8), BR(+8,+8)
+
 	uint8_t spr2_meta[17] = {
-		0, 0, spr2_nes_base + 0, 1,   // TL
-		8, 0, spr2_nes_base + 1, 1,   // TR
-		0, 8, spr2_nes_base + 2, 1,   // BL
-		8, 8, spr2_nes_base + 3, 1,   // BR
-		128                           // End marker
+		0, 0, spr2_nes_base + 0, 1,
+		8, 0, spr2_nes_base + 1, 1,
+		0, 8, spr2_nes_base + 2, 1,
+		8, 8, spr2_nes_base + 3, 1,
+		128
 	};
 	lnAddSpr(spr2_meta, spr2_x, spr2_y);
-	
-	// Draw sprite 1 (player)
+
 	uint8_t spr1_meta[17] = {
-		0, 0, spr1_nes_base + 0, 0,   // TL
-		8, 0, spr1_nes_base + 1, 0,   // TR
-		0, 8, spr1_nes_base + 2, 0,   // BL
-		8, 8, spr1_nes_base + 3, 0,   // BR
-		128                           // End marker
+		0, 0, spr1_nes_base + 0, 0,
+		8, 0, spr1_nes_base + 1, 0,
+		0, 8, spr1_nes_base + 2, 0,
+		8, 8, spr1_nes_base + 3, 0,
+		128
 	};
 	lnAddSpr(spr1_meta, spr1_x, spr1_y);
 
-	// Debug: Display sprite1 write count as sprite tile at top-left
-	// If counter is incrementing, writes ARE reaching write6502
-	// Debug: Show RTI interpret count (reusing sta_indy_interpret_count)
+	// Debug sprite
 	uint8_t rti_count_char = (sta_indy_interpret_count & 0x0F);
 	uint8_t debug_meta[5] = {
 		0, 0, (rti_count_char < 10) ? (rti_count_char + '0') : (rti_count_char - 10 + 'A'), 1,
@@ -542,7 +583,13 @@ void render_video_b2(void)
 	};
 	lnAddSpr(debug_meta, 120, 8);
 
+	// --- Final sync (screen on) ---
 	lnSync(0);
+
+	// Clear lnList so the NMI doesn't re-process it next frame
+	if (list_active)
+		lnList((void*)empty_update_list);
+
 	return;
 }
 

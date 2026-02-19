@@ -681,23 +681,193 @@ _indy_operand:
 	section "data"
 	global _sta_indy_template, _sta_indy_template_size, _sta_indy_zp_patch
 ;-------------------------------------------------------
-; STA ($zp),Y template — routes through write6502() for full correctness.
+; STA ($zp),Y template — native handler, no write6502() for common cases.
 ; Compile-time: patch byte at _sta_indy_zp_patch with the ZP pointer address.
-; Runtime: saves state, calls _sta_indy_handler (which calls write6502),
-;          restores X from _x (handler saves it), restores A & flags.
+; Runtime: saves state, calls _sta_indy_handler (native address-table handler),
+;          restores X/A/flags.
+; STX _x before LDX ensures the emulated X is saved even if modified mid-block.
 ; - RELOCATABLE CODE - INTERNAL ACCESS ONLY -
 _sta_indy_template:
 	php				; save flags
 	pha				; save A (value to store) — handler reads from stack
+	stx _x				; save current emulated X (may differ from block entry)
 _sta_indy_zp_patch = * + 1
 	ldx #$FF			; patched: ZP pointer address
-	jsr _sta_indy_handler		; compute effective addr, call write6502
-	ldx _x				; restore real X (handler saved _x but trashed real X)
+	jsr _sta_indy_handler		; native handler (uses address tables, not write6502)
+	ldx _x				; restore emulated X
 	pla				; restore A
 	plp				; restore flags
 _sta_indy_template_end:
 
 _sta_indy_template_size: db (_sta_indy_template_end - _sta_indy_template)
+
+;=======================================================
+	section "data"
+	global _screen_diff_build_list
+	global _screen_shadow, _vram_update_list, _vram_list_pos
+;-------------------------------------------------------
+; screen_diff_build_list — WRAM-resident screen diff + lnList builder.
+; Compares SCREEN_RAM_BASE against screen_shadow, builds lnList entries
+; for changed tiles, and updates shadow.  Lives in WRAM so it costs
+; zero bytes of bank space.
+;
+; Returns: A = result code
+;   0 = no changes found
+;   1 = incremental list built (list_pos in _vram_list_pos)
+;   $FF = overflow (too many changes for one vblank)
+;
+; PPU address mapping:
+;   offset $000-$3BF → nametable 0 ($2000 + offset)
+;   offset $3C0-$3FF → nametable 2 ($2800 + (offset - $3C0))
+
+VRAM_UPDATE_MAX = 144	; 48 tiles × 3 bytes
+
+	section "zpage"
+_vram_list_pos:	reserve 1	; current write position in update list
+	section "data"
+
+; Optimized screen diff: uses absolute,Y (4 cyc) instead of
+; (indirect),Y (5 cyc) per access, and unrolls by page to
+; eliminate per-byte page-counter overhead.
+; Hot path: 15 cycles/byte (pages 0-2), 17 cycles/byte (page 3).
+
+_screen_diff_build_list:
+	lda #0
+	sta _vram_list_pos
+
+	;--- Page 0: SCREEN_RAM_BASE+$000 vs screen_shadow+$000, PPU $20xx ---
+	ldy #0
+.p0_loop:
+	lda _SCREEN_RAM_BASE,y
+	cmp _screen_shadow,y
+	bne .p0_changed
+.p0_next:
+	iny
+	bne .p0_loop
+
+	;--- Page 1: +$100, PPU $21xx ---
+	ldy #0
+.p1_loop:
+	lda _SCREEN_RAM_BASE+$100,y
+	cmp _screen_shadow+$100,y
+	bne .p1_changed
+.p1_next:
+	iny
+	bne .p1_loop
+
+	;--- Page 2: +$200, PPU $22xx ---
+	ldy #0
+.p2_loop:
+	lda _SCREEN_RAM_BASE+$200,y
+	cmp _screen_shadow+$200,y
+	bne .p2_changed
+.p2_next:
+	iny
+	bne .p2_loop
+
+	;--- Page 3: +$300, PPU $23xx, only $C0 bytes (skip $3C0+) ---
+	ldy #0
+.p3_loop:
+	lda _SCREEN_RAM_BASE+$300,y
+	cmp _screen_shadow+$300,y
+	bne .p3_changed
+.p3_next:
+	iny
+	cpy #$C0
+	bne .p3_loop
+
+	;--- Return result ---
+	lda _vram_list_pos
+	beq .diff_no_changes
+	cmp #VRAM_UPDATE_MAX
+	bcs .diff_overflow
+	; Terminate the list with $FF (lfEnd)
+	tax
+	lda #$FF
+	sta _vram_update_list,x
+	lda #1			; result = incremental list built
+	rts
+.diff_overflow:
+	lda #$FF		; result = overflow
+	rts
+.diff_no_changes:
+	lda #0			; result = no changes
+	rts
+
+	;--- Per-page changed handlers ---
+	; A = new tile value, Y = offset in page.
+	; Shadow is updated unconditionally (even on overflow, keeping it in sync).
+	; No PHA/PLA needed: store A (tile) first, then clobber for PPU bytes.
+.p0_changed:
+	sta _screen_shadow,y
+	ldx _vram_list_pos
+	cpx #VRAM_UPDATE_MAX
+	bcs .p0_next		; overflow: shadow updated, skip list entry
+	sta _vram_update_list+2,x	; tile value (A still has it)
+	tya
+	sta _vram_update_list+1,x	; PPU lo = Y
+	lda #$20
+	sta _vram_update_list,x		; PPU hi
+	inx
+	inx
+	inx
+	stx _vram_list_pos
+	jmp .p0_next
+
+.p1_changed:
+	sta _screen_shadow+$100,y
+	ldx _vram_list_pos
+	cpx #VRAM_UPDATE_MAX
+	bcs .p1_next
+	sta _vram_update_list+2,x
+	tya
+	sta _vram_update_list+1,x
+	lda #$21
+	sta _vram_update_list,x
+	inx
+	inx
+	inx
+	stx _vram_list_pos
+	jmp .p1_next
+
+.p2_changed:
+	sta _screen_shadow+$200,y
+	ldx _vram_list_pos
+	cpx #VRAM_UPDATE_MAX
+	bcs .p2_next
+	sta _vram_update_list+2,x
+	tya
+	sta _vram_update_list+1,x
+	lda #$22
+	sta _vram_update_list,x
+	inx
+	inx
+	inx
+	stx _vram_list_pos
+	jmp .p2_next
+
+.p3_changed:
+	sta _screen_shadow+$300,y
+	ldx _vram_list_pos
+	cpx #VRAM_UPDATE_MAX
+	bcs .p3_next
+	sta _vram_update_list+2,x
+	tya
+	sta _vram_update_list+1,x
+	lda #$23
+	sta _vram_update_list,x
+	inx
+	inx
+	inx
+	stx _vram_list_pos
+	jmp .p3_next
+
+;-------------------------------------------------------
+; BSS for shadow buffer and update list
+	section "bss"
+_screen_shadow:		reserve $400	; 1024 bytes
+_vram_update_list:	reserve 145	; VRAM_UPDATE_MAX + 1 (terminator)
+	section "data"
 
 ;=======================================================
 	section "data"
@@ -940,16 +1110,19 @@ _native_jsr_saved_sp:	reserve 1
 	section "data"
 	global _sta_indy_handler
 ;-------------------------------------------------------
-; STA (zp),Y handler - computes effective address and calls write6502
-; Called via: PHA / LDX #zp / JSR handler / PLA
-; On entry: X = ZP pointer address, Y = Y index (live), A on stack
+; STA (zp),Y native handler — uses address decoding tables for direct writes.
+; Only falls back to write6502() for I/O registers ($5000+).
+;
+; Called via template: PHP / PHA / STX _x / LDX #zp / JSR handler / LDX _x / PLA / PLP
+; On entry: X = ZP pointer address, Y = emulated Y index (live)
+; Stack:  [JSR_ret_lo @ SP+1] [JSR_ret_hi @ SP+2] [saved_A @ SP+3] [saved_P @ SP+4]
+;
+; Uses address_decoding_table[exidy_hi] for high-byte translation,
+; address_action_table[exidy_hi] for side-effect detection (screen/char dirty).
 _sta_indy_handler:
-	; Save ALL state first - write6502 may corrupt things
-	sta _indy_value		; save A (will get real value from stack later)
-	stx _indy_zp		; save ZP address
-	sty _indy_y			; save Y for address calc
+	sty _indy_y			; save emulated Y for address calc + restore
 	
-	; Set up pointer to _RAM_BASE + zp_addr
+	; Build pointer to RAM_BASE + X (X = ZP address from template patch)
 	clc
 	txa
 	adc #<_RAM_BASE
@@ -958,53 +1131,96 @@ _sta_indy_handler:
 	adc #0
 	sta _indy_ptr + 1
 	
-	; Read pointer from emulated zero page using indirect addressing
+	; Read 16-bit pointer from emulated zero page
 	ldy #0
-	lda (_indy_ptr),y	; low byte of pointer
+	lda (_indy_ptr),y	; low byte of Exidy pointer
 	sta _indy_ea
 	iny
-	lda (_indy_ptr),y	; high byte of pointer
+	lda (_indy_ptr),y	; high byte of Exidy pointer
 	sta _indy_ea + 1
 	
-	; Add emulated Y to get effective address
+	; Add emulated Y to get effective Exidy address
 	lda _indy_ea
 	clc
 	adc _indy_y
 	sta _indy_ea
-	bcc .no_carry
+	bcc .nc
 	inc _indy_ea + 1
-.no_carry:
+.nc:
 	
-	; Get value from stack (A was pushed before LDX/JSR)
-	; Stack layout after JSR: [ret_lo @ SP+1] [ret_hi @ SP+2] [saved_A @ SP+3]
+	; Range check: I/O registers ($5000+) need full write6502
+	lda _indy_ea + 1
+	cmp #$50
+	bcs .io_fallback
+	
+	; Translate high byte via address decoding table
+	tax
+	lda address_decoding_table,x
+	sta _indy_ea + 1	; NES high byte
+	
+	; Check action table for side effects (screen/char RAM dirty flags)
+	lda address_action_table,x	; X still = Exidy high byte
+	bmi .has_side_effect
+	
+	; === Fast path: simple write (RAM, or ROM which is harmless) ===
 	tsx
-	lda $103,x			; saved A is at SP+3
-	sta _indy_value
-	
-	; Save emulated CPU registers before C call (write6502 may trash them)
+	lda $103,x			; value from stack (SP+3 = pushed A)
+	ldy #0
+	sta (_indy_ea),y	; direct write to translated NES address
+	ldy _indy_y			; restore emulated Y
+	rts
+
+.has_side_effect:
+	cmp #$C0
+	bcs .char_write
+	; === Screen RAM write ===
+	inc _screen_ram_updated
+	tsx
+	lda $103,x
+	ldy #0
+	sta (_indy_ea),y
+	ldy _indy_y
+	rts
+
+.char_write:
+	; === Character RAM write ===
+	inc _character_ram_updated
+	tsx
+	lda $103,x
+	ldy #0
+	sta (_indy_ea),y
+	ldy _indy_y
+	rts
+
+.io_fallback:
+	; === Rare: I/O register write ($5000+) — use write6502 for sprite regs etc. ===
+	; _indy_ea = effective Exidy address (untranslated)
+	; Save _x and _y ZP vars (write6502 is C, may trash ZP temporaries)
 	lda _x
 	pha
 	lda _y
 	pha
 	
-	; Call write6502(_indy_ea, _indy_value) using vbcc calling convention
+	; Call write6502(_indy_ea, value) using vbcc calling convention
 	lda _indy_ea
 	sta r0
 	lda _indy_ea + 1
 	sta r1
-	lda _indy_value
+	; Get value from stack — 2 pushes deeper now
+	; Stack: [_y] [_x] [JSR_ret_lo] [JSR_ret_hi] [saved_A] [saved_P]
+	;        SP+1 SP+2  SP+3         SP+4         SP+5      SP+6
+	tsx
+	lda $105,x
 	sta r2
 	jsr _write6502
 	
-	; Restore emulated CPU registers
+	; Restore ZP vars
 	pla
 	sta _y
 	pla
 	sta _x
 	
-	; Restore Y for the emulated code
 	ldy _indy_y
-	
 	rts
 
 ;=======================================================

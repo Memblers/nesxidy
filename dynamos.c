@@ -964,6 +964,10 @@ static uint8_t recompile_opcode_b2()
 	// WRAM helper for cross-bank reads (safe from bank2)
 	extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
 
+	// Dirty flags from exidy.c (ZP) — needed for INC emission on screen/char stores
+	extern __zpage uint8_t screen_ram_updated;
+	extern __zpage uint8_t character_ram_updated;
+
 	uint8_t op_buffer_0;
 	uint8_t op_buffer_1;
 	uint8_t op_buffer_2;
@@ -1522,7 +1526,7 @@ static uint8_t recompile_opcode_b2()
 			code_ptr[code_index] = op_buffer_0;
 			switch (addrmodes[op_buffer_0])	// use address mode type to determine instruction size
 			{					
-				case abso:
+					case abso:
 				case absx:
 				case absy:
 				case ind:
@@ -1542,6 +1546,33 @@ static uint8_t recompile_opcode_b2()
 		
 					pc += 3;
 					code_index += 3;
+
+					// Emit dirty flag for stores to screen/char RAM.
+					// Without this, JIT absolute stores write directly to WRAM
+					// but never set screen_ram_updated, so render_video skips
+					// the shadow diff and changes are never pushed to the PPU.
+					if (decoded_address)
+					{
+						uint8_t msb = encoded_address >> 8;
+						// STA abs=$8D, STX abs=$8E, STY abs=$8C,
+						// STA absx=$9D, STA absy=$99
+						if ((op_buffer_0 == 0x8D || op_buffer_0 == 0x8E ||
+						     op_buffer_0 == 0x8C || op_buffer_0 == 0x9D ||
+						     op_buffer_0 == 0x99) &&
+						    msb >= 0x40 && msb < 0x50 &&
+						    (code_index + 2 + EPILOGUE_SIZE) < CODE_SIZE)
+						{
+							if (msb < 0x48) {
+								// Screen RAM: INC screen_ram_updated (ZP)
+								code_ptr[code_index++] = 0xE6;  // INC zp
+								code_ptr[code_index++] = (uint8_t)((uint16_t)&screen_ram_updated);
+							} else {
+								// Character RAM: INC character_ram_updated (ZP)
+								code_ptr[code_index++] = 0xE6;  // INC zp
+								code_ptr[code_index++] = (uint8_t)((uint16_t)&character_ram_updated);
+							}
+						}
+					}
 					break;
 				}						
 				

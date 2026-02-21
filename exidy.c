@@ -576,7 +576,6 @@ static void ln_fire_and_forget(void)
 
 void render_video_b2(void)
 {
-
 	// --- FPS display: show emulated game frames per second ---
 	// fps_counter is incremented in the main loop each time the game
 	// consumes an IRQ (= completes one frame of game logic).
@@ -589,6 +588,10 @@ void render_video_b2(void)
 			fps_nmi_start = cur_nmi;
 		}
 	}
+
+	// Early out: if nothing changed in background/CHR, skip work.
+	if (!screen_ram_updated && !character_ram_updated)
+		return;
 
 	// --- Character RAM: requires blank mode, must be handled first ---
 	// If char RAM changed, go blank and push everything (screen too).

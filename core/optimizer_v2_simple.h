@@ -35,6 +35,10 @@ void opt2_sweep_pending_patches(void);
 void opt2_scan_and_patch_epilogues(void);
 #endif
 
+// Static-compile drain: aggressively resolve as many pending patches
+// and epilogues as possible before execution begins.
+void opt2_drain_static_patches(void);
+
 // Get statistics for debugging
 void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t *pending);
 

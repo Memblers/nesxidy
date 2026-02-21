@@ -391,3 +391,23 @@ void opt2_reset(void) {
     opt2_epilogue_sector = 0;
     opt2_epilogue_offset = SECTOR_FIRST_HEADER;
 }
+
+//============================================================================
+// Static-compilation drain: resolve as many patches as possible before runtime
+//============================================================================
+
+#pragma section default
+
+void opt2_drain_static_patches(void) {
+    // Iterate until the pending queue is drained (or we hit a safety cap).
+    for (uint8_t pass = 0; pass < 16 && pending_count > 0; pass++) {
+        opt2_sweep_pending_patches();
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+        // One full scan of all sectors per pass.
+        for (uint8_t i = 0; i < (FLASH_CACHE_SECTORS + EPILOGUE_SCAN_BATCH - 1) / EPILOGUE_SCAN_BATCH; i++) {
+            opt2_scan_and_patch_epilogues();
+        }
+#endif
+        opt2_sweep_pending_patches();
+    }
+}

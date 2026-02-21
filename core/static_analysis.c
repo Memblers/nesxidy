@@ -1201,23 +1201,10 @@ void sa_run(void)
     sa_compile_pass = 0;
     sa_block_exit_pc = 0xFFFF;
 
-    // Final sweep after all blocks are compiled.
-    // Sequence: pending → full epilogue scan → pending again.
-    // The second pending sweep catches any branches whose targets were
-    // in different banks during compile but got resolved by epilogue
-    // chaining.  Two epilogue passes ensure ordering doesn't matter.
+    // Final drain after all blocks are compiled.
+    // Aggressively resolves pending patches and epilogues before execution.
 #ifdef ENABLE_OPTIMIZER_V2
-    opt2_sweep_pending_patches();
-#ifdef ENABLE_PATCHABLE_EPILOGUE
-    for (uint8_t pass = 0; pass < 2; pass++)
-    {
-        // Scan all sectors — each call processes EPILOGUE_SCAN_BATCH blocks,
-        // so iterate enough times to cover all sectors generously.
-        for (uint16_t s = 0; s < (FLASH_CACHE_SECTORS + 31) / 32; s++)
-            opt2_scan_and_patch_epilogues();
-        opt2_sweep_pending_patches();
-    }
-#endif
+    opt2_drain_static_patches();
 #endif
 
     // =====================================================================

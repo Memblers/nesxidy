@@ -387,10 +387,10 @@ _native_jsr_trampoline:
 	; A = 1: needs recompile
 	; A = 2: needs interpret
 	beq .njsr_check_vblank	; A=0 → block executed, continue
-	cmp #2
-	bne .njsr_exit			; A=1 → needs compile, bail to C
-	; A=2 → interpret without bailing to C (fixed-bank helper)
-	jsr _njsr_do_interpret
+	bne .njsr_exit			; A!=0 → bail to C for compile or interpret
+	; NOTE: inline interpret was removed — it caused hangs because the
+	; trampoline absorbs vblanks, preventing IRQ dispatch.  The C-level
+	; guard in run_6502 case 1 handles interpret-only PCs cheaply.
 	
 .njsr_check_vblank:
 	; Check for vblank: if NMI counter ($26) != last_nmi_frame, absorb it
@@ -444,20 +444,9 @@ not_recompiled:
 
 ;=======================================================	
 	section "text"
-	global _cache_search, _njsr_do_interpret
+	global _cache_search
 	zpage _matched, _cache_index, _cache_entry_pc_lo, _cache_entry_pc_hi
 ;-------------------------------------------------------
-; Fixed-bank helper: interpret one instruction for the NJSR trampoline.
-; Called from WRAM when dispatch_on_pc returns 2 (interpret-only PC).
-; Switches to bank 0 for interpret_6502, then returns.  The trampoline
-; continues its loop — this avoids the expensive bail→compile→undo path.
-_njsr_do_interpret:
-	lda #0
-	ora _mapper_chr_bank
-	sta $C000
-	sta _mapper_prg_bank
-	jmp _interpret_6502		; tail-call: interpret_6502's RTS returns to trampoline
-
 _cache_search:
 	lda _pc
 	ldx #ASM_BLOCK_COUNT-1

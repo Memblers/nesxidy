@@ -164,8 +164,12 @@ extern uint16_t indx_address_lo, indx_address_hi;
 
 extern const uint8_t opcode_6502_pha_size;
 extern const uint8_t opcode_6502_pla_size;
+extern const uint8_t opcode_6502_php_size;
+extern const uint8_t opcode_6502_plp_size;
 extern uint8_t opcode_6502_pha[];
 extern uint8_t opcode_6502_pla[];
+extern uint8_t opcode_6502_php[];
+extern uint8_t opcode_6502_plp[];
 
 // Native JSR template and patch offsets
 extern const uint8_t opcode_6502_jsr_size;

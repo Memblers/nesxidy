@@ -976,6 +976,25 @@ uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *co
 // ==========================================================================
 #pragma section bank2
 
+// Shared helper: emit a fixed-size opcode template (PHA/PLA/PHP/PLP).
+// Copies template bytes into code buffer, advances pc by 1, sets READY_FOR_NEXT.
+// Returns updated cache_flag.
+static uint8_t emit_template(uint8_t *tmpl, uint8_t sz)
+{
+	if ((code_index + sz + 3) < CODE_SIZE) {
+		uint8_t *dst = &cache_code[cache_index][code_index];
+		for (uint8_t i = 0; i < sz; i++)
+			dst[i] = tmpl[i];
+		pc += 1;
+		code_index += sz;
+		cache_flag[cache_index] |= READY_FOR_NEXT;
+		return cache_flag[cache_index];
+	}
+	cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
+	cache_flag[cache_index] &= ~READY_FOR_NEXT;
+	return cache_flag[cache_index];
+}
+
 static uint8_t recompile_opcode_b2()
 {
 	// WRAM helper for cross-bank reads (safe from bank2)
@@ -1462,49 +1481,15 @@ static uint8_t recompile_opcode_b2()
 		}		
 		
 		case opPHA:
-		{
-			if ((code_index + opcode_6502_pha_size + 3) < CODE_SIZE)
-			{
-				for (uint8_t i = 0; i < opcode_6502_pha_size; i++)
-					{
-						code_ptr[code_index+i] = opcode_6502_pha[i];
-					}					
-					pc += 1;  // PHA is a 1-byte instruction
-					code_index += opcode_6502_pha_size;
-					cache_flag[cache_index] |= READY_FOR_NEXT;
-					return cache_flag[cache_index];
-			}
-			else
-			{
-				cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
-				cache_flag[cache_index] &= ~READY_FOR_NEXT;
-				return cache_flag[cache_index];
-			}																				
-		}
-		case opPLA:				
-		{
-			if ((code_index + opcode_6502_pla_size + 3) < CODE_SIZE)
-			{
-				for (uint8_t i = 0; i < opcode_6502_pla_size; i++)
-					{
-						code_ptr[code_index+i] = opcode_6502_pla[i];
-					}					
-					pc += 1;  // PLA is a 1-byte instruction
-					cache_flag[cache_index] |= READY_FOR_NEXT;
-					code_index += opcode_6502_pla_size;
-					return cache_flag[cache_index];
-			}
-			else
-			{
-				cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
-				cache_flag[cache_index] &= ~READY_FOR_NEXT;
-				return cache_flag[cache_index];
-			}																				
-		}
+			return emit_template(opcode_6502_pha, opcode_6502_pha_size);
+		case opPLA:
+			return emit_template(opcode_6502_pla, opcode_6502_pla_size);
+		case opPHP:
+			return emit_template(opcode_6502_php, opcode_6502_php_size);
+		case opPLP:
+			return emit_template(opcode_6502_plp, opcode_6502_plp_size);
 		case opCLI:
 		case opSEI:
-		case opPHP:
-		case opPLP:
 		{
 			enable_interpret();
 			break;

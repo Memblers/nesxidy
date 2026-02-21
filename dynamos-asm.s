@@ -938,6 +938,51 @@ _opcode_6502_pla_size:	db (_opcode_6502_pla_end - _opcode_6502_pla)
 
 ;=======================================================
 	section "text"
+	global _opcode_6502_php, _opcode_6502_php_size
+;-------------------------------------------------------
+; PHP: push (P | BREAK | CONSTANT) to emulated stack.
+; Preserves A, X, Y, NES P (guest flags unchanged by PHP).
+_opcode_6502_php:
+	php					; [1] save guest P for restoration
+	pha					; [2] save guest A
+	php					; [3] push guest P again (extract byte)
+	pla					; A = guest P byte (from [3])
+	ora #$30			; set B + CONSTANT (PHP always sets these)
+	stx _x				; save X
+	ldx _sp				; X = emulated SP
+	sta _RAM_BASE + $100, x	; push status to emulated stack
+	dec _sp				; decrement emulated SP
+	ldx _x				; restore X
+	pla					; restore guest A (from [2])
+	plp					; restore guest P (from [1])
+
+_opcode_6502_php_end:
+_opcode_6502_php_size:	db (_opcode_6502_php_end - _opcode_6502_php)
+
+;=======================================================
+	section "text"
+	global _opcode_6502_plp, _opcode_6502_plp_size
+;-------------------------------------------------------
+; PLP: pull from emulated stack, set as new NES P (guest flags).
+; Preserves A, X, Y.  PLP is the last instruction so it correctly
+; sets ALL flags (N, V, -, B, D, I, Z, C) from the pulled byte.
+_opcode_6502_plp:
+	sta _a				; save guest A (PLP doesn't change A)
+	stx _x				; save X
+	inc _sp				; increment emulated SP first
+	ldx _sp				; X = new SP
+	lda _RAM_BASE + $100, x	; A = pulled status byte
+	ldx _x				; restore X
+	ora #$20			; set CONSTANT bit
+	pha					; push new status to NES stack
+	lda _a				; restore guest A (Z/N corrupted here...)
+	plp					; NES P = new status (overwrites ALL flags) ✓
+
+_opcode_6502_plp_end:
+_opcode_6502_plp_size:	db (_opcode_6502_plp_end - _opcode_6502_plp)
+
+;=======================================================
+	section "text"
 	global _opcode_6502_jsr, _opcode_6502_jsr_size
 	global _opcode_6502_jsr_ret_hi, _opcode_6502_jsr_ret_lo
 	global _opcode_6502_jsr_tgt_lo, _opcode_6502_jsr_tgt_hi

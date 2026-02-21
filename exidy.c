@@ -85,7 +85,7 @@ __zpage extern uint8_t vram_list_pos;
 // Returns: 0 = no changes, 1 = list built, $FF = overflow
 extern uint8_t screen_diff_build_list(void);
 
-// Empty update list to clear lnList after processing
+// Empty update list (kept for potential future use)
 static const uint8_t empty_update_list[] = {0xFF};
 
 // Forward declarations
@@ -316,13 +316,19 @@ int main(void)
 			uint8_t cur_nmi = *(volatile uint8_t*)0x26;
 			if (cur_nmi != last_nmi_frame)
 			{
+				// Count consumed IRQs = completed game frames.
+				// If the previous IRQ was consumed (flag clear), the
+				// game finished one frame of logic since the last NMI.
+				if (!(interrupt_condition & FLAG_EXIDY_IRQ))
+					fps_counter++;
 				interrupt_condition |= FLAG_EXIDY_IRQ;
 #ifdef ENABLE_DEBUG_STATS
 				debug_stats_update();
 #endif
 				render_video();
-				// Re-read AFTER render_video: lnSync waits for vblank,
-				// advancing $26. Absorb it so we don't re-trigger.
+				// Re-read AFTER render_video: if an NMI fired during
+				// render setup, absorb the $26 increment so we don't
+				// immediately re-trigger a second render.
 				last_nmi_frame = *(volatile uint8_t*)0x26;
 			}
 		}
@@ -330,14 +336,17 @@ int main(void)
 		if (clockticks6502 > frame_time)
 		{
 			frame_time += FRAME_LENGTH;
+			// Count consumed IRQs = completed game frames
+			if (!(interrupt_condition & FLAG_EXIDY_IRQ))
+				fps_counter++;
 			interrupt_condition |= FLAG_EXIDY_IRQ;
 #ifdef ENABLE_DEBUG_STATS
 			debug_stats_update();
 #endif
 			render_video();
-			// Re-read AFTER render_video: lnSync waits for vblank,
-			// advancing $26. Absorb it so the backstop doesn't
-			// immediately re-trigger a second render.
+			// Re-read AFTER render_video: if an NMI fired during
+			// render setup, absorb the $26 increment so the backstop
+			// doesn't immediately re-trigger a second render.
 			last_nmi_frame = *(volatile uint8_t*)0x26;
 		}
 		// NMI backstop: even if the cycle counter hasn't reached frame_time
@@ -357,6 +366,7 @@ int main(void)
 				// handler and causing 2 renders per 3 frames.
 				if (!(interrupt_condition & FLAG_EXIDY_IRQ) && !(status & FLAG_INTERRUPT))
 				{
+					fps_counter++; // IRQ was consumed = game frame completed
 					interrupt_condition |= FLAG_EXIDY_IRQ;
 					// Sync cycle counter to avoid double-firing when
 					// the next cycle-based frame would also trigger
@@ -517,6 +527,48 @@ uint8_t nes_gamepad(void)
 // ******************************************************************************************
 
 // ==========================================================================
+// ln_fire_and_forget — non-blocking replacement for lnSync(0).
+// Sets up lnState for the NMI handler to process OAM + update list,
+// but returns immediately without waiting for vblank.
+// This reclaims the ~16ms vblank wait for emulation work.
+//
+// Safe because:
+// - The main loop only calls render_video when $26 changes (NMI fired).
+// - The NMI handler processes OAM/lnList BEFORE incrementing $26.
+// - So by the time render_video is called again, previous data is consumed.
+// ==========================================================================
+static void ln_fire_and_forget(void)
+{
+	// Enable bg+sprite rendering (same as lnSync(0))
+	lnPPUMASK |= 0x18;
+
+	// Clear split-mode bit
+	*(volatile uint8_t*)0x25 &= ~0x02;
+
+	// Fill remaining OAM with $FF (hide unused sprites)
+	{
+		uint8_t pos = *(volatile uint8_t*)0x27;  // nmiOamPos
+		volatile uint8_t *oam = (volatile uint8_t*)0x0200;
+		while (pos != 0) {
+			oam[pos] = 0xFF;
+			pos += 4;
+		}
+		*(volatile uint8_t*)0x27 = 0;  // reset nmiOamPos
+	}
+
+	// Set sync request: clear bit 5, set bit 6.
+	// Bit 6 tells the NMI handler to do OAM DMA + process lnList.
+	{
+		uint8_t state = *(volatile uint8_t*)0x25;
+		state = (state & ~0x20) | 0x40;
+		*(volatile uint8_t*)0x25 = state;
+	}
+
+	// Clear scroll call counter (same as lnSync epilogue)
+	*(volatile uint8_t*)0x2F = 0;
+}
+
+// ==========================================================================
 // render_video — moved to bank 2 to save fixed-bank space.
 // Called once per frame; only touches fixed-bank LazyNES calls and WRAM.
 // ==========================================================================
@@ -524,10 +576,10 @@ uint8_t nes_gamepad(void)
 
 void render_video_b2(void)
 {
-	uint8_t list_active = 0;
 
-	// --- FPS counter: measure emulated frames per second ---
-	fps_counter++;
+	// --- FPS display: show emulated game frames per second ---
+	// fps_counter is incremented in the main loop each time the game
+	// consumes an IRQ (= completes one frame of game logic).
 	{
 		uint8_t cur_nmi = *(volatile uint8_t*)0x26;
 		uint8_t elapsed = (uint8_t)(cur_nmi - fps_nmi_start);
@@ -592,7 +644,6 @@ void render_video_b2(void)
 		{
 			// Incremental update: screen stays on, no flicker!
 			lnList(vram_update_list);
-			list_active = 1;
 		}
 	}
 
@@ -628,8 +679,12 @@ void render_video_b2(void)
 
 	// FPS display: two-digit emulated FPS
 	// lnAddSpr subtracts 1 from Y (NES OAM quirk), so Y=1 displays at scanline 0.
-	uint8_t fps_tens = fps_display / 10;
-	uint8_t fps_ones = fps_display % 10;
+	// Use subtraction loop instead of / and % to avoid 16-bit division
+	// routines (___divint16 + ___divuint16 were 5% of total CPU time).
+	uint8_t fps_tens = 0;
+	uint8_t fps_tmp = fps_display;
+	while (fps_tmp >= 10) { fps_tmp -= 10; fps_tens++; }
+	uint8_t fps_ones = fps_tmp;
 	uint8_t debug_meta[9] = {
 		0, 0, fps_tens + '0', 1,
 		8, 0, fps_ones + '0', 1,
@@ -637,12 +692,11 @@ void render_video_b2(void)
 	};
 	lnAddSpr(debug_meta, 120, 1);
 
-	// --- Final sync (screen on) ---
-	lnSync(0);
-
-	// Clear lnList so the NMI doesn't re-process it next frame
-	if (list_active)
-		lnList((void*)empty_update_list);
+	// --- Final sync (screen on, non-blocking) ---
+	// Queue OAM + lnList for NMI processing and return immediately.
+	// Unlike lnSync(0), this doesn't wait for vblank, reclaiming
+	// ~16ms per frame for emulation when running below 60fps.
+	ln_fire_and_forget();
 
 	return;
 }

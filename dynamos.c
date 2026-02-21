@@ -384,6 +384,14 @@ void run_6502(void)
 	// Tentatively allocate space for max-size block.
 	// We'll write the actual size to the header after compilation.
 	// flash_sector_alloc sets flash_code_bank and flash_code_address (to header start).
+	//
+	// Save allocator state so we can undo if the block produces no code
+	// (first instruction is always-interpreted).  Without this, each
+	// interpreted PC wastes 258 bytes of flash on an empty allocation.
+	extern uint16_t sector_free_offset[];
+	extern uint8_t next_free_sector;
+	uint8_t pre_alloc_next_free = next_free_sector;
+	
 	if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
 	{
 		// No flash available, fall back to interpreter
@@ -391,6 +399,9 @@ void run_6502(void)
 		interpret_6502();
 		return;
 	}
+	
+	uint8_t alloc_sector = next_free_sector;
+	uint16_t undo_free_offset = flash_code_address & FLASH_SECTOR_MASK;
 	
 	// flash_code_address now points to header start.
 	// Native code starts at flash_code_address + BLOCK_HEADER_SIZE.
@@ -468,7 +479,20 @@ void run_6502(void)
 		
 	} while (cache_flag[0] & READY_FOR_NEXT);
 
-	if (code_index)
+	if (!code_index)
+	{
+		// Block produced no native code (first instruction was interpreted).
+		// Undo the flash allocation — the empty slot would waste space and
+		// the PC flag was already set by flash_cache_pc_update(INTERPRETED)
+		// in the compile loop above.
+		sector_free_offset[alloc_sector] = undo_free_offset;
+		next_free_sector = pre_alloc_next_free;
+		// Fall through to interpret_6502 below
+		bankswitch_prg(0);
+		interpret_6502();
+		return;
+	}
+
 	{
 		// Exit PC is the current pc value (instruction to interpret or continue from)
 		uint16_t exit_pc = pc;
@@ -595,12 +619,6 @@ void run_6502(void)
 		// Optimizer trigger check moved to main loop in exidy.c
 		return;
 	}
-	else // code buffer empty
-	{
-		bankswitch_prg(0);
-		interpret_6502();
-		return;
-	}
 }
 
 //============================================================================================================
@@ -685,7 +703,7 @@ uint8_t flash_sector_alloc(uint8_t total_size)
 		// Compute bank and address from sector index
 		// Use >>2 and &3 instead of /4 and %4 to avoid 32-bit division
 		uint8_t bank = (s >> 2) + BANK_CODE;
-		uint16_t sector_base = FLASH_BANK_BASE + (uint16_t)(s & 3) * FLASH_ERASE_SECTOR_SIZE;
+		uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(s & 3) << 12);
 		
 		flash_code_bank = bank;
 		flash_code_address = sector_base + header_start;  // points to header start

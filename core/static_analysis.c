@@ -1221,6 +1221,41 @@ void sa_run(void)
 #endif
 
     // =====================================================================
+    // Interpreted-flag repair pass.
+    //
+    // Pass 0 flagged all known-code PCs (RECOMPILED or INTERPRETED).
+    // Between passes, ALL flag banks were erased.  Pass 2 rewrote flags
+    // for entry-list blocks, but blocks with code_index==0 (first
+    // instruction is always-interpreted, e.g. CLI/SEI/PHP/PLP/SED or
+    // I/O access) were NOT in the entry list.  Their flags are still $FF.
+    //
+    // Without this repair, each such PC triggers a wasted flash_sector_alloc
+    // at runtime (~7,285 cycles + 258 bytes of flash per PC).
+    //
+    // Fix: scan the bitmap and mark any remaining $FF-flagged known-code
+    // PCs as INTERPRETED ($80).  We don't need the native address — the
+    // dispatcher will return 2 (interpret) for $80 flags.
+    // =====================================================================
+    {
+        for (uint16_t scan_addr = ROM_ADDR_MIN; scan_addr <= ROM_ADDR_MAX; scan_addr++)
+        {
+            if (sa_bitmap_is_unknown(scan_addr))
+                continue;
+
+            uint8_t flag_bank = (scan_addr >> 14) + BANK_PC_FLAGS;
+            uint16_t flag_addr = (uint16_t)&flash_cache_pc_flags[scan_addr & FLASH_BANK_MASK];
+
+            uint8_t flag = peek_bank_byte(flag_bank, flag_addr);
+            if (flag != 0xFF)
+                continue;   // already programmed by pass 2
+
+            // This PC is known code but has no flag — mark it INTERPRETED.
+            // Flag byte $80 = bit 7 set, bit 6 clear → dispatch returns 2.
+            flash_byte_program(flag_addr, flag_bank, RECOMPILED);
+        }
+    }
+
+    // =====================================================================
     // Sector compaction: reclaim wasted space from max-size allocations.
     //
     // Both passes used max-size allocations (258 bytes) to guarantee
@@ -1242,7 +1277,7 @@ void sa_run(void)
                 continue;  // empty sector
 
             uint8_t bank = (s >> 2) + BANK_CODE;
-            uint16_t sector_base = FLASH_BANK_BASE + (uint16_t)(s & 3) * FLASH_ERASE_SECTOR_SIZE;
+            uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(s & 3) << 12);
 
             uint16_t offset = 0;
             uint16_t last_end = 0;

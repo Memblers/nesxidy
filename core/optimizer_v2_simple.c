@@ -256,7 +256,7 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
         // Compute flash bank and base address for this sector
         // Use >>2 and &3 instead of /4 and %4 to avoid 32-bit division
         uint8_t code_bank = (sector >> 2) + BANK_CODE;
-        uint16_t sector_base = FLASH_BANK_BASE + (uint16_t)(sector & 3) * FLASH_ERASE_SECTOR_SIZE;
+        uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(sector & 3) << 12);
         uint16_t hdr_addr = sector_base + opt2_epilogue_offset;
         
         // Read block header from flash via peek_bank_byte

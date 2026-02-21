@@ -58,7 +58,7 @@ target_bank:	reserve 1
 ;=======================================================	
 	section "bss"
 	global _RAM_BASE, _CHARACTER_RAM_BASE, _SCREEN_RAM_BASE
-	align 8
+	align 1
 ;-------------------------------------------------------	
 _RAM_BASE:	reserve $400
 _CHARACTER_RAM_BASE:	reserve $800
@@ -386,22 +386,15 @@ _native_jsr_trampoline:
 	; A = 0: block ran from flash
 	; A = 1: needs recompile
 	; A = 2: needs interpret
-	bne .njsr_exit			; non-zero → can't handle natively, bail to C
+	beq .njsr_check_vblank	; A=0 → block executed, continue
+	cmp #2
+	bne .njsr_exit			; A=1 → needs compile, bail to C
+	; A=2 → interpret without bailing to C (fixed-bank helper)
+	jsr _njsr_do_interpret
 	
+.njsr_check_vblank:
 	; Check for vblank: if NMI counter ($26) != last_nmi_frame, absorb it
-	; and continue looping.  Previously we bailed to C here, but that
-	; destroyed the NJSR context — every subsequent iteration of the
-	; inner delay loop ran through the slow C dispatch path (2 dispatches
-	; × 300+ real NES cycles each), making 65536-iteration loops take
-	; 65+ seconds instead of ~3.4 seconds.
-	;
-	; New approach: absorb the vblank by updating last_nmi_frame and
-	; continue the trampoline loop.  The main loop won't fire IRQs or
-	; render during the subroutine, but:
-	;   - Screen is static during delay loops (no visible difference)
-	;   - IRQ handler just mutes audio during delays (acceptable skip)
-	;   - lazyNES tolerates missing lnSync for several seconds
-	;   - After subroutine returns, main loop renders and fires IRQ normally
+	; and continue looping.
 	lda $26					; lazyNES NMI counter (incremented every vblank)
 	cmp _last_nmi_frame		; has a new vblank occurred?
 	beq .njsr_no_vblank		; no → skip absorb
@@ -451,10 +444,20 @@ not_recompiled:
 
 ;=======================================================	
 	section "text"
-	global _cache_search
+	global _cache_search, _njsr_do_interpret
 	zpage _matched, _cache_index, _cache_entry_pc_lo, _cache_entry_pc_hi
 ;-------------------------------------------------------
-	
+; Fixed-bank helper: interpret one instruction for the NJSR trampoline.
+; Called from WRAM when dispatch_on_pc returns 2 (interpret-only PC).
+; Switches to bank 0 for interpret_6502, then returns.  The trampoline
+; continues its loop — this avoids the expensive bail→compile→undo path.
+_njsr_do_interpret:
+	lda #0
+	ora _mapper_chr_bank
+	sta $C000
+	sta _mapper_prg_bank
+	jmp _interpret_6502		; tail-call: interpret_6502's RTS returns to trampoline
+
 _cache_search:
 	lda _pc
 	ldx #ASM_BLOCK_COUNT-1
@@ -866,7 +869,7 @@ _screen_diff_build_list:
 ; BSS for shadow buffer and update list
 	section "bss"
 _screen_shadow:		reserve $400	; 1024 bytes
-_vram_update_list:	reserve 145	; VRAM_UPDATE_MAX + 1 (terminator)
+_vram_update_list:	reserve 97	; VRAM_UPDATE_MAX + 1 (terminator)
 	section "data"
 
 ;=======================================================

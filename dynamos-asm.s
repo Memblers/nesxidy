@@ -419,11 +419,12 @@ _native_jsr_trampoline:
 .njsr_exit:
 	; Bail to C — subroutine hit something that needs recompile/interpret.
 	; _status was already saved by the last block's epilogue.
-	; Restore outer saved_sp, pop njsr's PHP, return non-zero.
+	; Preserve dispatch result (A=1 compile, A=2 interpret) across stack cleanup.
+	tax						; save dispatch result in X
 	pla						; restore outer saved_sp
 	sta _native_jsr_saved_sp
 	pla						; discard njsr's PHP
-	lda #1					; return non-zero = needs C handling
+	txa						; return actual dispatch result (1 or 2)
 	rts
 	
 not_recompiled:

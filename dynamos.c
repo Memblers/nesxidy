@@ -351,17 +351,7 @@ void run_6502(void)
 			return;
 		}
 		case 1:  // recompile needed
-		{
-			// Re-check: NJSR trampoline maps both A=1 (compile) and
-			// A=2 (interpret) to case 1 when bailing.  If this PC is
-			// actually interpret-only, skip the compile→undo path.
-			if (dispatch_on_pc() == 2) {
-				cache_interpret++;
-				bankswitch_prg(0);
-				interpret_6502();
-				return;
-			}
-		}
+			break;
 	}
 	
 	// Compile directly to flash

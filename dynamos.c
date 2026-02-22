@@ -1067,18 +1067,11 @@ void init_zp_mirror_table(void)
 	zp_addrs[1] = (uint8_t)((uint16_t)&zp_mirror_1);
 	zp_addrs[2] = (uint8_t)((uint16_t)&zp_mirror_2);
 
-	// Compute NES hi_offset per pointer based on what address space
-	// the pointer targets.  Offset = NES_base_page - Exidy_base_page.
-	uint8_t screen_ofs = (uint8_t)((uint16_t)SCREEN_RAM_BASE >> 8) - 0x40;
-	uint8_t char_ofs   = (uint8_t)((uint16_t)CHARACTER_RAM_BASE >> 8) - 0x48;
-
 	for (uint8_t i = 0; i < ZP_MIRROR_COUNT; i++) {
 		mirrored_ptrs[i] = init_table[i];
 		mirrored_ptrs[i].nes_zp = zp_addrs[i];
 	}
 
-	(void)screen_ofs;  // address_decoding_table used at runtime instead
-	(void)char_ofs;    // reserved for future character RAM pointers
 	zp_mirror_initialized = 1;
 }
 

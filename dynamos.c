@@ -99,6 +99,8 @@ __zpage uint8_t next_new_cache = 0;
 __zpage uint8_t matched = 0;
 __zpage uint8_t decimal_mode = 0;
 __zpage uint8_t block_has_jsr = 0;  // set when JSR/NJSR compiled in current block
+static uint8_t block_dirty_screen = 0;  // set after first INC screen_ram_updated in block
+static uint8_t block_dirty_char = 0;    // set after first INC character_ram_updated in block
 #ifdef ENABLE_COMPILE_PPU_EFFECT
 __zpage uint8_t compile_ppu_effect = 0;  // PPU emphasis bits toggled during compile
 __zpage uint8_t compile_ppu_active = 0;  // 1 = PPU effect enabled (SA boot only)
@@ -372,6 +374,8 @@ void run_6502(void)
 
 	cache_flag[0] = 0;
 	block_has_jsr = 0;  // reset for new block
+	block_dirty_screen = 0;
+	block_dirty_char = 0;
 
 	// Clear intra-block code_index map
 	for (uint8_t ci_i = 0; ci_i < 64; ci_i++)
@@ -1680,14 +1684,23 @@ static uint8_t recompile_opcode_b2()
 					code_index += 3;
 
 					// Emit dirty flag for stores to screen/char RAM.
+					// Skip if we already INC'd that region in this block.
 					if (decoded_address)
 					{
 						uint8_t msb = encoded_address >> 8;
-						if ((code_index + 4 + EPILOGUE_SIZE) < CODE_SIZE) {
-							code_index += emit_dirty_flag(code_ptr, code_index,
+						if (msb >= 0x40 && msb < 0x50 &&
+						    !((msb < 0x48) ? block_dirty_screen : block_dirty_char) &&
+						    (code_index + 4 + EPILOGUE_SIZE) < CODE_SIZE)
+						{
+							uint8_t n = emit_dirty_flag(code_ptr, code_index,
 							    op_buffer_0, msb,
 							    (uint8_t)((uint16_t)&screen_ram_updated),
 							    (uint8_t)((uint16_t)&character_ram_updated));
+							if (n) {
+								code_index += n;
+								if (msb < 0x48) block_dirty_screen = 1;
+								else            block_dirty_char = 1;
+							}
 						}
 					}
 					break;

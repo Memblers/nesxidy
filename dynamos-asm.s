@@ -372,7 +372,7 @@ _flash_dispatch_return_no_regs:
 ; On entry:  _pc = target, _sp = post-push SP, _native_jsr_saved_sp = pre-push SP
 ; On exit:   A = 0 if subroutine completed, non-zero if needs C
 ;-------------------------------------------------------
-	zpage _last_nmi_frame
+	zpage _last_nmi_frame, _native_jsr_saved_sp
 	global _native_jsr_trampoline
 _native_jsr_trampoline:
 	; Save outer _native_jsr_saved_sp on NES stack for nesting safety.
@@ -505,8 +505,22 @@ address_decoding_table:
 	;<_CHARACTER_RAM_BASE + i	; 0x08 @ 4800-4FFF	
 	db >(_CHARACTER_RAM_BASE + $0000), >(_CHARACTER_RAM_BASE + $0100), >(_CHARACTER_RAM_BASE + $0200), >(_CHARACTER_RAM_BASE + $0300)
 	db >(_CHARACTER_RAM_BASE + $0400), >(_CHARACTER_RAM_BASE + $0500), >(_CHARACTER_RAM_BASE + $0600), >(_CHARACTER_RAM_BASE + $0700)
-	
-	align 8	; pad with zeros
+
+	; Pages $50-$FF: unmapped on Exidy — route to safe WRAM page.
+	; Without these, LDA address_decoding_table,X with X>=$50 reads
+	; padding zeros → writes to NES zero page → corrupts emulator state.
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+	db >(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE),>(_RAM_BASE)
+
 address_action_table:
 	;_RAM_BASE
 	db $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
@@ -693,6 +707,37 @@ _sta_indy_zp_patch = * + 1
 _sta_indy_template_end:
 
 _sta_indy_template_size: db (_sta_indy_template_end - _sta_indy_template)
+
+;=======================================================
+	section "data"
+	global _native_sta_indy_tmpl, _native_sta_indy_tmpl_size
+	global _native_sta_indy_emu_lo, _native_sta_indy_emu_hi
+	zpage _indy_ea
+;-------------------------------------------------------
+; Native STA ($zp),Y template — reads pointer from emulated RAM,
+; translates hi byte via address_decoding_table, stores through _indy_ea.
+; Compile-time: patch 2 values before copying:
+;   _native_sta_indy_emu_lo  = emulated lo address (16-bit)
+;   _native_sta_indy_emu_hi  = emulated hi address (16-bit)
+; Runtime: 21 bytes, ~37 cycles.
+; Works for ANY Exidy address (screen, RAM, ROM) — no fixed hi_offset.
+; - RELOCATABLE CODE - INTERNAL ACCESS ONLY -
+_native_sta_indy_tmpl:
+	pha				; save store value
+	stx _x				; save emulated X
+_native_sta_indy_emu_lo = * + 1
+	lda $FFFF			; patched: emulated RAM lo
+	sta _indy_ea			; temp ptr lo
+_native_sta_indy_emu_hi = * + 1
+	ldx $FFFF			; patched: emulated RAM hi → X
+	lda address_decoding_table,x	; look up NES page
+	sta _indy_ea+1			; temp ptr hi
+	ldx _x				; restore emulated X
+	pla				; restore store value
+	sta (_indy_ea),y		; native indirect write
+_native_sta_indy_tmpl_end:
+
+_native_sta_indy_tmpl_size: db (_native_sta_indy_tmpl_end - _native_sta_indy_tmpl)
 
 ;=======================================================
 	section "data"
@@ -1032,7 +1077,7 @@ _opcode_6502_jsr_tgt_hi: db (_opcode_6502_jsr_tgt_hi_loc - _opcode_6502_jsr + 1)
 	global _opcode_6502_njsr_ret_hi, _opcode_6502_njsr_ret_lo
 	global _opcode_6502_njsr_tgt_lo, _opcode_6502_njsr_tgt_hi
 ;-------------------------------------------------------
-; Native JSR template (37 bytes)
+; Native JSR template (36 bytes)
 ; Same stack-push convention as emulated JSR, but instead of exiting to C,
 ; JMPs to native_jsr_trampoline which loops through the subroutine's
 ; compiled blocks entirely in WRAM. Trampoline exits via JMP to
@@ -1046,29 +1091,30 @@ _opcode_6502_jsr_tgt_hi: db (_opcode_6502_jsr_tgt_hi_loc - _opcode_6502_jsr + 1)
 ;   _opcode_6502_njsr_ret_lo  = offset of return addr low byte
 ;   _opcode_6502_njsr_tgt_lo  = offset of target addr low byte
 ;   _opcode_6502_njsr_tgt_hi  = offset of target addr high byte
+	zpage _native_jsr_saved_sp
 _opcode_6502_njsr:
 	php							; +0  save flags (popped by flash_dispatch_return_no_regs)
 	sta _a						; +1  save A
 	stx _x						; +3  save X
 	sty _y						; +5  save Y
 	ldx _sp						; +7  load emulated SP
-	stx _native_jsr_saved_sp	; +9  save pre-push SP for trampoline (3 bytes - abs addr)
+	stx _native_jsr_saved_sp	; +9  save pre-push SP for trampoline
 _opcode_6502_njsr_ret_hi_loc:
-	lda #$FF					; +12 LDA #>(return_addr) - PATCH
-	sta _RAM_BASE + $100, x		; +14 push high byte
-	dex							; +17
+	lda #$FF					; +11 LDA #>(return_addr) - PATCH
+	sta _RAM_BASE + $100, x		; +13 push high byte
+	dex							; +16
 _opcode_6502_njsr_ret_lo_loc:
-	lda #$FF					; +18 LDA #<(return_addr) - PATCH
-	sta _RAM_BASE + $100, x		; +20 push low byte
-	dex							; +23
-	stx _sp						; +24 save updated SP
+	lda #$FF					; +17 LDA #<(return_addr) - PATCH
+	sta _RAM_BASE + $100, x		; +19 push low byte
+	dex							; +22
+	stx _sp						; +23 save updated SP
 _opcode_6502_njsr_tgt_lo_loc:
-	lda #$FF					; +26 LDA #<target - PATCH
-	sta _pc						; +28
+	lda #$FF					; +25 LDA #<target - PATCH
+	sta _pc						; +27
 _opcode_6502_njsr_tgt_hi_loc:
-	lda #$FF					; +30 LDA #>target - PATCH
-	sta _pc+1					; +32
-	jmp _native_jsr_trampoline	; +34 trampoline loops then exits to C via WRAM
+	lda #$FF					; +29 LDA #>target - PATCH
+	sta _pc+1					; +31
+	jmp _native_jsr_trampoline	; +33 trampoline loops then exits to C via WRAM
 	
 _opcode_6502_njsr_end:
 _opcode_6502_njsr_size:	db (_opcode_6502_njsr_end - _opcode_6502_njsr)
@@ -1143,6 +1189,18 @@ _indy_ptr:		reserve 2
 	global _native_jsr_saved_sp
 ;-------------------------------------------------------
 _native_jsr_saved_sp:	reserve 1
+
+;=======================================================
+; NES ZP slots for native pointer mirroring.
+; These are real NES zero-page addresses used by native
+; STA (zp),Y instructions.  The linker assigns actual
+; ZP addresses; C code reads them via &zp_mirror_0 etc.
+	section "zpage"
+	global _zp_mirror_0, _zp_mirror_1, _zp_mirror_2
+;-------------------------------------------------------
+_zp_mirror_0:	reserve 2	; mirror for pointer pair 0
+_zp_mirror_1:	reserve 2	; mirror for pointer pair 1
+_zp_mirror_2:	reserve 2	; mirror for pointer pair 2
 
 ;=======================================================
 	section "data"

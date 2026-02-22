@@ -297,6 +297,29 @@ enum 6502op
 
 enum address_modes { imp, acc, imm, zp, zpx, zpy, rel, abso, absx, absy, ind, indx, indy };
 
+// --- Native ZP pointer mirroring ---
+#ifdef ENABLE_POINTER_SWIZZLE
+
+typedef struct {
+	uint8_t guest_lo;    // guest ZP address of pointer low byte
+	uint8_t guest_hi;    // guest ZP address of pointer high byte
+	uint8_t nes_zp;      // NES ZP slot for native mirror (lo; hi = lo+1)
+	uint8_t side_effect; // 0=none, 1=screen_ram_updated, 2=character_ram_updated
+} mirrored_ptr_t;
+
+extern mirrored_ptr_t mirrored_ptrs[ZP_MIRROR_COUNT];
+
+// Mirror helpers live in fixed bank ($C000+), callable from bank2.
+// Declared here, defined in dynamos.c before #pragma section bank2.
+
+// Look up a guest ZP address in the mirror table (lo or hi byte match).
+const mirrored_ptr_t *find_zp_mirror(uint8_t guest_zp);
+
+// Look up by guest_lo only (for STA (zp),Y operand).
+const mirrored_ptr_t *find_zp_mirror_lo(uint8_t guest_zp);
+
+#endif /* ENABLE_POINTER_SWIZZLE */
+
 
 
 #define enable_interpret()\

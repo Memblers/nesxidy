@@ -88,13 +88,32 @@
 // lnPPUMASK shadow so the effect takes effect from the top of screen.
 #define ENABLE_COMPILE_PPU_EFFECT
 
-// --- Pointer swizzling (per-game) ---
-// Replace Exidy high-byte immediates (LDA #$4x) with NES-translated values
-// at compile time, eliminating the runtime decode_address_asm call from
-// every subsequent (zp),Y use of the swizzled pointer.
+// --- Native ZP pointer mirroring (per-game) ---
+// Mirrors guest ZP pointer pairs into NES zero-page slots so that
+// STA (zp),Y can use the native 6502 indirect-indexed instruction
+// instead of the runtime address-decode handler.
+//
+// Mirror writes always store raw Exidy-space values (2-byte opcode).
+// Native STA (zp),Y reads the pointer from emulated RAM and
+// translates the hi byte at runtime via address_decoding_table —
+// correct for any Exidy address (screen, RAM, ROM, etc.).
+//
+// Each entry: { guest_lo, guest_hi, nes_zp, side_effect }
+//   guest_lo/hi: guest ZP addresses of the 16-bit pointer
+//   nes_zp:      NES ZP slot for the lo mirror (hi = nes_zp+1)
+//                Filled from linker-assigned addresses of zp_mirror_N.
+//   side_effect: 0=none, 1=inc screen_ram_updated, 2=inc character_ram_updated
+
 #ifdef GAME_SIDE_TRACK
 #define ENABLE_POINTER_SWIZZLE
 //#define ENABLE_POINTER_READBACK_GUARD
+
+#define ZP_MIRROR_COUNT 3
+#define ZP_MIRROR_TABLE \
+    { 0x00, 0x01, 0, 1 }, /* screen draw pointer     */ \
+    { 0x25, 0x26, 0, 1 }, /* track data pointer (ROM) */ \
+    { 0x69, 0x6A, 0, 1 }, /* player car pointer       */
+
 #endif
 
 // Valid ROM address range for the static walker (game-dependent).

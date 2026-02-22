@@ -41,9 +41,9 @@ uint8_t addrmodes[256] = {
 };
 #pragma section default
 
-// Address translation - must be in fixed bank (default section)
-// Cannot call into bank1 during recompilation since flash banks are active
-static uint16_t translate_address(uint16_t src_addr) {
+// Address translation - lives in fixed bank ($C000+), callable from bank2.
+// Only references BSS globals (RAM_BASE, ROM_NAME, etc.), no bank switching.
+uint16_t translate_address(uint16_t src_addr) {
     uint8_t msb = src_addr >> 8;
     
     if (msb < 0x04) {
@@ -71,6 +71,7 @@ static uint16_t translate_address(uint16_t src_addr) {
     // I/O or unmapped - must interpret
     return 0;
 }
+#pragma section default
 
 __zpage extern uint8_t sp;
 __zpage extern uint8_t a;
@@ -973,13 +974,144 @@ uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *co
 //   - flash_byte_program() is safe (WRAM, restores mapper_prg_bank)
 //   - Fixed-bank functions ($C000+) are always reachable
 //   - opt2_record_pending_branch_safe() is a fixed-bank trampoline
+
+#ifdef ENABLE_POINTER_SWIZZLE
+// Mirror helpers — live in fixed bank ($C000+), callable from bank2.
+
+const mirrored_ptr_t *find_zp_mirror(uint8_t guest_zp)
+{
+	for (uint8_t i = 0; i < ZP_MIRROR_COUNT; i++) {
+		if (mirrored_ptrs[i].guest_lo == guest_zp ||
+		    mirrored_ptrs[i].guest_hi == guest_zp)
+			return &mirrored_ptrs[i];
+	}
+	return 0;
+}
+
+const mirrored_ptr_t *find_zp_mirror_lo(uint8_t guest_zp)
+{
+	for (uint8_t i = 0; i < ZP_MIRROR_COUNT; i++) {
+		if (mirrored_ptrs[i].guest_lo == guest_zp)
+			return &mirrored_ptrs[i];
+	}
+	return 0;
+}
+
+// emit_zp_mirror_write — fixed-bank helper called from bank2.
+// If zp_addr is a tracked pointer byte, emits a 2-byte ZP opcode
+// (same opcode, mirror slot) to keep the NES mirror in sync.
+// The mirror always stays in Exidy address space; translation to
+// NES-space is deferred to the STA (zp),Y emit path.
+// Returns bytes emitted (0 or 2).
+uint8_t emit_zp_mirror_write(uint8_t *code_ptr, uint8_t ci, uint8_t opcode, uint8_t zp_addr)
+{
+	const mirrored_ptr_t *mp = find_zp_mirror(zp_addr);
+	if (!mp) return 0;
+	uint8_t mirror_zp = (zp_addr == mp->guest_lo) ? mp->nes_zp : (mp->nes_zp + 1);
+	code_ptr[ci]   = opcode;
+	code_ptr[ci+1] = mirror_zp;
+	return 2;
+}
+
+// emit_native_sta_indy — fixed-bank helper called from bank2.
+// Copies the native_sta_indy_tmpl template, patching the emulated
+// RAM addresses.  The template reads the pointer from emulated RAM
+// (the ground truth) and translates the hi byte via the
+// address_decoding_table at runtime — correct for ANY Exidy address
+// (screen pointers, RAM offsets, ROM addresses).
+// Returns bytes emitted, or 0 if zp_addr is not a mirrored pointer.
+uint8_t emit_native_sta_indy(uint8_t *code_ptr, uint8_t ci,
+                             uint8_t zp_addr, uint8_t scrn_zp, uint8_t char_zp)
+{
+	extern uint8_t native_sta_indy_tmpl[];
+	extern uint8_t native_sta_indy_tmpl_size;
+	extern uint16_t native_sta_indy_emu_lo;
+	extern uint16_t native_sta_indy_emu_hi;
+
+	const mirrored_ptr_t *mp = find_zp_mirror_lo(zp_addr);
+	if (!mp) return 0;
+
+	// Patch template with emulated RAM addresses for this pointer
+	native_sta_indy_emu_lo = (uint16_t)mp->guest_lo + (uint16_t)&RAM_BASE[0];
+	native_sta_indy_emu_hi = (uint16_t)mp->guest_hi + (uint16_t)&RAM_BASE[0];
+	uint8_t n = native_sta_indy_tmpl_size;
+	for (uint8_t i = 0; i < n; i++)
+		code_ptr[ci + i] = native_sta_indy_tmpl[i];
+
+	if (mp->side_effect) {
+		code_ptr[ci + n++] = 0x08;       // PHP
+		code_ptr[ci + n++] = 0xE6;       // INC zp
+		code_ptr[ci + n++] = (mp->side_effect == 1) ? scrn_zp : char_zp;
+		code_ptr[ci + n++] = 0x28;       // PLP
+	}
+	return n;
+}
+
+// ZP mirror slots defined in dynamos-asm.s (linker assigns ZP addresses)
+__zpage extern uint8_t zp_mirror_0[2];
+__zpage extern uint8_t zp_mirror_1[2];
+__zpage extern uint8_t zp_mirror_2[2];
+
+// Table initializer uses linker-assigned ZP addresses for nes_zp field.
+// Can't use static initializer with address-of in vbcc, so we initialize
+// at first use.  The mirrored_ptrs array is writable (not const).
+mirrored_ptr_t mirrored_ptrs[ZP_MIRROR_COUNT];
+
+static uint8_t zp_mirror_initialized = 0;
+void init_zp_mirror_table(void)
+{
+	if (zp_mirror_initialized) return;
+	mirrored_ptr_t init_table[ZP_MIRROR_COUNT] = { ZP_MIRROR_TABLE };
+	uint8_t zp_addrs[ZP_MIRROR_COUNT];
+	zp_addrs[0] = (uint8_t)((uint16_t)&zp_mirror_0);
+	zp_addrs[1] = (uint8_t)((uint16_t)&zp_mirror_1);
+	zp_addrs[2] = (uint8_t)((uint16_t)&zp_mirror_2);
+
+	// Compute NES hi_offset per pointer based on what address space
+	// the pointer targets.  Offset = NES_base_page - Exidy_base_page.
+	uint8_t screen_ofs = (uint8_t)((uint16_t)SCREEN_RAM_BASE >> 8) - 0x40;
+	uint8_t char_ofs   = (uint8_t)((uint16_t)CHARACTER_RAM_BASE >> 8) - 0x48;
+
+	for (uint8_t i = 0; i < ZP_MIRROR_COUNT; i++) {
+		mirrored_ptrs[i] = init_table[i];
+		mirrored_ptrs[i].nes_zp = zp_addrs[i];
+	}
+
+	(void)screen_ofs;  // address_decoding_table used at runtime instead
+	(void)char_ofs;    // reserved for future character RAM pointers
+	zp_mirror_initialized = 1;
+}
+
+#pragma section default
+#endif
+
+// emit_dirty_flag — fixed bank helper.
+// Emits PHP / INC screen_ram_updated or character_ram_updated / PLP.
+// Returns bytes emitted (4) or 0 if not a screen/char store.
+uint8_t emit_dirty_flag(uint8_t *code_ptr, uint8_t ci,
+                        uint8_t opcode, uint8_t msb,
+                        uint8_t scrn_zp, uint8_t char_zp)
+{
+	// Only for store opcodes to $40xx-$4Fxx
+	if ((opcode == 0x8D || opcode == 0x8E || opcode == 0x8C ||
+	     opcode == 0x9D || opcode == 0x99) &&
+	    msb >= 0x40 && msb < 0x50)
+	{
+		code_ptr[ci]   = 0x08;  // PHP
+		code_ptr[ci+1] = 0xE6;  // INC zp
+		code_ptr[ci+2] = (msb < 0x48) ? scrn_zp : char_zp;
+		code_ptr[ci+3] = 0x28;  // PLP
+		return 4;
+	}
+	return 0;
+}
+
 // ==========================================================================
 #pragma section bank2
 
 // Shared helper: emit a fixed-size opcode template (PHA/PLA/PHP/PLP).
-// Copies template bytes into code buffer, advances pc by 1, sets READY_FOR_NEXT.
-// Returns updated cache_flag.
-static uint8_t emit_template(uint8_t *tmpl, uint8_t sz)
+// Lives in fixed bank ($C000+), callable from bank2.
+uint8_t emit_template(uint8_t *tmpl, uint8_t sz)
 {
 	if ((code_index + sz + 3) < CODE_SIZE) {
 		uint8_t *dst = &cache_code[cache_index][code_index];
@@ -994,6 +1126,7 @@ static uint8_t emit_template(uint8_t *tmpl, uint8_t sz)
 	cache_flag[cache_index] &= ~READY_FOR_NEXT;
 	return cache_flag[cache_index];
 }
+#pragma section bank2
 
 static uint8_t recompile_opcode_b2()
 {
@@ -1003,6 +1136,10 @@ static uint8_t recompile_opcode_b2()
 	// Dirty flags from exidy.c (ZP) — needed for INC emission on screen/char stores
 	extern __zpage uint8_t screen_ram_updated;
 	extern __zpage uint8_t character_ram_updated;
+
+#ifdef ENABLE_POINTER_SWIZZLE
+	init_zp_mirror_table();
+#endif
 
 	uint8_t op_buffer_0;
 	uint8_t op_buffer_1;
@@ -1550,29 +1687,14 @@ static uint8_t recompile_opcode_b2()
 					code_index += 3;
 
 					// Emit dirty flag for stores to screen/char RAM.
-					// Without this, JIT absolute stores write directly to WRAM
-					// but never set screen_ram_updated, so render_video skips
-					// the shadow diff and changes are never pushed to the PPU.
 					if (decoded_address)
 					{
 						uint8_t msb = encoded_address >> 8;
-						// STA abs=$8D, STX abs=$8E, STY abs=$8C,
-						// STA absx=$9D, STA absy=$99
-						if ((op_buffer_0 == 0x8D || op_buffer_0 == 0x8E ||
-						     op_buffer_0 == 0x8C || op_buffer_0 == 0x9D ||
-						     op_buffer_0 == 0x99) &&
-						    msb >= 0x40 && msb < 0x50 &&
-						    (code_index + 2 + EPILOGUE_SIZE) < CODE_SIZE)
-						{
-							if (msb < 0x48) {
-								// Screen RAM: INC screen_ram_updated (ZP)
-								code_ptr[code_index++] = 0xE6;  // INC zp
-								code_ptr[code_index++] = (uint8_t)((uint16_t)&screen_ram_updated);
-							} else {
-								// Character RAM: INC character_ram_updated (ZP)
-								code_ptr[code_index++] = 0xE6;  // INC zp
-								code_ptr[code_index++] = (uint8_t)((uint16_t)&character_ram_updated);
-							}
+						if ((code_index + 4 + EPILOGUE_SIZE) < CODE_SIZE) {
+							code_index += emit_dirty_flag(code_ptr, code_index,
+							    op_buffer_0, msb,
+							    (uint8_t)((uint16_t)&screen_ram_updated),
+							    (uint8_t)((uint16_t)&character_ram_updated));
 						}
 					}
 					break;
@@ -1581,12 +1703,24 @@ static uint8_t recompile_opcode_b2()
 				case zp:				
 				{															
 					code_ptr[code_index] |= 0x08; // change ZP to ABS (refer to 6502 opcode matrix) - note: except for STX ZP,Y and STY ZP,X !! (interpreted for now)
-					uint16_t address = read6502(pc+1);
-					address += (uint16_t) &RAM_BASE[0];
+					uint8_t zp_addr = read6502(pc+1);
+					uint16_t address = (uint16_t)zp_addr + (uint16_t) &RAM_BASE[0];
 					code_ptr[code_index+1] = (uint8_t) address;
 					code_ptr[code_index+2] = (uint8_t) (address >> 8);
 					pc += 2;
 					code_index += 3;
+
+#ifdef ENABLE_POINTER_SWIZZLE
+					// Mirror write: if this ZP is a tracked pointer byte,
+					// also write/modify the NES ZP mirror slot.
+					// Mirror stays in Exidy-space — always a 2-byte opcode.
+					if ((op_buffer_0 == 0x85 || op_buffer_0 == 0x86 || op_buffer_0 == 0x84 ||
+					     op_buffer_0 == 0xE6 || op_buffer_0 == 0xC6) &&
+					    (code_index + 2 + EPILOGUE_SIZE) < CODE_SIZE)
+					{
+						code_index += emit_zp_mirror_write(code_ptr, code_index, op_buffer_0, zp_addr);
+					}
+#endif
 					break;
 				}
 				case zpx:
@@ -1652,6 +1786,22 @@ static uint8_t recompile_opcode_b2()
 
 					if (op_buffer_0 == 0x91)
 					{
+#ifdef ENABLE_POINTER_SWIZZLE
+						// Try native STA via address_decoding_table
+						{
+							uint8_t n = 0;
+							if ((code_index + 25 + EPILOGUE_SIZE) < CODE_SIZE) {
+								n = emit_native_sta_indy(code_ptr, code_index,
+								    zp_addr,
+								    (uint8_t)((uint16_t)&screen_ram_updated),
+								    (uint8_t)((uint16_t)&character_ram_updated));
+							}
+							if (n) {
+								code_index += n;
+								pc += 2;
+							} else
+#endif
+						{
 						// STA ($zp),Y: route through write6502() for side effects
 						if ((code_index + sta_indy_template_size + 3) < CODE_SIZE)
 						{
@@ -1667,6 +1817,10 @@ static uint8_t recompile_opcode_b2()
 							cache_flag[cache_index] &= ~READY_FOR_NEXT;
 							return cache_flag[cache_index];
 						}
+						}
+#ifdef ENABLE_POINTER_SWIZZLE
+						}
+#endif
 					}
 					else
 					{
@@ -1697,10 +1851,14 @@ static uint8_t recompile_opcode_b2()
 				
 				case imm:
 				case rel:
-					code_ptr[code_index+1] = read6502(pc+1);								
+				{
+					// Immediate values are kept in original Exidy-space.
+					// The NES ZP mirror applies hi_offset at the STA point.
+					code_ptr[code_index+1] = read6502(pc+1);
 					pc += 2;
 					code_index += 2;
 					break;
+				}
 				case imp:
 				case acc:						
 				{

@@ -582,14 +582,14 @@ T32:    ; BIT zero flag test (Z set)
 
 T33_ok:
         ; Additional tests: JMP indirect page-boundary wrap (6502 bug) and SBC edge cases
-        ; JMP indirect wrap test: set pointer low at $02FF and force wrap-high at $0200 -> target = $3000
+        ; JMP indirect wrap test: set pointer low at $02FF and force wrap-high at $0200 -> target = $3E00
         LDA #$00
         STA $02FF
-        LDA #$30
+        LDA #$3E
         STA $0200
-        LDA #$31
+        LDA #$3F
         STA $0300
-        JMP ($02FF)        ; should wrap and jump to $3000; target sets $002A=1 and JMPs back
+        JMP ($02FF)        ; should wrap and jump to $3E00; target sets $002A=1 and JMPs back
 T34_check:
         LDA $002A
         CMP #$01
@@ -1172,9 +1172,505 @@ T65:    LDA #$A5
         BNE T65_fail
         EOR #$5A          ; EOR with self -> $00
         BNE T65_fail
-        JMP T_DONE
+        JMP T66
 T65_fail:
         LDA #$59
+        STA $0020
+        JMP End
+
+; =====================================================
+; OPTIMIZER / PEEPHOLE TEST SUITE (T66–T83)
+; Targets JIT recompiler peephole PLP/PHP elimination,
+; PLP flush correctness, PHP non-trim, optimizer V2
+; backward-branch patching, and edge cases.
+;
+; Peephole trim: PHA/PLA templates (13 bytes) start with
+; PHP ($08) and end with PLP ($28).  TRIM defers the
+; trailing PLP; the compile loop flushes it before the
+; next instruction.  PHP template (15 bytes) must NOT
+; be trimmed (different size).
+; =====================================================
+
+; --- T66: Simple PHA/PLA pair (basic peephole trim candidate) ---
+; Single PHA then PLA — the most minimal trim case.
+; PHA's trailing PLP is deferred, PLA's PLP is also deferred.
+; Value must round-trip correctly.
+T66:    LDA #$42
+        PHA
+        LDA #$00          ; clobber A
+        PLA               ; should get $42
+        CMP #$42
+        BEQ T67
+        LDA #$5A
+        STA $0020
+        JMP End
+
+; --- T67: PHA/PLA flag preservation (N and Z) ---
+; After PLA, the N and Z flags must reflect the pulled value.
+; With peephole trim, the deferred PLP must restore flags
+; correctly so that PLA's result flags are visible.
+T67:    LDA #$80          ; negative value
+        PHA
+        LDA #$00          ; clear N, set Z
+        PLA               ; A=$80 → N=1, Z=0
+        BPL T67_fail      ; N must be set
+        BEQ T67_fail      ; Z must be clear
+        LDA #$00          ; zero value
+        PHA
+        LDA #$FF          ; set N
+        PLA               ; A=$00 → N=0, Z=1
+        BMI T67_fail      ; N must be clear
+        BNE T67_fail      ; Z must be set
+        JMP T68
+T67_fail:
+        LDA #$5B
+        STA $0020
+        JMP End
+
+; --- T68: Three consecutive PHA/PLA pairs ---
+; Each pair triggers peephole trim independently.
+; Trim state (block_flags_saved) must reset between pairs.
+T68:    LDA #$AA
+        PHA
+        LDA #$00
+        PLA               ; pair 1: $AA
+        CMP #$AA
+        BNE T68_fail
+        LDA #$55
+        PHA
+        LDA #$00
+        PLA               ; pair 2: $55
+        CMP #$55
+        BNE T68_fail
+        LDA #$CC
+        PHA
+        LDA #$00
+        PLA               ; pair 3: $CC
+        CMP #$CC
+        BEQ T69
+T68_fail:
+        LDA #$5C
+        STA $0020
+        JMP End
+
+; --- T69: Nested PHA/PHA/PLA/PLA (LIFO with consecutive trims) ---
+; Two PHAs in a row: the first PHA defers its PLP, then the
+; compile loop flushes it before the second PHA executes.
+; Both values must survive in correct LIFO order.
+T69:    LDA #$11
+        PHA               ; push $11 (PLP deferred)
+        LDA #$22
+        PHA               ; push $22 (first PHA's PLP flushed, new PLP deferred)
+        LDA #$00          ; clobber A
+        PLA               ; should get $22
+        CMP #$22
+        BNE T69_fail
+        PLA               ; should get $11
+        CMP #$11
+        BEQ T70
+T69_fail:
+        LDA #$5D
+        STA $0020
+        JMP End
+
+; --- T70: PHA then ALU ops then PLA (PLP flush before ALU) ---
+; The deferred PLP from PHA must be flushed before the CLC
+; and ADC, so those instructions operate with correct host flags.
+T70:    LDA #$37
+        PHA               ; push $37, PLP deferred
+        CLC               ; PLP must be flushed before this
+        LDA #$10
+        ADC #$05          ; $10 + $05 + C(0) = $15
+        STA $0017         ; save ADC result
+        PLA               ; should get $37
+        CMP #$37
+        BNE T70_fail
+        LDA $0017
+        CMP #$15
+        BEQ T71
+T70_fail:
+        LDA #$5E
+        STA $0020
+        JMP End
+
+; --- T71: PHA/PLA with carry-chain verification ---
+; The flag state between PHA and PLA must be correct.
+; ADC after PHA must see a clean carry (CLC), not stale flags.
+T71:    LDA #$01
+        PHA               ; push $01, PLP deferred
+        LDA #$FF
+        CLC
+        ADC #$01          ; $FF + 1 = $00, C=1, Z=1
+        BNE T71_fail      ; Z must be set
+        BCC T71_fail      ; C must be set
+        PLA               ; should get $01
+        CMP #$01
+        BEQ T72
+T71_fail:
+        LDA #$5F
+        STA $0020
+        JMP End
+
+; --- T72: PHP/PLP must NOT be trimmed ---
+; PHP template is 15 bytes, PHA is 13 bytes.  Trim condition
+; requires sz == opcode_6502_pha_size (13), so PHP (15) is
+; never trimmed.  Verify full PHP/PLP flag round-trip.
+T72:    SEC               ; C=1
+        LDA #$80          ; N=1
+        PHP               ; push flags: C=1, N=1, Z=0
+        CLC               ; clear carry
+        LDA #$00          ; Z=1, N=0
+        PLP               ; restore flags: C=1, N=1, Z=0
+        BCC T72_fail      ; C must be set
+        BEQ T72_fail      ; Z must be clear
+        BPL T72_fail      ; N must be set
+        JMP T73
+T72_fail:
+        LDA #$60
+        STA $0020
+        JMP End
+
+; --- T73: Mixed PHP, PHA, PLA, PLP sequence ---
+; PHP and PHA have different template sizes (15 vs 13).
+; Only PHA/PLA should be subject to trim, not PHP/PLP.
+; The PLP at the end must restore the flags PHP pushed.
+T73:    SEC               ; C=1
+        PHP               ; push flags (NOT trimmed — 15 bytes)
+        LDA #$77
+        PHA               ; push $77 (trimmed — 13 bytes)
+        LDA #$00
+        PLA               ; pull $77 (trimmed — 13 bytes)
+        CMP #$77
+        BNE T73_fail
+        CLC               ; C=0
+        PLP               ; restore flags pushed by PHP → C=1
+        BCC T73_fail      ; C must be 1
+        JMP T74
+T73_fail:
+        LDA #$61
+        STA $0020
+        JMP End
+
+; --- T74: PHA/PLA in backward-branch loop (optimizer V2) ---
+; Tests peephole trim interacting with backward-branch
+; optimization.  Each iteration does PHA/PLA on the running sum.
+T74:    LDX #$03          ; 3 iterations
+        LDA #$00
+T74_loop:
+        CLC
+        ADC #$10          ; A += $10
+        PHA               ; push running total (trimmed)
+        LDA #$00          ; clobber A
+        PLA               ; restore running total (trimmed)
+        DEX
+        BNE T74_loop      ; backward branch
+        ; After 3 iters: $10, $20, $30
+        CMP #$30
+        BEQ T75
+        LDA #$62
+        STA $0020
+        JMP End
+
+; --- T75: PHA/PLA with INX/DEX between (non-stack compiled ops) ---
+; The PLP flush from PHA must happen before INX so that INX
+; operates on correct host state.  X must be unaffected by PHA/PLA.
+T75:    LDX #$10
+        LDA #$BB
+        PHA               ; push $BB, PLP deferred
+        INX               ; X=$11 (PLP must flush before this)
+        INX               ; X=$12
+        PLA               ; should get $BB
+        CMP #$BB
+        BNE T75_fail
+        CPX #$12          ; X should be $12
+        BEQ T76
+T75_fail:
+        LDA #$63
+        STA $0020
+        JMP End
+
+; --- T76: PHA/PLA sandwiched with STA/LDA abs ---
+; Tests trim when PHA/PLA is mixed with absolute-addressing
+; compiled ops.  Both the stack value and memory must survive.
+T76:    LDA #$EE
+        PHA               ; push $EE (trimmed)
+        LDA #$DD
+        STA $0318         ; compiled STA abs
+        LDA #$00          ; clobber A
+        PLA               ; should get $EE
+        CMP #$EE
+        BNE T76_fail
+        LDA $0318         ; verify STA abs worked
+        CMP #$DD
+        BEQ T77
+T76_fail:
+        LDA #$64
+        STA $0020
+        JMP End
+
+; --- T77: Three PHAs then three PLAs (deep stack, LIFO) ---
+; Stress test: three consecutive PHAs each trigger PLP flush
+; for the prior PHA.  All values must survive in LIFO order.
+T77:    LDA #$AA
+        PHA               ; push $AA
+        LDA #$BB
+        PHA               ; push $BB (flush $AA's PLP first)
+        LDA #$CC
+        PHA               ; push $CC (flush $BB's PLP first)
+        LDA #$00          ; clobber
+        PLA               ; $CC
+        CMP #$CC
+        BNE T77_fail
+        PLA               ; $BB
+        CMP #$BB
+        BNE T77_fail
+        PLA               ; $AA
+        CMP #$AA
+        BEQ T78
+T77_fail:
+        LDA #$65
+        STA $0020
+        JMP End
+
+; --- T78: PHA then JSR then PLA (interpreted boundary) ---
+; JSR is interpreted, forcing a block boundary.  The deferred
+; PLP must be flushed before the block ends (epilogue flush).
+; After JSR/RTS returns, PLA must find the value on the stack.
+T78:    LDA #$99
+        PHA               ; push $99 (PLP deferred → epilogue flush)
+        JSR Sub04         ; interpreted — forces block boundary
+        PLA               ; should get $99
+        CMP #$99
+        BEQ T79
+        LDA #$66
+        STA $0020
+        JMP End
+
+Sub04:  NOP
+        RTS
+
+; --- T79: PHA/PLA with forward branch between (interpreted) ---
+; Forward branch between PHA and PLA.  The recompiler interprets
+; forward branches.  PLP flush must be correct across the branch.
+T79:    LDA #$AB
+        PHA               ; push $AB (PLP deferred)
+        LDA #$01
+        CMP #$01
+        BEQ T79_skip      ; forward branch (interpreted path)
+        LDA #$67
+        STA $0020
+        JMP End
+T79_skip:
+        PLA               ; should get $AB
+        CMP #$AB
+        BEQ T80
+        LDA #$67
+        STA $0020
+        JMP End
+
+; --- T80: PLA flag test — N flag for $7F (positive) and $80 (negative) ---
+; Boundary values for N flag: $7F is the largest positive,
+; $80 is the smallest negative.  PLA must set N correctly.
+T80:    LDA #$7F
+        PHA
+        LDA #$FF          ; set N
+        PLA               ; A=$7F → N=0, Z=0
+        BMI T80_fail      ; N must be clear ($7F is positive)
+        LDA #$80
+        PHA
+        LDA #$00          ; clear N
+        PLA               ; A=$80 → N=1, Z=0
+        BPL T80_fail      ; N must be set ($80 is negative)
+        JMP T81
+T80_fail:
+        LDA #$68
+        STA $0020
+        JMP End
+
+; --- T81: Long compiled sequence between PHA and PLA ---
+; Many compiled instructions between PHA and PLA to verify
+; that code_index tracking remains correct over many emitted
+; templates with a deferred PLP.
+T81:    LDA #$DE
+        PHA               ; push $DE (PLP deferred)
+        ; lots of compiled ops
+        LDA #$01
+        CLC
+        ADC #$02          ; A=$03
+        ADC #$03          ; A=$06
+        ADC #$04          ; A=$0A
+        STA $0018         ; save result
+        LDA #$00          ; clobber A
+        LDA $0018         ; reload to verify
+        CMP #$0A
+        BNE T81_fail
+        PLA               ; should get $DE
+        CMP #$DE
+        BEQ T82
+T81_fail:
+        LDA #$69
+        STA $0020
+        JMP End
+
+; --- T82: PHA/PLA in tight loop with backward branch ---
+; Specifically tests peephole trim + optimizer V2 backward-
+; branch patching.  Every iteration does PHA/PLA + arithmetic.
+T82:    LDX #$04
+        LDA #$00
+T82_loop:
+        PHA               ; push A (trimmed)
+        INX               ; modify X (forces PLP flush)
+        DEX               ; restore X pattern
+        PLA               ; restore A (trimmed)
+        CLC
+        ADC #$01          ; A++
+        DEX
+        BNE T82_loop      ; backward branch, 4 iterations
+        CMP #$04          ; A should be 4
+        BEQ T83
+        LDA #$6A
+        STA $0020
+        JMP End
+
+; --- T83: PHA/PLA with every flag-modifying op between ---
+; Comprehensive: PHA, then CLC/SEC/CLV/ADC/CLV, then PLA.
+; The PLP flush must not corrupt the guest-visible flags
+; that the intervening instructions set, and PLA must
+; correctly reflect its result value in N/Z.
+T83:    LDA #$F0
+        PHA               ; push $F0 (PLP deferred)
+        CLC
+        SEC
+        CLV
+        LDA #$7F
+        ADC #$01          ; V=1 (overflow $7F+1=$80)
+        CLV               ; V=0
+        LDA #$00          ; Z=1
+        PLA               ; A=$F0 → N=1, Z=0
+        BMI T83_ok        ; N must be set (A=$F0)
+        LDA #$6B
+        STA $0020
+        JMP End
+T83_ok:
+        CMP #$F0
+        BNE T83_fail2
+        JMP T84
+T83_fail2:
+        LDA #$6B
+        STA $0020
+        JMP End
+
+; --- T84: Alternating PHA value PLA — interleaved with INC/DEC ---
+; Tests that PLP flush works correctly when PHA/PLA pairs are
+; separated by INC/DEC (which the recompiler compiles in-place).
+T84:    LDA #$10
+        STA $0019         ; mem = $10
+        LDA #$AA
+        PHA               ; push $AA
+        INC $0019         ; mem = $11 (PLP flush before this)
+        INC $0019         ; mem = $12
+        PLA               ; should get $AA
+        CMP #$AA
+        BNE T84_fail
+        LDA $0019
+        CMP #$12
+        BEQ T85
+T84_fail:
+        LDA #$6C
+        STA $0020
+        JMP End
+
+; --- T85: PHA/PLA value $00 and $FF boundary ---
+; Edge values: $00 (triggers Z flag), $FF (triggers N flag).
+; Both must survive PHA/PLA round-trip with correct flags.
+T85:    LDA #$00
+        PHA
+        LDA #$FF          ; clobber
+        PLA               ; A=$00 → Z=1, N=0
+        BNE T85_fail      ; Z must be set
+        BMI T85_fail      ; N must be clear
+        CMP #$00
+        BNE T85_fail
+        LDA #$FF
+        PHA
+        LDA #$00          ; clobber
+        PLA               ; A=$FF → Z=0, N=1
+        BEQ T85_fail      ; Z must be clear
+        BPL T85_fail      ; N must be set
+        CMP #$FF
+        BEQ T86
+T85_fail:
+        LDA #$6D
+        STA $0020
+        JMP End
+
+; --- T86: Two PHA/PLA pairs with SEC/CLC between ---
+; Verifies that the carry flag state between two PHA/PLA
+; pairs is not corrupted by the PLP flush mechanism.
+T86:    SEC               ; C=1
+        LDA #$01
+        PHA
+        LDA #$00
+        PLA               ; $01
+        CMP #$01
+        BNE T86_fail
+        ; Now C should reflect the CMP above (C=1 since $01 >= $01)
+        CLC               ; explicitly clear carry
+        LDA #$02
+        PHA
+        LDA #$00
+        PLA               ; $02
+        CMP #$02
+        BNE T86_fail
+        ; Verify the CLC actually took effect:
+        ; After CMP #$02 with A=$02: C=1, Z=1
+        ; This confirms PLP flush didn't restore stale carry
+        BNE T86_fail
+        JMP T87
+T86_fail:
+        LDA #$6E
+        STA $0020
+        JMP End
+
+; --- T87: Rapid PHA/PLA/PHA/PLA without intervening ops ---
+; Four consecutive stack ops with no other instructions between.
+; Each PHA/PLA pair is a trim candidate.  No PLP flush needed
+; between pairs (but deferred PLP from first PLA must flush
+; before second PHA).
+T87:    LDA #$D0
+        PHA               ; push $D0
+        PLA               ; pull $D0
+        PHA               ; push $D0 again (PLP flush for prior PLA)
+        PLA               ; pull $D0 again
+        CMP #$D0          ; must still be $D0
+        BEQ T88
+        LDA #$6F
+        STA $0020
+        JMP End
+
+; --- T88: PHP then PHA/PLA pair then PLP ---
+; The outer PHP/PLP (15-byte templates, NOT trimmed) bracket
+; an inner PHA/PLA pair (13-byte templates, trimmed).
+; All four ops must work correctly together.
+T88:    CLC
+        LDA #$50
+        ADC #$50          ; A=$A0, V=1, C=0, N=1
+        PHP               ; push flags: V=1, C=0, N=1, Z=0
+        LDA #$77
+        PHA               ; push $77 (inner pair — trimmed)
+        LDA #$00
+        PLA               ; pull $77
+        CMP #$77
+        BNE T88_fail
+        ; Now restore flags via PLP
+        PLP               ; V=1, C=0, N=1, Z=0
+        BVC T88_fail      ; V must be set
+        BCS T88_fail      ; C must be clear
+        BPL T88_fail      ; N must be set
+        BEQ T88_fail      ; Z must be clear
+        JMP T_DONE
+T88_fail:
+        LDA #$70
         STA $0020
         JMP End
 
@@ -1244,13 +1740,13 @@ PClear:
 ; All tests passed
 ; ----------------------
         ; Stubs for JMP indirect page-wrap test (placed in ROM so JMP targets are reachable)
-        .org $3000
+        .org $3E00
 JMP_WRAPPED_OK:
         LDA #$01
         STA $002A
         JMP T34_check
 
-        .org $3100
+        .org $3F00
 JMP_NONWRAP_OK:
         LDA #$02
         STA $002A

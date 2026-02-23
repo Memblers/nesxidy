@@ -36,6 +36,17 @@
 // V2 optimizer - in-place branch patching (no sector evacuation)
 #define ENABLE_OPTIMIZER_V2
 
+// Peephole PLP/PHP elimination - elide redundant PLP/PHP pairs between
+// consecutive PHA/PLA templates.  Saves 2 bytes + 2 cycles per pair.
+#define ENABLE_PEEPHOLE
+// Sub-option: defer trailing PLP (trim).  Without this, the peephole
+// codepath is compiled but never activates — tests for vbcc miscompilation.
+#define ENABLE_PEEPHOLE_TRIM
+// Sub-option: skip leading PHP when flags already saved (full optimisation).
+// Requires TRIM.  Without this, trim defers PLP but every PHP is still
+// emitted — tests the defer/flush machinery in isolation.
+#define ENABLE_PEEPHOLE_SKIP
+
 // Patchable epilogue - block chaining via patchable epilogues (requires V2)
 #ifdef ENABLE_OPTIMIZER_V2
 #define ENABLE_PATCHABLE_EPILOGUE
@@ -60,7 +71,7 @@
 // When disabled (default), zpx/zpy are compiled as absolute indexed (absx/absy),
 // which is faster but won't wrap at the zero page boundary.
 // Most games don't rely on ZP index wrapping, so leaving this off is usually safe.
-//#define ENABLE_ZP_INDEX_WRAP
+#define ENABLE_ZP_INDEX_WRAP
 
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)

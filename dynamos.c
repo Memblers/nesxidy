@@ -101,6 +101,12 @@ __zpage uint8_t decimal_mode = 0;
 __zpage uint8_t block_has_jsr = 0;  // set when JSR/NJSR compiled in current block
 static uint8_t block_dirty_screen = 0;  // set after first INC screen_ram_updated in block
 static uint8_t block_dirty_char = 0;    // set after first INC character_ram_updated in block
+#ifdef ENABLE_PEEPHOLE
+volatile uint8_t block_flags_saved = 0;   // peephole: trailing PLP deferred from previous template (volatile: prevent vbcc dead-code elimination)
+uint8_t block_has_skip = 0;     // peephole: set when any template in block used skip=1
+static uint8_t peephole_skipped = 0;   // peephole: set per-instruction when skip=1 was used
+uint8_t recompile_instr_start;           // code_index at instruction start (after any deferred PLP flush)
+#endif
 #ifdef ENABLE_COMPILE_PPU_EFFECT
 __zpage uint8_t compile_ppu_effect = 0;  // PPU emphasis bits toggled during compile
 __zpage uint8_t compile_ppu_active = 0;  // 1 = PPU effect enabled (SA boot only)
@@ -190,6 +196,7 @@ extern	uint8_t flash_block_flags[];
 
 // Bank 2 implementation — no bankswitch_prg calls allowed.
 // Uses peek_bank_byte (WRAM helper) for cross-bank reads.
+#ifdef ENABLE_DEBUG_STATS
 #pragma section bank2
 static void debug_stats_update_b2(void)
 {
@@ -249,6 +256,7 @@ void debug_stats_update(void)
 	debug_stats_update_b2();
 	bankswitch_prg(saved_bank);
 }
+#endif // ENABLE_DEBUG_STATS
 
 uint16_t pc_jump_address;
 uint8_t pc_jump_bank;
@@ -376,6 +384,10 @@ void run_6502(void)
 	block_has_jsr = 0;  // reset for new block
 	block_dirty_screen = 0;
 	block_dirty_char = 0;
+#ifdef ENABLE_PEEPHOLE
+	block_flags_saved = 0;
+	block_has_skip = 0;
+#endif
 
 	// Clear intra-block code_index map
 	for (uint8_t ci_i = 0; ci_i < 64; ci_i++)
@@ -424,14 +436,25 @@ void run_6502(void)
 		uint16_t pc_old = pc;
 		uint8_t code_index_old = code_index;
 		
+#ifdef ENABLE_PEEPHOLE
+		peephole_skipped = 0;  // reset per-instruction skip flag
+#endif
+		recompile_opcode();
+		
 		// Record this instruction's code_index for intra-block branch lookup.
-		// Index by (guest_pc - entry_pc) & 0x3F.  Store code_index + 1 (0 = empty).
+		// recompile_instr_start (set inside recompile_opcode_b2 after any
+		// deferred PLP flush) points to instruction code, not PLP byte.
+#ifdef ENABLE_PEEPHOLE
+		{
+			uint8_t ci_slot = (uint8_t)(pc_old - entry_pc) & 0x3F;
+			block_ci_map[ci_slot] = recompile_instr_start + 1;
+		}
+#else
 		{
 			uint8_t ci_slot = (uint8_t)(pc_old - entry_pc) & 0x3F;
 			block_ci_map[ci_slot] = code_index_old + 1;
 		}
-		
-		recompile_opcode();
+#endif
 		
 		uint8_t instr_len = code_index - code_index_old;
 
@@ -464,20 +487,36 @@ void run_6502(void)
 		}
 #endif
 		
+#ifdef ENABLE_PEEPHOLE
+		// Account for deferred PLP byte (block_flags_saved) that will be
+		// flushed before the next instruction or in the epilogue.
+		if ((code_index + block_flags_saved) > (CODE_SIZE - 6))
+#else
 		if (code_index > (CODE_SIZE - 6))
+#endif
 		{
 			cache_flag[0] |= OUT_OF_CACHE;
 			cache_flag[0] &= ~READY_FOR_NEXT;
 		}
 		
 		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
-			flash_cache_pc_update(code_index_old, INTERPRETED);
+			flash_cache_pc_update(recompile_instr_start, INTERPRETED);
+#ifdef ENABLE_PEEPHOLE
+		else if (peephole_skipped)
+		{
+			// Peephole safety: this instruction's leading PHP was skipped
+			// (skip=1), so its native code is only valid when entered from
+			// the preceding instruction in the block.  Mark it INTERPRETED
+			// so that dispatch won't jump directly to this unsafe code.
+			flash_cache_pc_update(recompile_instr_start, INTERPRETED);
+		}
+#endif
 		else if (instr_len || pc != pc_old)
 		{
-			flash_cache_pc_update(code_index_old, RECOMPILED);
+			flash_cache_pc_update(recompile_instr_start, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
 			// V2: Check if any pending branches/epilogues target this PC
-			opt2_notify_block_compiled(pc_old, flash_code_address + code_index_old + BLOCK_PREFIX_SIZE, flash_code_bank);
+			opt2_notify_block_compiled(pc_old, flash_code_address + recompile_instr_start + BLOCK_PREFIX_SIZE, flash_code_bank);
 #endif
 		}
 		
@@ -500,6 +539,18 @@ void run_6502(void)
 	{
 		// Exit PC is the current pc value (instruction to interpret or continue from)
 		uint16_t exit_pc = pc;
+
+#ifdef ENABLE_PEEPHOLE
+		// Flush deferred PLP from peephole before epilogue
+		// NOTE: volatile pointer cast on cache_code write prevents vbcc DCE.
+		// code_index uses plain ++ so compiler tracks the new value.
+		if (block_flags_saved) {
+			*(volatile uint8_t *)&cache_code[0][code_index] = 0x28;  // PLP
+			code_index++;
+			block_flags_saved = 0;
+		}
+#endif
+
 		// --- Build epilogue into cache_code buffer, then write header + all code to flash ---
 		uint8_t epilogue_start = code_index;
 
@@ -633,9 +684,9 @@ pc_jump_flag_address = (address & FLASH_BANK_MASK);
 
 //============================================================================================================
 // ==========================================================================
-// flash_cache_search — moved to bank 2 (appears to be dead code, but kept).
-// Saves ~271 bytes of fixed-bank space.
+// flash_cache_search — dead code, removed to save bank2 space.
 // ==========================================================================
+#if 0
 #pragma section bank2
 
 static uint8_t flash_cache_search_b2(uint16_t emulated_pc)
@@ -668,6 +719,7 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 	bankswitch_prg(saved_bank);
 	return result;
 }
+#endif // dead code
 
 //============================================================================================================
 
@@ -896,6 +948,14 @@ uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
 	if (block_has_jsr)
 		return 0;
 	
+#ifdef ENABLE_PEEPHOLE
+	// Peephole safety: if any instruction in this block used skip=1
+	// (leading PHP elided), a backward branch to that code would enter
+	// without the expected PHP on the NES HW stack, corrupting returns.
+	if (block_has_skip)
+		return 0;
+#endif
+	
 	uint16_t block_entry = (uint16_t)cache_entry_pc_lo[cache_index]
 	                     | ((uint16_t)cache_entry_pc_hi[cache_index] << 8);
 	
@@ -1107,18 +1167,59 @@ uint8_t emit_dirty_flag(uint8_t *code_ptr, uint8_t ci,
 #pragma section bank2
 
 // Shared helper: emit a fixed-size opcode template (PHA/PLA/PHP/PLP).
-// Lives in fixed bank ($C000+), callable from bank2.
+// Peephole: if previous template deferred its trailing PLP and this
+// template starts with PHP, skip the redundant PLP/PHP pair.
+// If this template ends with PLP (and started with PHP), defer the
+// trailing PLP for the next instruction to potentially elide.
 uint8_t emit_template(uint8_t *tmpl, uint8_t sz)
 {
-	if ((code_index + sz + 3) < CODE_SIZE) {
+#ifdef ENABLE_PEEPHOLE
+	// Peephole: determine skip/trim
+	uint8_t skip = 0;  // bytes to skip at start (leading PHP)
+	uint8_t trim = 0;  // bytes to trim at end (trailing PLP)
+	// NOTE: block_flags_saved is always 0 here — the compile loop flushes
+	// deferred PLP before capturing code_index_old, so emit_template never
+	// needs to flush.  The trim logic below just defers the trailing PLP.
+	//
+	// Only trim PHA (sz=13) and PLA (sz=13) templates — NOT PHP (sz=15).
+	// PHP's trailing PLP restores guest P from an inner PHA/PHP pair;
+	// deferring it would leave guest flags corrupted.
+	if (tmpl[0] == 0x08 && tmpl[sz - 1] == 0x28 && sz == opcode_6502_pha_size) {
+		// Template starts with PHP and ends with PLP (PHA/PLA):
+		// defer the trailing PLP for the compile loop to flush.
+#ifdef ENABLE_PEEPHOLE_TRIM
+		trim = 1;
+#endif
+	}
+	uint8_t emit_sz = sz - skip - trim;
+#else
+	uint8_t skip = 0;
+	uint8_t emit_sz = sz;
+#endif
+	// Size check: use sz-skip (not emit_sz) so the deferred PLP byte
+	// from trim is still counted against the space budget.
+	if ((code_index + sz - skip + 3) < CODE_SIZE) {
 		uint8_t *dst = &cache_code[cache_index][code_index];
-		for (uint8_t i = 0; i < sz; i++)
-			dst[i] = tmpl[i];
+		for (uint8_t i = 0; i < emit_sz; i++)
+			dst[i] = tmpl[skip + i];
 		pc += 1;
-		code_index += sz;
+		code_index += emit_sz;
+#ifdef ENABLE_PEEPHOLE
+		block_flags_saved = trim;  // 1 = PLP deferred, 0 = not
+#endif
 		cache_flag[cache_index] |= READY_FOR_NEXT;
 		return cache_flag[cache_index];
 	}
+#ifdef ENABLE_PEEPHOLE
+	// Out of space — flush deferred PLP if any before bailing
+	// NOTE: volatile pointer cast on cache_code write prevents vbcc DCE.
+	// code_index uses plain ++ so compiler tracks the new value.
+	if (block_flags_saved) {
+		*(volatile uint8_t *)&cache_code[cache_index][code_index] = 0x28;  // PLP
+		code_index++;
+		block_flags_saved = 0;
+	}
+#endif
 	cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
 	cache_flag[cache_index] &= ~READY_FOR_NEXT;
 	return cache_flag[cache_index];
@@ -1142,6 +1243,20 @@ static uint8_t recompile_opcode_b2()
 	uint8_t op_buffer_1;
 	uint8_t op_buffer_2;
 	uint8_t *code_ptr = cache_code[cache_index];
+
+#ifdef ENABLE_PEEPHOLE
+	// Flush deferred PLP from previous instruction's trim.
+	// Done here (bank2) so ALL compile loops get it for free.
+	// NOTE: volatile pointer casts required — vbcc -O2 eliminates
+	// plain stores inside if(block_flags_saved) blocks.
+	if (block_flags_saved) {
+		*(volatile uint8_t *)&code_ptr[code_index] = 0x28;  // PLP
+		code_index++;  // plain increment so compiler tracks new value
+		block_flags_saved = 0;
+	}
+	recompile_instr_start = code_index;
+#endif
+
 	op_buffer_0 = read6502(pc);
 
 	switch (op_buffer_0)
@@ -1788,6 +1903,7 @@ static uint8_t recompile_opcode_b2()
 				}
 				case indy:
 				{
+					enable_interpret();
 					uint8_t zp_addr = read6502(pc+1);
 
 					if (op_buffer_0 == 0x91)

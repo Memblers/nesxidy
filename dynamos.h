@@ -3,7 +3,7 @@
 
 #include "config.h"
 
-#define	BLOCK_COUNT 8
+#define	BLOCK_COUNT 1
 
 // Free-form flash code cache layout:
 //
@@ -60,6 +60,9 @@
 // Max native code per block (keep staging buffer <= 256 for now)
 #define CODE_SIZE (256 - EPILOGUE_SIZE - XBANK_EPILOGUE_SIZE - 6)
 
+// Buffer size for cache_code[] — must hold CODE_SIZE + epilogue bytes
+#define CACHE_CODE_BUF_SIZE (CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE)
+
 #define CACHE_L1_CODE_SIZE 256
 
 #define ZP_CACHE_SIZE	4
@@ -93,11 +96,11 @@
 #define INTERPRETED		0x40	// 0 = interpret this instruction
 #define	CODE_DATA		0x20	// 0 = code, 1 = data
 
-#define BANK_FLASH_BLOCK_FLAGS	3
-#define BANK_CODE		4
-#define BANK_ENTRY_LIST	18	// Two-pass: block entry list (8B per entry)
-#define	BANK_PC			19
-#define BANK_PC_FLAGS	27
+#include "bank_map.h"
+
+// Legacy aliases removed — now defined in bank_map.h:
+//   BANK_FLASH_BLOCK_FLAGS, BANK_CODE, BANK_ENTRY_LIST,
+//   BANK_PC, BANK_PC_FLAGS, BANK_RENDER, BANK_PLATFORM_ROM
 
 // Cache persistence signature
 // Stored in bank 3 after the block flags array (960 bytes = $3C0).
@@ -111,7 +114,7 @@
 #define CACHE_SIG_MAGIC_3       0x01   // version 1
 #define CACHE_SIG_SIZE          8      // 4 magic + 4 ROM hash
 
-#pragma section bank1
+#pragma section bank23
 extern const unsigned char rom_sidetrac[];
 extern const unsigned char rom_targ[];
 extern const unsigned char rom_targtest[];
@@ -199,8 +202,12 @@ extern uint8_t sta_indy_template[];
 extern const uint8_t sta_indy_template_size;
 extern uint8_t sta_indy_zp_patch;
 
-extern uint8_t flash_cache_pc[];
-extern const uint8_t flash_cache_pc_flags[];
+// Flash cache PC lookup tables (in flash memory, bankswitched to $8000-$BFFF).
+// The assembly labels _flash_cache_pc / _flash_cache_pc_flags may NOT sit at
+// $8000 on NES (SA code shares the first PC-table bank).  All accesses go
+// through the bankswitched window, so the base is always FLASH_BANK_BASE.
+#define flash_cache_pc       ((uint8_t *)FLASH_BANK_BASE)
+#define flash_cache_pc_flags ((const uint8_t *)FLASH_BANK_BASE)
 
 
 // Removed: ready(), check_cache_links(), verify_link_type0(), verify_link_type1(), combine_caches()
@@ -307,16 +314,24 @@ typedef struct {
 	uint8_t side_effect; // 0=none, 1=screen_ram_updated, 2=character_ram_updated
 } mirrored_ptr_t;
 
+// mirrored_ptrs array lives in bank2 section (BSS — vbcc puts uninitialized
+// data in BSS regardless of section, but the declaration must match the
+// definition's section to avoid warning 371).
+#pragma section bank2
 extern mirrored_ptr_t mirrored_ptrs[ZP_MIRROR_COUNT];
 
-// Mirror helpers live in fixed bank ($C000+), callable from bank2.
-// Declared here, defined in dynamos.c before #pragma section bank2.
+// Mirror helpers live in bank2, called from recompile_opcode_b2.
+// Declarations must carry the bank2 section attribute to match the
+// definitions in dynamos.c and avoid vbcc warning 371.
+#pragma section bank2
 
 // Look up a guest ZP address in the mirror table (lo or hi byte match).
 const mirrored_ptr_t *find_zp_mirror(uint8_t guest_zp);
 
 // Look up by guest_lo only (for STA (zp),Y operand).
 const mirrored_ptr_t *find_zp_mirror_lo(uint8_t guest_zp);
+
+#pragma section default
 
 #endif /* ENABLE_POINTER_SWIZZLE */
 

@@ -9,6 +9,7 @@
 #include "mapper30.h"
 #include "core/optimizer.h"
 #include "core/static_analysis.h"
+#include "core/metrics.h"
 #ifdef ENABLE_OPTIMIZER_V2
 #include "core/optimizer_v2_simple.h"
 #endif
@@ -44,6 +45,25 @@ uint8_t addrmodes[256] = {
 // Address translation - lives in fixed bank ($C000+), callable from bank2.
 // Only references BSS globals (RAM_BASE, ROM_NAME, etc.), no bank switching.
 uint16_t translate_address(uint16_t src_addr) {
+#ifdef PLATFORM_NES
+    // NES memory map: $0000-$07FF=RAM, $8000-$FFFF=ROM, rest=I/O
+    if (src_addr < 0x0800) {
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr < 0x2000) {
+        // RAM mirror
+        return (src_addr & 0x7FF) + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr >= 0x8000) {
+        // PRG-ROM — offset into ROM_NAME using NROM mirror mask
+        uint16_t nes_addr = (src_addr & 0x3FFF) + (uint16_t)ROM_NAME;
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;  // conflicts with flash cache — interpret
+        return nes_addr;
+    }
+    return 0;  // I/O or PPU — must interpret
+#else
+    // Exidy memory map
     uint8_t msb = src_addr >> 8;
     
     if (msb < 0x04) {
@@ -70,6 +90,7 @@ uint16_t translate_address(uint16_t src_addr) {
     
     // I/O or unmapped - must interpret
     return 0;
+#endif  // PLATFORM_NES
 }
 #pragma section default
 
@@ -104,9 +125,9 @@ static uint8_t block_dirty_char = 0;    // set after first INC character_ram_upd
 #ifdef ENABLE_PEEPHOLE
 volatile uint8_t block_flags_saved = 0;   // peephole: trailing PLP deferred from previous template (volatile: prevent vbcc dead-code elimination)
 uint8_t block_has_skip = 0;     // peephole: set when any template in block used skip=1
-static uint8_t peephole_skipped = 0;   // peephole: set per-instruction when skip=1 was used
-uint8_t recompile_instr_start;           // code_index at instruction start (after any deferred PLP flush)
+uint8_t peephole_skipped = 0;   // peephole: set per-instruction when skip=1 was used
 #endif
+uint8_t recompile_instr_start;           // code_index at instruction start (after any deferred PLP flush)
 #ifdef ENABLE_COMPILE_PPU_EFFECT
 __zpage uint8_t compile_ppu_effect = 0;  // PPU emphasis bits toggled during compile
 __zpage uint8_t compile_ppu_active = 0;  // 1 = PPU effect enabled (SA boot only)
@@ -147,7 +168,7 @@ uint16_t sector_free_offset[FLASH_CACHE_SECTORS];
 uint8_t next_free_sector = 0;  // monotonic sector cursor
 
 uint8_t l1_cache_code[CACHE_L1_CODE_SIZE];
-uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
+uint8_t cache_code[BLOCK_COUNT][CACHE_CODE_BUF_SIZE];
 uint8_t cache_flag[BLOCK_COUNT];
 __zpage uint8_t cache_entry_pc_lo[BLOCK_COUNT];
 __zpage uint8_t cache_entry_pc_hi[BLOCK_COUNT];
@@ -363,6 +384,19 @@ void run_6502(void)
 		}
 		case 1:  // recompile needed
 			break;
+	}
+	
+	// Guard: don't compile addresses outside the ROM range.
+	// Transient stack corruption (or IO-space PCs) can produce
+	// out-of-range addresses.  Compiling them would read garbage
+	// from character/screen RAM and program it into flash, causing
+	// hard crashes on subsequent dispatches.  Interpret instead.
+	if (pc < ROM_ADDR_MIN || pc > ROM_ADDR_MAX)
+	{
+		cache_interpret++;
+		bankswitch_prg(0);
+		interpret_6502();
+		return;
 	}
 	
 	// Compile directly to flash
@@ -912,7 +946,7 @@ void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
 	// Legacy: block_number is no longer used for flash address computation.
 	// flash_code_bank and flash_code_address are set by flash_sector_alloc().
 	// This function now only sets up PC table pointers.
-	(void)block_number;
+	if (block_number) {}  // suppress unused-parameter warning
 	setup_flash_pc_tables(emulated_pc);
 }
 
@@ -992,12 +1026,13 @@ uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
 }
 
 //============================================================================================================
-// Pass-2 forward/backward branch helper (fixed bank — callable from bank2).
+// Pass-2 forward/backward branch helper — moved to bank2 (compile-time only).
 // For static pass 2 only: looks up target_pc in the entry list and emits
 // a 2-byte native branch or 5-byte Bxx_inv+JMP if same-bank.
 // Returns the emit length (2 or 5) on success, 0 if unable to resolve.
 // The caller provides the branch opcode and code buffer pointer.
 //============================================================================================================
+#pragma section bank2
 uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *code_ptr)
 {
 	if (!lookup_entry_list(target_pc))
@@ -1040,7 +1075,7 @@ uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *co
 //   - opt2_record_pending_branch_safe() is a fixed-bank trampoline
 
 #ifdef ENABLE_POINTER_SWIZZLE
-// Mirror helpers — live in fixed bank ($C000+), callable from bank2.
+// Mirror helpers — now in bank2 (compile-time only, called from recompile_opcode_b2).
 
 const mirrored_ptr_t *find_zp_mirror(uint8_t guest_zp)
 {
@@ -1061,7 +1096,7 @@ const mirrored_ptr_t *find_zp_mirror_lo(uint8_t guest_zp)
 	return 0;
 }
 
-// emit_zp_mirror_write — fixed-bank helper called from bank2.
+// emit_zp_mirror_write — bank2 helper called from recompile_opcode_b2.
 // If zp_addr is a tracked pointer byte, emits a 2-byte ZP opcode
 // (same opcode, mirror slot) to keep the NES mirror in sync.
 // The mirror always stays in Exidy address space; translation to
@@ -1077,7 +1112,7 @@ uint8_t emit_zp_mirror_write(uint8_t *code_ptr, uint8_t ci, uint8_t opcode, uint
 	return 2;
 }
 
-// emit_native_sta_indy — fixed-bank helper called from bank2.
+// emit_native_sta_indy — bank2 helper called from recompile_opcode_b2.
 // Copies the native_sta_indy_tmpl template, patching the emulated
 // RAM addresses.  The template reads the pointer from emulated RAM
 // (the ground truth) and translates the hi byte via the
@@ -1139,10 +1174,10 @@ void init_zp_mirror_table(void)
 	zp_mirror_initialized = 1;
 }
 
-#pragma section default
+// (bank2 continues — no section switch needed)
 #endif
 
-// emit_dirty_flag — fixed bank helper.
+// emit_dirty_flag — bank2 helper (compile-time only).
 // Emits PHP / INC screen_ram_updated or character_ram_updated / PLP.
 // Returns bytes emitted (4) or 0 if not a screen/char store.
 uint8_t emit_dirty_flag(uint8_t *code_ptr, uint8_t ci,
@@ -1164,7 +1199,7 @@ uint8_t emit_dirty_flag(uint8_t *code_ptr, uint8_t ci,
 }
 
 // ==========================================================================
-#pragma section bank2
+// (already in bank2 — section continues from try_direct_branch/emit_dirty_flag)
 
 // Shared helper: emit a fixed-size opcode template (PHA/PLA/PHP/PLP).
 // Peephole: if previous template deferred its trailing PLP and this
@@ -1177,10 +1212,26 @@ uint8_t emit_template(uint8_t *tmpl, uint8_t sz)
 	// Peephole: determine skip/trim
 	uint8_t skip = 0;  // bytes to skip at start (leading PHP)
 	uint8_t trim = 0;  // bytes to trim at end (trailing PLP)
-	// NOTE: block_flags_saved is always 0 here — the compile loop flushes
-	// deferred PLP before capturing code_index_old, so emit_template never
-	// needs to flush.  The trim logic below just defers the trailing PLP.
-	//
+
+#ifdef ENABLE_PEEPHOLE_SKIP
+	// Skip: if previous template deferred its PLP (block_flags_saved)
+	// and this template starts with PHP, elide the redundant PLP/PHP pair.
+	// Limit to PHA/PLA-sized templates for safety (PHP template has inner
+	// PHP/PLA pairs whose stack balance depends on the outer PHP).
+	if (block_flags_saved && tmpl[0] == 0x08 && sz == opcode_6502_pha_size) {
+		skip = 1;
+		block_flags_saved = 0;  // cancel deferred PLP (elided)
+		peephole_skipped = 1;   // mark: leading PHP was skipped
+		block_has_skip = 1;     // block contains skip instructions
+		metrics_peephole_remove(1, 1);
+	} else if (block_flags_saved) {
+		// Deferred PLP but template can't elide — flush now.
+		*(volatile uint8_t *)&cache_code[cache_index][code_index] = 0x28;  // PLP
+		code_index++;
+		block_flags_saved = 0;
+	}
+#endif
+
 	// Only trim PHA (sz=13) and PLA (sz=13) templates — NOT PHP (sz=15).
 	// PHP's trailing PLP restores guest P from an inner PHA/PHP pair;
 	// deferring it would leave guest flags corrupted.
@@ -1244,20 +1295,32 @@ static uint8_t recompile_opcode_b2()
 	uint8_t op_buffer_2;
 	uint8_t *code_ptr = cache_code[cache_index];
 
+	op_buffer_0 = read6502(pc);
+
 #ifdef ENABLE_PEEPHOLE
 	// Flush deferred PLP from previous instruction's trim.
 	// Done here (bank2) so ALL compile loops get it for free.
 	// NOTE: volatile pointer casts required — vbcc -O2 eliminates
 	// plain stores inside if(block_flags_saved) blocks.
+#ifdef ENABLE_PEEPHOLE_SKIP
+	// For template opcodes (PHA/PLA/PHP/PLP) defer the flush —
+	// emit_template() will elide the PLP/PHP pair if possible.
+	if (block_flags_saved &&
+	    op_buffer_0 != 0x48 && op_buffer_0 != 0x68 &&
+	    op_buffer_0 != 0x08 && op_buffer_0 != 0x28) {
+		*(volatile uint8_t *)&code_ptr[code_index] = 0x28;  // PLP
+		code_index++;
+		block_flags_saved = 0;
+	}
+#else
 	if (block_flags_saved) {
 		*(volatile uint8_t *)&code_ptr[code_index] = 0x28;  // PLP
 		code_index++;  // plain increment so compiler tracks new value
 		block_flags_saved = 0;
 	}
-	recompile_instr_start = code_index;
 #endif
-
-	op_buffer_0 = read6502(pc);
+#endif
+	recompile_instr_start = code_index;
 
 	switch (op_buffer_0)
 	{

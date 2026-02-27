@@ -1,16 +1,17 @@
 ;vcprmin=10000
 	section	text
-l1:
+	global	_translate_address
+_translate_address:
 	lda	sp
-	bne	l22
+	bne	l21
 	dec	sp+1
-l22:
+l21:
 	dec	sp
 	lda	r1
 	ldx	#0
 	sta	r2
 	cmp	#4
-	bcs	l5
+	bcs	l4
 	ldx	#>(_RAM_BASE)
 	lda	#<(_RAM_BASE)
 	clc
@@ -20,11 +21,11 @@ l22:
 	adc	r1
 	tax
 	pla
-	jmp	l2
-l5:
+	jmp	l1
+l4:
 	lda	r2
 	cmp	#64
-	bcs	l8
+	bcs	l7
 	lda	r0
 	sec
 	sbc	#0
@@ -41,34 +42,34 @@ l5:
 	adc	r3
 	sta	r5
 	cmp	#128
-	bcc	l10
-	bne	l23
+	bcc	l9
+	bne	l22
 	lda	r4
 	cmp	#0
-	bcc	l10
-l23:
+	bcc	l9
+l22:
 	lda	r5
 	cmp	#192
-	bcc	l24
-	bne	l10
+	bcc	l23
+	bne	l9
 	lda	r4
 	cmp	#0
-	bcs	l10
-l24:
+	bcs	l9
+l23:
 	ldx	#0
 	txa
-	jmp	l2
-l10:
+	jmp	l1
+l9:
 	ldx	r5
 	lda	r4
-	jmp	l2
-l8:
+	jmp	l1
+l7:
 	lda	r2
 	ldy	#0
 	sta	(sp),y
 	lda	r2
 	cmp	#72
-	bcs	l14
+	bcs	l13
 	lda	r0
 	sec
 	sbc	#0
@@ -85,11 +86,11 @@ l8:
 	adc	r3
 	tax
 	pla
-	jmp	l2
-l14:
+	jmp	l1
+l13:
 	lda	r2
 	cmp	#80
-	bcs	l17
+	bcs	l16
 	lda	r0
 	sec
 	sbc	#0
@@ -106,342 +107,17 @@ l14:
 	adc	r3
 	tax
 	pla
-	jmp	l2
-l17:
+	jmp	l1
+l16:
 	ldx	#0
 	txa
-l2:
+l1:
 	sta	r31
 	inc	sp
-	bne	l25
+	bne	l24
 	inc	sp+1
-l25:
+l24:
 	lda	r31
-	rts
-; stacksize=0+??
-;vcprmin=10000
-	section	"bank2"
-l27:
-	sec
-	lda	sp
-	sbc	#4
-	sta	sp
-	bcs	l36
-	dec	sp+1
-l36:
-	lda	r16
-	pha
-	lda	r18
-	pha
-	lda	r19
-	pha
-; volatile barrier
-	lda	3+_cache_hits
-	sta	32259
-	lda	2+_cache_hits
-	sta	32258
-	lda	1+_cache_hits
-	sta	32257
-	lda	_cache_hits
-	sta	32256
-; volatile barrier
-	lda	3+_cache_misses
-	sta	32263
-	lda	2+_cache_misses
-	sta	32262
-	lda	1+_cache_misses
-	sta	32261
-	lda	_cache_misses
-	sta	32260
-; volatile barrier
-	lda	3+_cache_interpret
-	sta	32267
-	lda	2+_cache_interpret
-	sta	32266
-	lda	1+_cache_interpret
-	sta	32265
-	lda	_cache_interpret
-	sta	32264
-; volatile barrier
-	lda	3+_cache_branches
-	sta	32271
-	lda	2+_cache_branches
-	sta	32270
-	lda	1+_cache_branches
-	sta	32269
-	lda	_cache_branches
-	sta	32268
-; volatile barrier
-	lda	3+_branch_not_compiled
-	sta	32275
-	lda	2+_branch_not_compiled
-	sta	32274
-	lda	1+_branch_not_compiled
-	sta	32273
-	lda	_branch_not_compiled
-	sta	32272
-; volatile barrier
-	lda	3+_branch_wrong_bank
-	sta	32279
-	lda	2+_branch_wrong_bank
-	sta	32278
-	lda	1+_branch_wrong_bank
-	sta	32277
-	lda	_branch_wrong_bank
-	sta	32276
-; volatile barrier
-	lda	3+_branch_out_of_range
-	sta	32283
-	lda	2+_branch_out_of_range
-	sta	32282
-	lda	1+_branch_out_of_range
-	sta	32281
-	lda	_branch_out_of_range
-	sta	32280
-; volatile barrier
-	lda	3+_branch_forward
-	sta	32287
-	lda	2+_branch_forward
-	sta	32286
-	lda	1+_branch_forward
-	sta	32285
-	lda	_branch_forward
-	sta	32284
-	lda	#>(_opt2_stat_total)
-	sta	r19
-	lda	#<(_opt2_stat_total)
-	sta	r18
-	lda	#1
-	sta	r0
-	lda	r19
-	sta	r3
-	lda	r18
-	sta	r2
-	jsr	_peek_bank_byte
-	sta	r16
-	ldx	r19
-	lda	r18
-	clc
-	adc	#1
-	bcc	l37
-	inx
-l37:
-	sta	r31
-	lda	#1
-	sta	r0
-	lda	r31
-	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-; volatile barrier
-	sta	r31
-	ldy	#0
-	sta	(sp),y
-	tya
-	iny
-	sta	(sp),y
-; volatile barrier
-	dey
-	lda	(sp),y
-	tax
-	lda	#0
-	sta	(sp),y
-	txa
-	iny
-	sta	(sp),y
-; volatile barrier
-	lda	r16
-	iny
-	sta	(sp),y
-	lda	#0
-	iny
-	sta	(sp),y
-; volatile barrier
-	dey
-	lda	(sp),y
-	ldy	#0
-	ora	(sp),y
-	sta	32288
-	ldy	#3
-	lda	(sp),y
-	ldy	#1
-	ora	(sp),y
-	sta	32289
-	lda	#>(_opt2_stat_direct)
-	sta	r19
-	lda	#<(_opt2_stat_direct)
-	sta	r18
-	tya
-	sta	r0
-	lda	r19
-	sta	r3
-	lda	r18
-	sta	r2
-	jsr	_peek_bank_byte
-	sta	r16
-	ldx	r19
-	lda	r18
-	clc
-	adc	#1
-	bcc	l38
-	inx
-l38:
-	sta	r31
-	lda	#1
-	sta	r0
-	lda	r31
-	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-; volatile barrier
-	sta	r31
-	ldy	#2
-	sta	(sp),y
-	lda	#0
-	iny
-	sta	(sp),y
-; volatile barrier
-	dey
-	lda	(sp),y
-	tax
-	lda	#0
-	sta	(sp),y
-	txa
-	iny
-	sta	(sp),y
-; volatile barrier
-	lda	r16
-	ldy	#0
-	sta	(sp),y
-	tya
-	iny
-	sta	(sp),y
-; volatile barrier
-	dey
-	lda	(sp),y
-	ldy	#2
-	ora	(sp),y
-	sta	32290
-	dey
-	lda	(sp),y
-	ldy	#3
-	ora	(sp),y
-	sta	32291
-	lda	#>(_opt2_stat_pending)
-	sta	r19
-	lda	#<(_opt2_stat_pending)
-	sta	r18
-	lda	#1
-	sta	r0
-	lda	r19
-	sta	r3
-	lda	r18
-	sta	r2
-	jsr	_peek_bank_byte
-	sta	r16
-	ldx	r19
-	lda	r18
-	clc
-	adc	#1
-	bcc	l39
-	inx
-l39:
-	sta	r31
-	lda	#1
-	sta	r0
-	lda	r31
-	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-; volatile barrier
-	sta	r31
-	ldy	#0
-	sta	(sp),y
-	tya
-	iny
-	sta	(sp),y
-; volatile barrier
-	dey
-	lda	(sp),y
-	tax
-	lda	#0
-	sta	(sp),y
-	txa
-	iny
-	sta	(sp),y
-; volatile barrier
-	lda	r16
-	iny
-	sta	(sp),y
-	lda	#0
-	iny
-	sta	(sp),y
-; volatile barrier
-	dey
-	lda	(sp),y
-	ldy	#0
-	ora	(sp),y
-	sta	32292
-	ldy	#3
-	lda	(sp),y
-	ldy	#1
-	ora	(sp),y
-	sta	32293
-; volatile barrier
-	lda	1+_next_free_block
-	sta	32295
-	lda	_next_free_block
-	sta	32294
-; volatile barrier
-	lda	1+_stats_frame
-	sta	32297
-	lda	_stats_frame
-	sta	32296
-	inc	_stats_frame
-	bne	l40
-	inc	1+_stats_frame
-l40:
-; volatile barrier
-	lda	#219
-	sta	32298
-; volatile barrier
-	lda	#87
-	sta	32299
-; volatile barrier
-	lda	1+_sa_blocks_total
-	sta	32301
-	lda	_sa_blocks_total
-	sta	32300
-	pla
-	sta	r19
-	pla
-	sta	r18
-	pla
-	sta	r16
-	clc
-	lda	sp
-	adc	#4
-	sta	sp
-	bcc	l41
-	inc	sp+1
-l41:
-	rts
-; stacksize=0+??
-;vcprmin=10000
-	section	text
-	global	_debug_stats_update
-_debug_stats_update:
-	lda	r16
-	pha
-	lda	_mapper_prg_bank
-	sta	r16
-	lda	#2
-	jsr	_bankswitch_prg
-	jsr	l27
-	lda	r16
-	jsr	_bankswitch_prg
-	pla
-	sta	r16
 	rts
 ; stacksize=0+??
 ;vcprmin=10000
@@ -450,114 +126,183 @@ _debug_stats_update:
 _run_6502:
 	sec
 	lda	sp
-	sbc	#12
+	sbc	#21
 	sta	sp
-	bcs	l110
+	bcs	l114
 	dec	sp+1
-l110:
-	ldy	#11
+l114:
+	ldy	#20
 	jsr	___rsave12
-	lda	1+_pc
-	cmp	#43
-	bne	l47
-	lda	_pc
-	cmp	#14
-	bne	l47
-	inc	_pc_2b27_count
-l47:
 	lda	_decimal_mode
-	beq	l52
+	beq	l37
 	lda	_status
 	and	#8
-	beq	l51
+	beq	l36
 	lda	#0
 	jsr	_bankswitch_prg
 	jsr	_interpret_6502
-	jmp	l84
-l51:
+	jmp	l31
+l36:
 	lda	#0
 	sta	_decimal_mode
-l52:
+l37:
 	jsr	_dispatch_on_pc
 	tax
-	beq	l55
+	beq	l40
 	cpx	#1
-	beq	l56
+	beq	l41
 	cpx	#2
-	bne	l56
+	bne	l41
 	inc	_cache_interpret
-	bne	l111
+	bne	l115
 	inc	1+_cache_interpret
-	bne	l111
+	bne	l115
 	inc	2+_cache_interpret
-	bne	l111
+	bne	l115
 	inc	3+_cache_interpret
-l111:
+l115:
 	lda	#0
 	jsr	_bankswitch_prg
 	jsr	_interpret_6502
-	jmp	l84
-l55:
+	jmp	l31
+l40:
 	inc	_cache_hits
-	bne	l112
+	bne	l116
 	inc	1+_cache_hits
-	bne	l112
+	bne	l116
 	inc	2+_cache_hits
-	bne	l112
+	bne	l116
 	inc	3+_cache_hits
-l112:
-	jmp	l84
-l56:
+l116:
+	jmp	l31
+l41:
 	inc	_cache_misses
-	bne	l113
+	bne	l117
 	inc	1+_cache_misses
-	bne	l113
+	bne	l117
 	inc	2+_cache_misses
-	bne	l113
+	bne	l117
 	inc	3+_cache_misses
-l113:
-	jsr	_flash_cache_select
-	sta	_flash_cache_index
-	stx	1+_flash_cache_index
-	lda	_flash_cache_index
-	ora	1+_flash_cache_index
-	beq	l58
-	lda	_flash_cache_index
-	bne	l114
-	dec	1+_flash_cache_index
-l114:
-	dec	_flash_cache_index
-	jmp	l59
-l58:
-	lda	#0
-	jsr	_bankswitch_prg
-	jsr	_interpret_6502
-	jmp	l84
-l59:
+l117:
 	lda	1+_pc
 	sta	r27
 	lda	_pc
 	sta	r26
-	lda	#0
+	lda	_pc
+	sta	_cache_entry_pc_lo
+	lda	1+_pc
+	ldx	#0
+	sta	_cache_entry_pc_hi
+	txa
 	sta	_cache_index
+	txa
 	sta	_code_index
+	txa
 	sta	_cache_flag
+	txa
+	sta	_block_has_jsr
+	txa
+	sta	l26
+	txa
+	sta	l27
+; volatile barrier
+	lda	#0
+	sta	l28
+	sta	l29
+	sta	r0
+	ldy	#0
+	sta	(sp),y
+	tax
+l93:
+	lda	#0
+	sta	0+_block_ci_map,x ;am(x)
+	inx
+	cpx	#64
+	bcc	l93
+	lda	_next_free_sector
+	ldy	#4
+	sta	(sp),y
+	lda	#250
+	sta	r0
+	jsr	_flash_sector_alloc
+	cmp	#0
+	bne	l47
+	lda	#0
+	jsr	_bankswitch_prg
+	jsr	_interpret_6502
+	jmp	l31
+l47:
+	lda	_next_free_sector
+	ldy	#5
+	sta	(sp),y
+	lda	_flash_code_address
+	ldy	#2
+	sta	(sp),y
+	lda	1+_flash_code_address
+	and	#15
+	iny
+	sta	(sp),y
 	lda	1+_pc
 	sta	r1
 	lda	_pc
 	sta	r0
-	lda	1+_flash_cache_index
-	sta	r3
-	lda	_flash_cache_index
-	sta	r2
-	jsr	_setup_flash_address
-l97:
+	jsr	_setup_flash_pc_tables
+	lda	r26
+	sta	r23
+	ldy	#6
+	sta	(sp),y
+l98:
+; volatile barrier
+	lda	l28
+	beq	l52
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	pha
+	lda	#>(_cache_code)
+	adc	#0
+	tax
+	pla
+	sta	r4
+	stx	r5
+; volatile barrier
+	lda	#40
+	ldy	#0
+	sta	(r4),y
+; volatile barrier
+	lda	_code_index
+	clc
+	adc	#1
+	sta	(sp),y
+	lda	#>(_code_index)
+	sta	r5
+	lda	#<(_code_index)
+	sta	r4
+; volatile barrier
+	lda	(sp),y
+	sta	(r4),y
+; volatile barrier
+	lda	#0
+	sta	l28
+l52:
 	lda	1+_pc
 	sta	r21
 	lda	_pc
 	sta	r20
 	lda	_code_index
 	sta	r16
+	lda	_pc
+	sec
+	ldy	#6
+	sbc	(sp),y
+	and	#63
+	tax
+	lda	_code_index
+	clc
+	adc	#1
+	sta	0+_block_ci_map,x ;am(x)
+	lda	#0
+	sta	l30
 	jsr	_recompile_opcode
 	lda	_code_index
 	sec
@@ -567,30 +312,33 @@ l97:
 	sta	r1
 	lda	r20
 	sta	r0
-	lda	1+_flash_cache_index
-	sta	r3
-	lda	_flash_cache_index
-	sta	r2
-	jsr	_setup_flash_address
+	jsr	_setup_flash_pc_tables
 	lda	#0
 	sta	r17
 	lda	r18
-	beq	l101
+	beq	l103
 	lda	r16
 	sta	r22
 	lda	#0
 	sta	r23
 	lda	r16
 	sta	r19
-l98:
+l99:
 	ldy	r19
 	lda	0+_cache_code,y ;am(r19)
 	sta	r31
 	lda	_flash_code_address
 	clc
-	adc	r22
+	adc	#8
 	sta	r6
 	lda	1+_flash_code_address
+	adc	#0
+	sta	r7
+	lda	r6
+	clc
+	adc	r22
+	sta	r6
+	lda	r7
 	adc	r23
 	sta	r7
 	lda	r17
@@ -613,37 +361,128 @@ l98:
 	inc	r19
 	lda	r17
 	cmp	r18
-	bcc	l98
-l101:
+	bcc	l99
+l103:
+; volatile barrier
+	lda	l28
+	beq	l58
+	lda	#>(_flash_code_address)
+	sta	r1
+	lda	#<(_flash_code_address)
+	sta	r0
+; volatile barrier
+	lda	r0
+	sta	r14
+	lda	r1
+	sta	r15
+	ldy	#0
+	lda	(r14),y
+	clc
+	adc	#8
+	sta	r0
+	iny
+	lda	(r14),y
+	adc	#0
+	sta	r1
+	lda	#>(_code_index)
+	sta	r5
+	lda	#<(_code_index)
+	sta	r4
+; volatile barrier
+	dey
+	lda	(r4),y
+	ldx	#0
+	clc
+	adc	r0
+	sta	r0
+	txa
+	adc	r1
+	sta	r1
+	lda	#>(_flash_code_bank)
+	sta	r5
+	lda	#<(_flash_code_bank)
+	sta	r4
+; volatile barrier
+	lda	(r4),y
+	sta	r2
+	lda	#40
+	sta	r4
+	jsr	_flash_byte_program
+l58:
+; volatile barrier
 	lda	_code_index
-	cmp	#224
-	bcc	l68
+	ldy	#0
+	sta	(sp),y
+	tya
+	iny
+	sta	(sp),y
+; volatile barrier
+	lda	l28
+	ldy	#7
+	sta	(sp),y
+	lda	#0
+	iny
+	sta	(sp),y
+; volatile barrier
+	dey
+	lda	(sp),y
+	clc
+	ldy	#0
+	adc	(sp),y
+	ldy	#7
+	sta	(sp),y
+	iny
+	lda	(sp),y
+	ldy	#1
+	adc	(sp),y
+	ldy	#8
+	sta	(sp),y
+; volatile barrier
+	lda	#205
+	dey
+	cmp	(sp),y
+	lda	#0
+	iny
+	sbc	(sp),y
+	bvc	l118
+	eor	#128
+l118:
+	bpl	l60
 	lda	_cache_flag
 	ora	#4
 	sta	_cache_flag
 	and	#223
 	sta	_cache_flag
-l68:
+l60:
 	lda	_cache_flag
 	and	#2
-	beq	l70
+	beq	l62
 	lda	r16
 	sta	r0
 	lda	#64
 	sta	r2
 	jsr	_flash_cache_pc_update
-	jmp	l73
-l70:
+	jmp	l68
+l62:
+	lda	l30
+	beq	l65
+	lda	r16
+	sta	r0
+	lda	#64
+	sta	r2
+	jsr	_flash_cache_pc_update
+	jmp	l68
+l65:
 	lda	r18
-	bne	l72
+	bne	l67
 	lda	1+_pc
 	cmp	r21
-	bne	l115
+	bne	l119
 	lda	_pc
 	cmp	r20
-	beq	l73
-l115:
-l72:
+	beq	l68
+l119:
+l67:
 	lda	r16
 	sta	r0
 	lda	#128
@@ -658,6 +497,11 @@ l72:
 	adc	1+_flash_code_address
 	tax
 	pla
+	clc
+	adc	#8
+	bcc	l120
+	inx
+l120:
 	sta	r31
 	lda	r21
 	sta	r1
@@ -669,27 +513,83 @@ l72:
 	lda	_flash_code_bank
 	sta	r4
 	jsr	_opt2_notify_block_compiled
-l73:
+l68:
 	lda	_cache_flag
 	and	#32
-	bne	l97
+	bne	l98
+	ldy	#6
+	lda	(sp),y
+	sta	r23
 	lda	_code_index
-	beq	l76
+	bne	l71
+	ldy	#5
+	lda	(sp),y
+	ldx	#0
+	stx	r31
+	asl
+	rol	r31
+	ldx	r31
+	clc
+	adc	#<(_sector_free_offset)
+	sta	r4
+	txa
+	adc	#>(_sector_free_offset)
+	sta	r5
+	ldy	#3
+	lda	(sp),y
+	ldy	#1
+	sta	(r4),y
+	iny
+	lda	(sp),y
+	ldy	#0
+	sta	(r4),y
+	ldy	#4
+	lda	(sp),y
+	sta	_next_free_sector
+	lda	#0
+	jsr	_bankswitch_prg
+	jsr	_interpret_6502
+	jmp	l31
+l71:
 	lda	1+_pc
-	sta	r17
+	sta	r9
 	lda	_pc
+	sta	r8
+; volatile barrier
+	lda	l28
+	beq	l73
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	pha
+	lda	#>(_cache_code)
+	adc	#0
+	tax
+	pla
+	sta	r4
+	stx	r5
+; volatile barrier
+	lda	#40
+	ldy	#0
+	sta	(r4),y
+; volatile barrier
+	lda	_code_index
+	clc
+	adc	#1
+	sta	(sp),y
+	lda	#>(_code_index)
+	sta	r5
+	lda	#<(_code_index)
+	sta	r4
+; volatile barrier
+	lda	(sp),y
+	sta	(r4),y
+; volatile barrier
+	lda	#0
+	sta	l28
+l73:
+	lda	_code_index
 	sta	r16
-	lda	1+_pc
-	sta	r1
-	lda	_pc
-	sta	r0
-	lda	1+_flash_cache_index
-	sta	r3
-	lda	_flash_cache_index
-	sta	r2
-	jsr	_setup_flash_address
-	lda	_code_index
-	sta	r21
 	lda	#<(_cache_code)
 	clc
 	adc	_code_index
@@ -796,17 +696,6 @@ l73:
 	lda	r31
 	inc	_code_index
 	sta	(r0),y
-	lda	#<(_cache_code)
-	clc
-	adc	_code_index
-	sta	r0
-	lda	#>(_cache_code)
-	adc	#0
-	sta	r1
-	inc	_code_index
-	lda	#169
-	sta	(r0),y
-	lda	r16
 	sta	r31
 	lda	#<(_cache_code)
 	clc
@@ -817,6 +706,22 @@ l73:
 	sta	r1
 	lda	r31
 	inc	_code_index
+	sta	r31
+	lda	#169
+	sta	(r0),y
+	lda	r8
+	sta	r18
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	r18
 	sta	(r0),y
 	lda	#<(_cache_code)
 	clc
@@ -825,59 +730,151 @@ l73:
 	lda	#>(_cache_code)
 	adc	#0
 	sta	r1
+	lda	r31
 	inc	_code_index
+	sta	r31
 	lda	#133
 	sta	(r0),y
 	lda	#>(_pc)
-	sta	r1
+	sta	r5
 	lda	#<(_pc)
-	sta	r0
-	sta	r31
-	lda	#<(_cache_code)
-	clc
-	adc	_code_index
-	sta	r0
-	lda	#>(_cache_code)
-	adc	#0
-	sta	r1
-	lda	r31
-	inc	_code_index
-	sta	(r0),y
-	sta	r31
-	lda	#<(_cache_code)
-	clc
-	adc	_code_index
-	sta	r0
-	lda	#>(_cache_code)
-	adc	#0
-	sta	r1
-	lda	r31
-	inc	_code_index
-	sta	r31
-	lda	#169
-	sta	(r0),y
-	lda	r31
-	sta	r30
-	lda	r17
-	ldx	#0
-	sta	r2
-	stx	r3
-	lda	r30
-	sta	r31
-	lda	r2
+	sta	r4
 	sta	r1
 	lda	#<(_cache_code)
 	clc
 	adc	_code_index
-	sta	r2
+	sta	r4
 	lda	#>(_cache_code)
 	adc	#0
-	sta	r3
+	sta	r5
 	lda	r31
 	inc	_code_index
 	sta	r31
 	lda	r1
-	sta	(r2),y
+	sta	(r4),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	#169
+	sta	(r4),y
+	lda	r31
+	sta	r30
+	lda	r9
+	ldx	#0
+	sta	r4
+	stx	r5
+	lda	r30
+	sta	r31
+	lda	r4
+	sta	r17
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	r17
+	sta	(r4),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	#133
+	sta	(r4),y
+	lda	r31
+	inc	r1
+	sta	r31
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	r1
+	sta	(r4),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	#76
+	sta	(r0),y
+	lda	#>(_cross_bank_dispatch)
+	sta	r5
+	lda	#<(_cross_bank_dispatch)
+	sta	r4
+	sta	r1
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r6
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r7
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	r1
+	sta	(r6),y
+	lda	r31
+	sta	r30
+	lda	r5
+	sta	r4
+	stx	r5
+	lda	r30
+	sta	r31
+	lda	r4
+	sta	r1
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	r1
+	sta	(r4),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	#8
+	sta	(r0),y
 	lda	#<(_cache_code)
 	clc
 	adc	_code_index
@@ -890,9 +887,151 @@ l73:
 	sta	r31
 	lda	#133
 	sta	(r0),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	lda	r31
+	inc	_code_index
+	sta	(r0),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	inc	_code_index
+	lda	#169
+	sta	(r0),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	inc	_code_index
+	lda	#255
+	sta	(r0),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	inc	_code_index
+	lda	#141
+	sta	(r0),y
+	ldx	#>(_xbank_addr)
+	lda	#<(_xbank_addr)
+	sta	r1
+	sta	r31
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	r1
+	sta	(r4),y
+	lda	r31
+	sta	r30
+	stx	r29
+	txa
+	ldx	#0
+	sta	r4
+	stx	r5
+	ldx	r29
+	lda	r30
+	sta	r31
+	lda	r4
+	sta	r2
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	r2
+	sta	(r4),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	#169
+	sta	(r4),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	#255
+	sta	(r4),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	#141
+	sta	(r4),y
+	lda	r31
+	inc	r1
+	sta	r31
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r4
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r5
+	lda	r31
+	inc	_code_index
+	sta	r31
+	lda	r1
+	sta	(r4),y
 	lda	r31
 	clc
 	adc	#1
+	bcc	l121
+	inx
+l121:
+	sta	r30
+	stx	r29
+	txa
+	ldx	#0
+	sta	r0
+	stx	r1
+	ldx	r29
+	lda	r0
 	sta	r31
 	lda	#<(_cache_code)
 	clc
@@ -903,6 +1042,26 @@ l73:
 	sta	r1
 	lda	r31
 	inc	_code_index
+	sta	(r0),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	inc	_code_index
+	lda	#169
+	sta	(r0),y
+	lda	#<(_cache_code)
+	clc
+	adc	_code_index
+	sta	r0
+	lda	#>(_cache_code)
+	adc	#0
+	sta	r1
+	inc	_code_index
+	lda	#255
 	sta	(r0),y
 	lda	#<(_cache_code)
 	clc
@@ -914,22 +1073,22 @@ l73:
 	inc	_code_index
 	lda	#76
 	sta	(r0),y
-	ldx	#>(_cross_bank_dispatch)
-	lda	#<(_cross_bank_dispatch)
+	ldx	#>(_xbank_trampoline)
+	lda	#<(_xbank_trampoline)
 	sta	r1
 	sta	r31
 	lda	#<(_cache_code)
 	clc
 	adc	_code_index
-	sta	r2
+	sta	r4
 	lda	#>(_cache_code)
 	adc	#0
-	sta	r3
+	sta	r5
 	lda	r31
 	inc	_code_index
 	sta	r31
 	lda	r1
-	sta	(r2),y
+	sta	(r4),y
 	lda	r31
 	sta	r30
 	stx	r29
@@ -950,188 +1109,338 @@ l73:
 	lda	r31
 	inc	_code_index
 	sta	(r0),y
-	lda	r21
-	sta	r18
-	lda	r21
-	cmp	_code_index
-	bcs	l102
-l99:
-	ldy	r18
-	lda	0+_cache_code,y ;am(r18)
-	sta	r31
-	lda	r18
-	sta	r4
-	lda	#0
-	sta	r5
-	lda	r4
-	clc
-	adc	_flash_code_address
-	sta	r0
-	lda	r5
-	adc	1+_flash_code_address
+	lda	1+_flash_code_address
 	sta	r1
+	lda	_flash_code_address
+	sta	r0
 	lda	_flash_code_bank
 	sta	r2
-	lda	r31
+	lda	r23
 	sta	r4
 	jsr	_flash_byte_program
-	inc	r18
-	lda	r18
-	cmp	_code_index
-	bcc	l99
-l102:
+	lda	r27
+	ldx	#0
+	sta	r0
+	stx	r1
+	lda	r0
+	sta	r31
 	lda	_flash_code_address
 	clc
-	adc	#255
+	adc	#1
 	sta	r0
 	lda	1+_flash_code_address
 	adc	#0
 	sta	r1
 	lda	_flash_code_bank
 	sta	r2
-	lda	r21
+	lda	r31
 	sta	r4
 	jsr	_flash_byte_program
-	lda	#3
-	jsr	_bankswitch_prg
-	lda	#<(_flash_block_flags)
+	lda	_flash_code_address
 	clc
-	adc	_flash_cache_index
+	adc	#2
 	sta	r0
-	lda	#>(_flash_block_flags)
-	adc	1+_flash_cache_index
+	lda	1+_flash_code_address
+	adc	#0
 	sta	r1
-	ldy	#0
-	lda	(r0),y
-	and	#254
-	sta	r31
-	lda	#>(_flash_block_flags)
-	sta	r5
-	lda	#<(_flash_block_flags)
+	lda	_flash_code_bank
+	sta	r2
+	lda	r18
 	sta	r4
+	jsr	_flash_byte_program
+	lda	_flash_code_address
 	clc
-	adc	_flash_cache_index
+	adc	#3
+	sta	r0
+	lda	1+_flash_code_address
+	adc	#0
+	sta	r1
+	lda	_flash_code_bank
+	sta	r2
+	lda	r17
+	sta	r4
+	jsr	_flash_byte_program
+	lda	_flash_code_address
+	clc
+	adc	#4
+	sta	r0
+	lda	1+_flash_code_address
+	adc	#0
+	sta	r1
+	lda	_flash_code_bank
+	sta	r2
+	lda	_code_index
+	sta	r4
+	jsr	_flash_byte_program
+	lda	_flash_code_address
+	clc
+	adc	#5
+	sta	r0
+	lda	1+_flash_code_address
+	adc	#0
+	sta	r1
+	lda	_flash_code_bank
+	sta	r2
+	lda	r16
+	sta	r4
+	jsr	_flash_byte_program
+	lda	#0
+	sta	r19
+	lda	_code_index
+	beq	l104
+l100:
+	ldy	r19
+	lda	0+_cache_code,y ;am(r19)
+	sta	r31
+	lda	_flash_code_address
+	clc
+	adc	#8
+	sta	r6
+	lda	1+_flash_code_address
+	adc	#0
+	sta	r7
+	lda	r19
+	sta	r4
+	lda	#0
+	sta	r5
+	lda	r4
+	clc
+	adc	r6
 	sta	r0
 	lda	r5
-	adc	1+_flash_cache_index
+	adc	r7
 	sta	r1
-	lda	_mapper_prg_bank
+	lda	_flash_code_bank
 	sta	r2
 	lda	r31
 	sta	r4
 	jsr	_flash_byte_program
-	inc	l81
-	lda	l81
-	cmp	#8
-	bcc	l83
+	inc	r19
+	lda	r19
+	cmp	_code_index
+	bcc	l100
+l104:
+	lda	_flash_code_address
+	pha
+	lda	1+_flash_code_address
+	and	#15
+	tax
+	pla
+	clc
+	adc	#8
+	sta	r4
+	txa
+	adc	#0
+	sta	r5
+	lda	_code_index
+	ldx	#0
+	clc
+	adc	r4
+	pha
+	txa
+	adc	r5
+	tax
+	pla
+	sta	r31
+	lda	_next_free_sector
+	sta	r4
 	lda	#0
-	sta	l81
+	sta	r5
+	lda	r31
+	asl	r4
+	rol	r5
+	sta	r31
+	lda	r4
+	clc
+	adc	#<(_sector_free_offset)
+	sta	r4
+	lda	r5
+	adc	#>(_sector_free_offset)
+	sta	r5
+	lda	r31
+	ldy	#0
+	sta	(r4),y
+	txa
+	iny
+	sta	(r4),y
+	inc	l78
+	lda	l78
+	cmp	#8
+	bcc	l80
+	lda	#0
+	sta	l78
 	jsr	_opt2_sweep_pending_patches
 	jsr	_opt2_scan_and_patch_epilogues
-l83:
+l80:
 	lda	r27
 	sta	1+_pc
 	lda	r26
 	sta	_pc
 	jsr	_dispatch_on_pc
-	jmp	l84
-l76:
-	lda	#0
-	jsr	_bankswitch_prg
-	jsr	_interpret_6502
-l84:
-	ldy	#11
+l31:
+	ldy	#20
 	jsr	___rload12
 	clc
 	lda	sp
-	adc	#12
+	adc	#21
 	sta	sp
-	bcc	l116
+	bcc	l122
 	inc	sp+1
-l116:
+l122:
 	rts
 ; stacksize=0+??
 	section	data
-l81:
+l78:
 	byte	0
 ;vcprmin=10000
-	section	"bank2"
-l117:
-	lda	r16
-	pha
-	lda	r17
-	pha
-	lda	r18
-	pha
-	lda	r20
-	pha
-	lda	r21
-	pha
-	lda	r1
-	sta	r21
+	section	text
+	global	_flash_sector_alloc
+_flash_sector_alloc:
 	lda	r0
-	sta	r20
-	lda	r21
-	ldx	#0
-	stx	r31
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	ldx	r31
-	sta	r2
-	stx	r3
-	lda	r2
-	clc
-	adc	#27
-	sta	_pc_jump_flag_bank
-	lda	r20
-	sta	_pc_jump_flag_address
-	lda	r21
-	and	#63
-	sta	1+_pc_jump_flag_address
-	lda	#<(_flash_cache_pc_flags)
-	clc
-	adc	_pc_jump_flag_address
-	pha
-	lda	#>(_flash_cache_pc_flags)
-	adc	1+_pc_jump_flag_address
-	tax
-	pla
-	sta	r31
-	lda	_pc_jump_flag_bank
-	sta	r0
-	lda	r31
-	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-	and	#128
-	beq	l121
+	sta	r10
 	lda	#0
-	jmp	l118
-l121:
-	ldx	r21
-	lda	r20
+	sta	r11
+	lda	_next_free_sector
+	sta	r2
+	lda	#0
+	sta	r1
+l139:
+	lda	r2
+	cmp	#56
+	bcc	l130
+	lda	#0
+	sta	r2
+l130:
+	lda	r1
+	beq	l132
+	lda	r2
+	cmp	_next_free_sector
+	beq	l127
+l132:
+	lda	#1
+	sta	r1
+	lda	r2
+	ldx	#0
 	stx	r31
 	asl
 	rol	r31
 	ldx	r31
-	sta	r31
-	sta	btmp0
+	clc
+	adc	#<(_sector_free_offset)
+	sta	r4
 	txa
-	sta	btmp0+1
+	adc	#>(_sector_free_offset)
+	sta	r5
+	ldy	#1
+	lda	(r4),y
+	tax
+	dey
+	lda	(r4),y
+	clc
+	adc	#23
+	bcc	l142
+	inx
+l142:
+	and	#240
+	sta	r31
+	sec
+	sbc	#8
+	sta	r8
+	txa
+	sbc	#0
+	sta	r9
+	lda	r31
+	clc
+	adc	r10
+	sta	r6
+	txa
+	adc	r11
+	sta	r7
+	cmp	#16
+	bcc	l135
+	bne	l143
+	lda	r6
+	cmp	#0
+	bcc	l135
+	beq	l135
+l143:
+	inc	r2
+	jmp	l139
+l135:
+	lda	r2
+	lsr
+	lsr
+	clc
+	adc	#4
+	sta	r1
+	lda	r2
+	ldx	#0
+	and	#3
+	tax
 	lda	#0
-	sta	btmp0+2
-	sta	btmp0+3
-	lda	r21
+	stx	r31
+	asl
+	rol	r31
+	asl
+	rol	r31
+	asl
+	rol	r31
+	asl
+	rol	r31
+	ldx	r31
+	clc
+	adc	#0
+	pha
+	txa
+	adc	#128
+	tax
+	pla
+	sta	r31
+	lda	r1
+	sta	_flash_code_bank
+	lda	r31
+	clc
+	adc	r8
+	sta	_flash_code_address
+	txa
+	adc	r9
+	sta	1+_flash_code_address
+	lda	r7
+	ldy	#1
+	sta	(r4),y
+	lda	r6
+	dey
+	sta	(r4),y
+	lda	r2
+	sta	_next_free_sector
+	lda	#1
+	rts
+l127:
+	lda	#0
+l123:
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_lookup_native_addr_safe
+_lookup_native_addr_safe:
+	lda	r16
+	pha
+	lda	r17
+	pha
+	lda	r18
+	pha
+	lda	r19
+	pha
+	lda	r20
+	pha
+	lda	r1
+	sta	r19
+	lda	r0
+	sta	r18
+	lda	_mapper_prg_bank
+	sta	r20
+	lda	r19
 	ldx	#0
 	stx	r31
 	lsr	r31
@@ -1144,556 +1453,50 @@ l121:
 	ror
 	lsr	r31
 	ror
+	lsr	r31
+	ror
 	ldx	r31
-	sta	r2
-	stx	r3
-	lda	r2
+	sta	r0
 	clc
-	adc	#19
-	sta	_pc_jump_bank
-	ldx	btmp0+1
-	lda	btmp0
-	sta	_pc_jump_address
-	txa
+	adc	#27
+	jsr	_bankswitch_prg
+	lda	r18
+	pha
+	lda	r19
 	and	#63
-	sta	1+_pc_jump_address
-; volatile barrier
-	lda	#37
-	sta	16416
-	lda	#<(_flash_cache_pc)
-	clc
-	adc	_pc_jump_address
-	pha
-	lda	#>(_flash_cache_pc)
-	adc	1+_pc_jump_address
 	tax
 	pla
-	sta	r31
-	lda	_pc_jump_bank
-	sta	r0
-	lda	r31
-	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-	sta	r18
-	lda	#<(1+_flash_cache_pc)
 	clc
-	adc	_pc_jump_address
-	pha
-	lda	#>(1+_flash_cache_pc)
-	adc	1+_pc_jump_address
-	tax
-	pla
-	sta	r31
-	lda	_pc_jump_bank
-	sta	r0
-	lda	r31
+	adc	#<(_flash_cache_pc_flags)
 	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-	sta	r0
-	ldx	#0
-	sta	r30
-	stx	r29
-	tax
-	lda	#0
-	sta	r16
-	stx	r17
-	ldx	r29
-	lda	r18
-	ldx	#0
-	ora	r16
-	sta	r16
 	txa
-	ora	r17
-	sta	r17
-	jsr	l123
-l118:
-	sta	r31
-	pla
-	sta	r21
-	pla
-	sta	r20
-	pla
-	sta	r18
-	pla
-	sta	r17
-	pla
-	sta	r16
-	lda	r31
-	rts
-l123:
-	jmp	(r16)
-; stacksize=0+??
-;vcprmin=10000
-	section	text
-	global	_flash_cache_search
-_flash_cache_search:
-	lda	r16
-	pha
-	lda	r17
-	pha
-	lda	r18
-	pha
-	lda	r19
-	pha
-	lda	r1
-	sta	r19
-	lda	r0
-	sta	r18
-	lda	_mapper_prg_bank
-	sta	r17
-	lda	#2
-	jsr	_bankswitch_prg
-	lda	r19
-	sta	r1
-	lda	r18
-	sta	r0
-	jsr	l117
-	sta	r16
-	lda	r17
-	jsr	_bankswitch_prg
-	lda	r16
-	sta	r31
-	pla
-	sta	r19
-	pla
-	sta	r18
-	pla
-	sta	r17
-	pla
-	sta	r16
-	lda	r31
-	rts
-; stacksize=0+??
-;vcprmin=10000
-	section	text
-	global	_flash_cache_select
-_flash_cache_select:
-	lda	#3
-	jsr	_bankswitch_prg
-	lda	1+_next_free_block
-	sta	r5
-	lda	_next_free_block
-	sta	r4
-	lda	1+_next_free_block
-	cmp	#3
-	bcc	l144
-	bne	l138
-	lda	_next_free_block
-	cmp	#192
-	bcs	l138
-l144:
-	lda	_next_free_block
-	clc
-	adc	#1
-	sta	r2
-	lda	1+_next_free_block
-	adc	#0
+	adc	#>(_flash_cache_pc_flags)
 	sta	r3
-	lda	#<(_flash_block_flags)
-	clc
-	adc	_next_free_block
-	sta	r0
-	lda	#>(_flash_block_flags)
-	adc	1+_next_free_block
+	ldy	#0
+	lda	(r2),y
 	sta	r1
-l137:
-	ldy	#0
-	lda	(r0),y
-	and	#1
-	beq	l133
-	lda	r3
-	sta	1+_next_free_block
-	lda	r2
-	sta	_next_free_block
-	ldx	r3
-	lda	r2
-	rts
-l133:
-	inc	r4
-	bne	l145
-	inc	r5
-l145:
-	inc	r0
-	bne	l146
-	inc	r1
-l146:
-	inc	r2
-	bne	l147
-	inc	r3
-l147:
-	lda	r5
-	cmp	#3
-	bcc	l137
-	bne	l148
-	lda	r4
-	cmp	#192
-	bcc	l137
-l148:
-l138:
-	ldx	#0
-	txa
-l126:
-	rts
-; stacksize=0+??
-;vcprmin=10000
-	section	text
-	global	_reserve_block_for_pc
-_reserve_block_for_pc:
-	sec
-	lda	sp
-	sbc	#7
-	sta	sp
-	bcs	l174
-	dec	sp+1
-l174:
-	ldy	#6
-	jsr	___rsave6
-	lda	r1
-	sta	r19
-	lda	r0
-	sta	r18
-	ldx	#0
-	lda	_reservation_count
-	beq	l167
+	and	#128
+	beq	l147
+	lda	r20
+	jsr	_bankswitch_prg
 	lda	#0
-	sta	r0
-l166:
-	txa
-	ldy	#0
-	sta	(sp),y
-	ldy	r0
-	lda	1+_reserved_pc,y ;am(r0)
-	cmp	r19
-	bne	l156
-	ldy	r0
-	lda	0+_reserved_pc,y ;am(r0)
-	cmp	r18
-	bne	l156
-	ldy	r0
-	lda	1+_reserved_block,y ;am(r0)
-	tax
-	ldy	r0
-	lda	0+_reserved_block,y ;am(r0)
-	clc
-	adc	#1
-	bcc	l175
-	inx
-l175:
-	jmp	l149
-l156:
-	inx
-	inc	r0
-	inc	r0
-	cpx	_reservation_count
-	bcc	l166
-l167:
+	jmp	l144
+l147:
+	lda	r1
+	and	#31
+	sta	_reserve_result_bank
 	ldx	r19
 	lda	r18
 	stx	r31
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
+	asl
+	rol	r31
 	ldx	r31
-	sta	r2
-	stx	r3
-	lda	r18
-	and	#7
-	ldx	#0
-	sta	r14
-	stx	r15
-	lda	#1
-	ldy	r14
-	beq	l176
-l177:
-	asl
-	dey
-	bne	l177
-l176:
 	sta	r16
-	ldx	#>(_sa_code_bitmap)
-	lda	#<(_sa_code_bitmap)
-	clc
-	adc	r2
-	pha
 	txa
-	adc	r3
-	tax
-	pla
-	sta	r31
-	lda	#3
-	sta	r0
-	lda	r31
-	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-	sta	r31
-	sta	r2
-	lda	#0
-	sta	r3
-	lda	r16
-	ldx	#0
-	and	r2
-	pha
-	txa
-	and	r3
-	tax
-	pla
-	cpx	#0
-	bne	l178
-	cmp	#0
-	beq	l158
-l178:
-	ldx	#0
-	txa
-	jmp	l149
-l158:
-	lda	_reservation_count
-	cmp	#32
-	bcc	l160
-	ldx	#0
-	txa
-	jmp	l149
-l160:
-	jsr	_flash_cache_select
-	sta	r20
-	stx	r21
-	lda	r20
-	ora	r21
-	bne	l162
-	ldx	#0
-	txa
-	jmp	l149
-l162:
-	lda	r20
-	sec
-	sbc	#1
-	sta	r16
-	lda	r21
-	sbc	#0
+	and	#63
 	sta	r17
-	lda	#3
-	jsr	_bankswitch_prg
-	lda	#<(_flash_block_flags)
-	clc
-	adc	r16
-	sta	r0
-	lda	#>(_flash_block_flags)
-	adc	r17
-	sta	r1
-	ldy	#0
-	lda	(r0),y
-	and	#254
-	sta	r31
-	lda	#>(_flash_block_flags)
-	sta	r5
-	lda	#<(_flash_block_flags)
-	sta	r4
-	clc
-	adc	r16
-	sta	r0
-	lda	r5
-	adc	r17
-	sta	r1
-	lda	_mapper_prg_bank
-	sta	r2
-	lda	r31
-	sta	r4
-	jsr	_flash_byte_program
-	lda	_reservation_count
-	asl
-	sta	r31
 	lda	r19
-	ldy	r31
-	sta	1+_reserved_pc,y ;am(r31)
-	lda	r18
-	ldy	r31
-	sta	0+_reserved_pc,y ;am(r31)
-	lda	r17
-	ldy	r31
-	sta	1+_reserved_block,y ;am(r31)
-	lda	r16
-	ldy	r31
-	sta	0+_reserved_block,y ;am(r31)
-	inc	_reservation_count
-	ldx	r21
-	lda	r20
-l149:
-	sta	r31
-	ldy	#6
-	jsr	___rload6
-	clc
-	lda	sp
-	adc	#7
-	sta	sp
-	bcc	l179
-	inc	sp+1
-l179:
-	lda	r31
-	rts
-; stacksize=0+??
-;vcprmin=10000
-	section	text
-	global	_consume_reservation
-_consume_reservation:
-	sec
-	lda	sp
-	sbc	#3
-	sta	sp
-	bcs	l197
-	dec	sp+1
-l197:
-	lda	r1
-	sta	r5
-	lda	r0
-	sta	r4
 	ldx	#0
-	lda	_reservation_count
-	beq	l194
-	lda	_reservation_count
-	sec
-	sbc	#1
-	sta	r1
-	asl
-	sta	r31
-	lda	#<(_reserved_pc)
-	clc
-	adc	r31
-	sta	r8
-	lda	#>(_reserved_pc)
-	adc	#0
-	sta	r9
-	lda	#<(_reserved_block)
-	clc
-	adc	r31
-	sta	r6
-	lda	#>(_reserved_block)
-	adc	#0
-	sta	r7
-	lda	#0
-	sta	r0
-l193:
-	txa
-	ldy	#0
-	sta	(sp),y
-	lda	r5
-	ldy	#2
-	sta	(sp),y
-	lda	r4
-	dey
-	sta	(sp),y
-	ldy	r0
-	lda	1+_reserved_pc,y ;am(r0)
-	cmp	r5
-	bne	l187
-	ldy	r0
-	lda	0+_reserved_pc,y ;am(r0)
-	cmp	r4
-	bne	l187
-	lda	#<(_reserved_block)
-	clc
-	adc	r0
-	sta	r2
-	lda	#>(_reserved_block)
-	adc	#0
-	sta	r3
-	ldy	#1
-	lda	(r2),y
-	tax
-	dey
-	lda	(r2),y
-	sta	r31
-	lda	r1
-	sta	_reservation_count
-	lda	r31
-	iny
-	lda	(r8),y
-	ldy	r0
-	sta	1+_reserved_pc,y ;am(r0)
-	ldy	#0
-	lda	(r8),y
-	ldy	r0
-	sta	0+_reserved_pc,y ;am(r0)
-	lda	r31
-	ldy	#1
-	lda	(r6),y
-	sta	(r2),y
-	dey
-	lda	(r6),y
-	sta	(r2),y
-	lda	r31
-	jmp	l180
-l187:
-	inx
-	inc	r0
-	inc	r0
-	cpx	_reservation_count
-	bcc	l193
-l194:
-	ldx	#255
-	txa
-l180:
-	sta	r31
-	clc
-	lda	sp
-	adc	#3
-	sta	sp
-	bcc	l198
-	inc	sp+1
-l198:
-	lda	r31
-	rts
-; stacksize=0+??
-;vcprmin=10000
-	section	text
-	global	_reserve_block_for_pc_safe
-_reserve_block_for_pc_safe:
-	lda	r16
-	pha
-	lda	r1
-	sta	r3
-	lda	r0
-	sta	r2
-	lda	_reservations_enabled
-	bne	l202
-	lda	#0
-	jmp	l199
-l202:
-	lda	_reservation_count
-	beq	l204
-	lda	#0
-	jmp	l199
-l204:
-	lda	_mapper_prg_bank
-	sta	r16
-	lda	r3
-	sta	r1
-	lda	r2
-	sta	r0
-	jsr	_reserve_block_for_pc
-	sta	r4
-	stx	r5
-	lda	r4
-	ora	r5
-	bne	l206
-	lda	r16
-	jsr	_bankswitch_prg
-	lda	#0
-	jmp	l199
-l206:
-	ldx	r5
-	lda	r4
-	sec
-	sbc	#1
-	bcs	l208
-	dex
-l208:
-	sta	r30
-	stx	r29
 	stx	r31
 	lsr	r31
 	ror
@@ -1705,36 +1508,244 @@ l208:
 	ror
 	lsr	r31
 	ror
-	lsr	r31
-	ror
 	ldx	r31
+	sta	r0
+	clc
+	adc	#19
+	jsr	_bankswitch_prg
+	lda	#<(_flash_cache_pc)
+	clc
+	adc	r16
+	sta	r4
+	lda	#>(_flash_cache_pc)
+	adc	r17
+	sta	r5
+	lda	#<(1+_flash_cache_pc)
+	clc
+	adc	r16
+	sta	r2
+	lda	#>(1+_flash_cache_pc)
+	adc	r17
+	sta	r3
+	ldy	#0
+	lda	(r2),y
+	ldx	#0
+	sta	r30
+	stx	r29
+	tax
+	tya
 	sta	r2
 	stx	r3
 	ldx	r29
-	lda	r30
-	sta	r31
-	lda	r2
-	sta	r0
-	clc
-	adc	#4
-	sta	_reserve_result_bank
-	lda	r31
-	and	#63
-	tax
-	lda	#0
-	clc
-	adc	#0
+	lda	(r4),y
+	ldx	#0
+	ora	r2
 	sta	_reserve_result_addr
 	txa
-	adc	#128
+	ora	r3
 	sta	1+_reserve_result_addr
+	lda	r20
+	jsr	_bankswitch_prg
+	lda	#1
+l144:
+	sta	r31
+	pla
+	sta	r20
+	pla
+	sta	r19
+	pla
+	sta	r18
+	pla
+	sta	r17
+	pla
+	sta	r16
+	lda	r31
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_lookup_entry_list
+_lookup_entry_list:
+	sec
+	lda	sp
+	sbc	#4
+	sta	sp
+	bcs	l172
+	dec	sp+1
+l172:
+	lda	r16
+	pha
+	lda	r18
+	pha
+	lda	r19
+	pha
+	lda	r1
+	sta	r19
+	lda	r0
+	sta	r18
+	lda	_mapper_prg_bank
+	sta	r16
+	lda	#18
+	jsr	_bankswitch_prg
+	lda	r18
+	sta	r9
+	lda	r19
+	ldx	#0
+	sta	r10
+	txa
+	sta	r5
+	txa
+	sta	r4
+	lda	_entry_list_offset
+	ora	1+_entry_list_offset
+	beq	l165
+	lda	#128
+	sta	r1
+	lda	#1
+	sta	r0
+	lda	#128
+	sta	r3
+	lda	#0
+	sta	r2
+l164:
+	ldy	#0
+	lda	(r2),y
+	sta	r8
+	cmp	#255
+	bne	l155
+	ldy	#0
+	lda	(r0),y
+	cmp	#255
+	beq	l165
+l155:
+	lda	r3
+	ldy	#1
+	sta	(sp),y
+	lda	r2
+	dey
+	sta	(sp),y
+	lda	r5
+	ldy	#3
+	sta	(sp),y
+	lda	r4
+	dey
+	sta	(sp),y
+	lda	r8
+	cmp	r9
+	bne	l158
+	lda	r5
+	sta	r7
+	lda	r4
+	sta	r6
+	lda	r3
+	ldy	#1
+	sta	(sp),y
+	lda	r2
+	dey
+	sta	(sp),y
+	lda	r5
+	ldy	#3
+	sta	(sp),y
+	lda	r4
+	dey
+	sta	(sp),y
+	ldy	#0
+	lda	(r0),y
+	cmp	r10
+	bne	l158
+	lda	#4
+	clc
+	adc	r6
+	sta	r4
+	lda	#128
+	adc	r7
+	sta	r5
+	lda	#5
+	clc
+	adc	r6
+	sta	r2
+	lda	#128
+	adc	r7
+	sta	r3
+	ldy	#0
+	lda	(r2),y
+	ldx	#0
+	sta	r30
+	stx	r29
+	tax
+	tya
+	sta	r2
+	stx	r3
+	ldx	r29
+	lda	(r4),y
+	ldx	#0
+	ora	r2
+	sta	_reserve_result_addr
+	txa
+	ora	r3
+	sta	1+_reserve_result_addr
+	lda	#6
+	clc
+	adc	r6
+	sta	r2
+	lda	#128
+	adc	r7
+	sta	r3
+	lda	(r2),y
+	sta	_reserve_result_bank
 	lda	r16
 	jsr	_bankswitch_prg
 	lda	#1
-l199:
+	jmp	l148
+l158:
+	lda	r4
+	clc
+	adc	#8
+	sta	r4
+	bcc	l173
+	inc	r4+1
+l173:
+	lda	r2
+	clc
+	adc	#8
+	sta	r2
+	bcc	l174
+	inc	r2+1
+l174:
+	lda	r0
+	clc
+	adc	#8
+	sta	r0
+	bcc	l175
+	inc	r0+1
+l175:
+	lda	r5
+	cmp	1+_entry_list_offset
+	bcc	l164
+	bne	l176
+	lda	r4
+	cmp	_entry_list_offset
+	bcc	l164
+l176:
+l165:
+	lda	r16
+	jsr	_bankswitch_prg
+	lda	#0
+l148:
 	sta	r31
 	pla
+	sta	r19
+	pla
+	sta	r18
+	pla
 	sta	r16
+	clc
+	lda	sp
+	adc	#4
+	sta	sp
+	bcc	l177
+	inc	sp+1
+l177:
 	lda	r31
 	rts
 ; stacksize=0+??
@@ -1758,12 +1769,19 @@ _flash_cache_pc_update:
 	ldx	#0
 	clc
 	adc	_flash_code_address
-	sta	r18
+	pha
 	txa
 	adc	1+_flash_code_address
+	tax
+	pla
+	clc
+	adc	#8
+	sta	r18
+	txa
+	adc	#0
 	sta	r19
 	lda	_mapper_prg_bank
-	sta	r16
+	sta	r17
 	lda	_pc_jump_flag_bank
 	jsr	_bankswitch_prg
 	lda	#<(_flash_cache_pc_flags)
@@ -1775,21 +1793,12 @@ _flash_cache_pc_update:
 	sta	r3
 	ldy	#0
 	lda	(r2),y
-	sta	r17
-	lda	r16
+	sta	r16
+	lda	r17
 	jsr	_bankswitch_prg
-	lda	r17
+	lda	r16
 	cmp	#255
-	beq	l212
-	lda	r17
-	ldx	#0
-	and	#128
-	cpx	#0
-	bne	l218
-	cmp	#0
-	beq	l209
-l218:
-l212:
+	bne	l178
 	lda	r18
 	sta	r31
 	lda	#>(_flash_cache_pc)
@@ -1835,14 +1844,14 @@ l212:
 	jsr	_flash_byte_program
 	lda	r20
 	cmp	#128
-	bne	l215
+	bne	l183
 	lda	_flash_code_bank
 	sta	r3
-	jmp	l216
-l215:
+	jmp	l184
+l183:
 	lda	#128
 	sta	r3
-l216:
+l184:
 	ldx	#>(_flash_cache_pc_flags)
 	lda	#<(_flash_cache_pc_flags)
 	clc
@@ -1856,7 +1865,7 @@ l216:
 	lda	r3
 	sta	r4
 	jsr	_flash_byte_program
-l209:
+l178:
 	pla
 	sta	r20
 	pla
@@ -1871,52 +1880,10 @@ l209:
 ; stacksize=0+??
 ;vcprmin=10000
 	section	text
-	global	_setup_flash_address
-_setup_flash_address:
-	lda	r1
-	sta	r7
+	global	_setup_flash_pc_tables
+_setup_flash_pc_tables:
+	ldx	r1
 	lda	r0
-	sta	r6
-	ldx	r3
-	lda	r2
-	sta	r30
-	stx	r29
-	stx	r31
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	ldx	r31
-	sta	r4
-	stx	r5
-	ldx	r29
-	lda	r30
-	sta	r31
-	lda	r4
-	sta	r0
-	clc
-	adc	#4
-	sta	_flash_code_bank
-	lda	r31
-	and	#63
-	tax
-	lda	#0
-	clc
-	adc	#0
-	sta	_flash_code_address
-	txa
-	adc	#128
-	sta	1+_flash_code_address
-	ldx	r7
-	lda	r6
 	stx	r31
 	asl
 	rol	r31
@@ -1928,7 +1895,7 @@ _setup_flash_address:
 	lda	#0
 	sta	btmp0+2
 	sta	btmp0+3
-	lda	r7
+	lda	r1
 	ldx	#0
 	stx	r31
 	lsr	r31
@@ -1942,9 +1909,9 @@ _setup_flash_address:
 	lsr	r31
 	ror
 	ldx	r31
-	sta	r4
-	stx	r5
-	lda	r4
+	sta	r2
+	stx	r3
+	lda	r2
 	clc
 	adc	#19
 	sta	_pc_jump_bank
@@ -1954,7 +1921,7 @@ _setup_flash_address:
 	txa
 	and	#63
 	sta	1+_pc_jump_address
-	lda	r7
+	lda	r1
 	ldx	#0
 	stx	r31
 	lsr	r31
@@ -1970,331 +1937,1313 @@ _setup_flash_address:
 	lsr	r31
 	ror
 	ldx	r31
-	sta	r4
-	stx	r5
-	lda	r4
+	sta	r2
+	stx	r3
+	lda	r2
 	clc
 	adc	#27
 	sta	_pc_jump_flag_bank
-	lda	r6
+	lda	r0
 	sta	_pc_jump_flag_address
-	lda	r7
+	lda	r1
 	and	#63
 	sta	1+_pc_jump_flag_address
 	rts
 ; stacksize=0+??
 ;vcprmin=10000
 	section	text
-l221:
+	global	_setup_flash_address
+_setup_flash_address:
+	lda	r1
+	sta	r3
+	lda	r0
+	sta	r2
+	lda	r3
+	sta	r1
+	lda	r2
+	sta	r0
+	jmp	_setup_flash_pc_tables
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_flash_cache_init_sectors
+_flash_cache_init_sectors:
+	lda	#0
+	sta	r2
+l197:
+	lda	r2
+	ldx	#0
+	stx	r31
+	asl
+	rol	r31
+	ldx	r31
+	clc
+	adc	#<(_sector_free_offset)
+	sta	r0
+	txa
+	adc	#>(_sector_free_offset)
+	sta	r1
+	lda	#0
+	ldy	#1
+	sta	(r0),y
+	dey
+	sta	(r0),y
+	inc	r2
+	lda	r2
+	cmp	#56
+	bcc	l197
+	lda	#0
+	sta	_next_free_sector
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+l199:
 	lda	r0
 	eor	#32
 	rts
 ; stacksize=0+??
 ;vcprmin=10000
-	section	"bank2"
-l224:
+	section	text
+	global	_try_intra_block_branch
+_try_intra_block_branch:
+	lda	r16
+	pha
+	lda	r17
+	pha
+	lda	r18
+	pha
+	lda	r19
+	pha
+	lda	r2
+	sta	r17
+	lda	r1
+	sta	r3
+	lda	r0
+	sta	r2
+	lda	_block_has_jsr
+	beq	l205
+	lda	#0
+	jmp	l202
+l205:
+	lda	l29
+	beq	l207
+	lda	#0
+	jmp	l202
+l207:
+	lda	#<(_cache_entry_pc_lo)
+	clc
+	adc	_cache_index
+	sta	r4
+	lda	#>(_cache_entry_pc_lo)
+	adc	#0
+	sta	r5
+	lda	r4
+	sta	r14
+	lda	r5
+	sta	r15
+	ldy	#0
+	lda	(r14),y
+	sta	r4
+	tya
+	sta	r5
+	lda	#<(_cache_entry_pc_hi)
+	clc
+	adc	_cache_index
+	sta	r6
+	lda	#>(_cache_entry_pc_hi)
+	adc	#0
+	sta	r7
+	lda	(r6),y
+	tax
+	tya
+	ora	r4
+	sta	r8
+	txa
+	ora	r5
+	sta	r9
+	lda	r3
+	cmp	r9
+	bcc	l208
+	bne	l225
+	lda	r2
+	cmp	r8
+	bcc	l208
+l225:
+	lda	r3
+	cmp	1+_pc
+	bcc	l209
+	bne	l226
+	lda	r2
+	cmp	_pc
+	bcc	l209
+l226:
+l208:
+	lda	#0
+	jmp	l202
+l209:
+	lda	r2
+	sta	r31
+	lda	r8
+	sta	r1
+	lda	r31
 	sec
-	lda	sp
-	sbc	#19
-	sta	sp
-	bcs	l539
-	dec	sp+1
-l539:
-	ldy	#18
-	jsr	___rsave12
+	sbc	r1
+	and	#63
+	sta	r31
+	tay
+	lda	0+_block_ci_map,y ;am(r31)
+	sta	r0
+	cmp	#0
+	bne	l212
+	lda	#0
+	jmp	l202
+l212:
+	lda	r0
+	sec
+	sbc	#1
+	sta	r1
+	ldx	#0
+	sta	r31
+	lda	_code_index
+	sta	r4
+	txa
+	sta	r5
+	lda	r31
+	inc	r4
+	bne	l227
+	inc	r5
+l227:
+	inc	r4
+	bne	l228
+	inc	r5
+l228:
+	sec
+	sbc	r4
+	sta	r18
+	txa
+	sbc	r5
+	sta	r19
+	lda	r18
+	cmp	#128
+	lda	r19
+	sbc	#255
+	bvc	l229
+	eor	#128
+l229:
+	bmi	l213
+	lda	#127
+	cmp	r18
+	lda	#0
+	sbc	r19
+	bvc	l230
+	eor	#128
+l230:
+	bpl	l214
+l213:
+	lda	#0
+	jmp	l202
+l214:
 	lda	_cache_index
 	ldx	#0
 	sta	r0
 	stx	r1
 	txa
 	sta	r3
-	lda	#229
+	lda	#211
 	sta	r2
 	jsr	___mulint16
 	clc
 	adc	#<(_cache_code)
-	sta	r20
+	pha
 	txa
 	adc	#>(_cache_code)
-	sta	r21
-	lda	1+_pc
-	sta	r1
-	lda	_pc
+	tax
+	pla
+	clc
+	adc	_code_index
 	sta	r0
-	jsr	_read6502
-	sta	r22
-	cmp	#0
-	beq	l323
-	lda	r22
-	cmp	#8
-	beq	l314
-	lda	r22
-	cmp	#16
-	beq	l228
-	lda	r22
-	cmp	#32
-	beq	l266
-	lda	r22
-	cmp	#40
-	beq	l314
-	lda	r22
-	cmp	#48
-	beq	l228
-	lda	r22
-	cmp	#64
-	beq	l282
-	lda	r22
-	cmp	#72
-	beq	l298
-	lda	r22
-	cmp	#76
-	beq	l259
-	lda	r22
-	cmp	#80
-	beq	l228
-	lda	r22
-	cmp	#88
-	beq	l314
-	lda	r22
-	cmp	#96
-	beq	l284
-	lda	r22
-	cmp	#104
-	beq	l306
-	lda	r22
-	cmp	#108
-	beq	l282
-	lda	r22
-	cmp	#112
-	beq	l228
-	lda	r22
-	cmp	#120
-	beq	l314
-	lda	r22
-	cmp	#144
-	beq	l228
-	lda	r22
-	cmp	#148
-	beq	l319
-	lda	r22
-	cmp	#150
-	beq	l319
-	lda	r22
-	cmp	#154
-	beq	l294
-	lda	r22
-	cmp	#176
-	beq	l228
-	lda	r22
-	cmp	#186
-	beq	l291
-	lda	r22
-	cmp	#208
-	beq	l228
-	lda	r22
-	cmp	#234
-	beq	l322
-	lda	r22
-	cmp	#240
-	beq	l228
-	lda	r22
-	cmp	#248
-	beq	l321
-	jmp	l324
-l228:
-	lda	_pc
+	txa
+	adc	#0
+	sta	r1
+	lda	r17
+	ldy	#0
+	sta	(r0),y
+	lda	r18
+	sta	r16
+	lda	_cache_index
+	ldx	#0
+	sta	r0
+	stx	r1
+	txa
+	sta	r3
+	lda	#211
+	sta	r2
+	jsr	___mulint16
+	clc
+	adc	#<(_cache_code)
+	pha
+	txa
+	adc	#>(_cache_code)
+	tax
+	pla
+	sta	r31
+	lda	_code_index
 	clc
 	adc	#1
+	sta	r2
+	lda	r31
 	sta	r0
+	stx	r1
+	lda	r16
+	ldy	r2
+	sta	(r0),y ;am(r2)
 	lda	1+_pc
+	sta	r1
+	lda	_pc
+	sta	r0
+	lda	1+_flash_cache_index
+	sta	r3
+	lda	_flash_cache_index
+	sta	r2
+	jsr	_setup_flash_address
+	lda	_code_index
+	sta	r0
+	lda	#128
+	sta	r2
+	jsr	_flash_cache_pc_update
+	inc	_pc
+	bne	l231
+	inc	1+_pc
+l231:
+	inc	_pc
+	bne	l232
+	inc	1+_pc
+l232:
+	inc	_code_index
+	inc	_code_index
+	inc	_cache_branches
+	bne	l233
+	inc	1+_cache_branches
+	bne	l233
+	inc	2+_cache_branches
+	bne	l233
+	inc	3+_cache_branches
+l233:
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r0
+	lda	#>(_cache_flag)
 	adc	#0
 	sta	r1
-	jsr	_read6502
-	sta	r9
-	sec
-	sbc	#0
-	bvc	l540
-	eor	#128
-l540:
-	bmi	l237
-	lda	_pc
+	ldy	#0
+	lda	(r0),y
+	ora	#32
+	sta	(r0),y
+	lda	#1
+l202:
+	sta	r31
+	pla
+	sta	r19
+	pla
+	sta	r18
+	pla
+	sta	r17
+	pla
+	sta	r16
+	lda	r31
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_try_direct_branch
+_try_direct_branch:
+	lda	r16
+	pha
+	lda	r17
+	pha
+	lda	r18
+	pha
+	lda	r2
+	sta	r18
+	lda	r1
+	sta	r3
+	lda	r0
+	sta	r2
+	lda	r5
+	sta	r17
+	lda	r4
+	sta	r16
+	lda	r3
+	sta	r1
+	lda	r2
+	sta	r0
+	jsr	_lookup_entry_list
+	cmp	#0
+	bne	l237
+	lda	#0
+	jmp	l234
+l237:
+	lda	_reserve_result_bank
+	cmp	_flash_code_bank
+	beq	l239
+	lda	#0
+	jmp	l234
+l239:
+	lda	_flash_code_address
+	clc
+	adc	#8
+	sta	r2
+	lda	1+_flash_code_address
+	adc	#0
+	sta	r3
+	lda	_code_index
+	ldx	#0
+	clc
+	adc	r2
+	pha
+	txa
+	adc	r3
+	tax
+	pla
 	clc
 	adc	#2
-	sta	r4
-	lda	1+_pc
-	adc	#0
-	sta	r5
+	bcc	l257
+	inx
+l257:
+	sta	r14
+	stx	r15
+	lda	_reserve_result_addr
+	sec
+	sbc	r14
+	sta	r0
+	lda	1+_reserve_result_addr
+	sbc	r15
+	sta	r1
+	lda	r0
+	cmp	#128
+	lda	r1
+	sbc	#255
+	bvc	l258
+	eor	#128
+l258:
+	bmi	l241
+	lda	#127
+	cmp	r0
+	lda	#0
+	sbc	r1
+	bvc	l259
+	eor	#128
+l259:
+	bmi	l241
+	lda	_code_index
 	ldx	#0
-	lda	r9
-	bpl	l541
-	dex
-l541:
 	clc
-	adc	r4
-	ldy	#1
-	sta	(sp),y
+	adc	#29
+	bcc	l260
+	inx
+l260:
+	pha
+	cmp	#211
 	txa
-	adc	r5
-	iny
-	sta	(sp),y
-	inc	_branch_forward
-	bne	l542
-	inc	1+_branch_forward
-	bne	l542
-	inc	2+_branch_forward
-	bne	l542
-	inc	3+_branch_forward
-l542:
+	sbc	#0
+	bvc	l262
+	eor	#128
+l262:
+	bpl	l261
+	pla
+	lda	r16
+	clc
+	adc	_code_index
+	sta	r2
+	lda	r17
+	adc	#0
+	sta	r3
+	lda	r18
+	ldy	#0
+	sta	(r2),y
+	lda	r0
+	sta	r31
+	lda	_code_index
+	sta	r6
+	tya
+	sta	r7
+	lda	r16
+	clc
+	adc	#1
+	sta	r2
+	lda	r17
+	adc	#0
+	sta	r3
+	lda	r2
+	clc
+	adc	r6
+	sta	r2
+	lda	r3
+	adc	r7
+	sta	r3
+	lda	r31
+	sta	(r2),y
+	lda	#2
+	jmp	l234
+l241:
 	lda	_code_index
 	ldx	#0
 	clc
 	adc	#32
-	bcc	l543
+	bcc	l263
 	inx
-l543:
+l263:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l545
+	bvc	l265
 	eor	#128
-l545:
-	bpl	l544
+l265:
+	bpl	l264
 	pla
-	ldy	#2
-	lda	(sp),y
-	sta	r1
-	dey
-	lda	(sp),y
-	sta	r0
-	jsr	_reserve_block_for_pc_safe
-	cmp	#0
-	beq	l239
-	lda	_reserve_result_bank
-	cmp	_flash_code_bank
-	bne	l239
-	lda	r22
-	sta	r0
-	jsr	l221
+	lda	r18
+	eor	#32
 	sta	r31
-	lda	r20
+	lda	r16
 	clc
 	adc	_code_index
-	sta	r4
-	lda	r21
+	sta	r2
+	lda	r17
 	adc	#0
-	sta	r5
+	sta	r3
 	lda	r31
 	ldy	#0
-	sta	(r4),y
+	sta	(r2),y
 	lda	_code_index
-	sta	r4
+	sta	r2
 	tya
-	sta	r5
-	ldx	r21
-	lda	r20
+	sta	r3
+	ldx	r17
+	lda	r16
 	clc
 	adc	#1
-	bcc	l546
+	bcc	l266
 	inx
-l546:
+l266:
 	clc
-	adc	r4
-	sta	r4
+	adc	r2
+	sta	r2
 	txa
-	adc	r5
-	sta	r5
+	adc	r3
+	sta	r3
 	lda	#3
-	sta	(r4),y
+	sta	(r2),y
 	lda	_code_index
-	sta	r4
+	sta	r2
 	lda	#0
-	sta	r5
-	ldx	r21
-	lda	r20
+	sta	r3
+	ldx	r17
+	lda	r16
 	clc
 	adc	#2
-	bcc	l547
+	bcc	l267
 	inx
-l547:
+l267:
 	clc
-	adc	r4
-	sta	r4
+	adc	r2
+	sta	r2
 	txa
-	adc	r5
-	sta	r5
+	adc	r3
+	sta	r3
 	lda	#76
-	sta	(r4),y
+	sta	(r2),y
 	lda	_reserve_result_addr
 	and	#255
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r6
 	lda	#0
-	sta	r9
-	lda	r20
+	sta	r7
+	lda	r16
 	clc
 	adc	#3
-	sta	r4
-	lda	r21
+	sta	r2
+	lda	r17
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r3
+	lda	r2
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r6
+	sta	r2
+	lda	r3
+	adc	r7
+	sta	r3
 	lda	r31
-	sta	(r4),y
+	sta	(r2),y
 	lda	1+_reserve_result_addr
 	ldx	#0
-	sta	r4
-	stx	r5
-	lda	r4
+	sta	r2
+	stx	r3
+	lda	r2
 	and	#255
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r6
 	txa
-	sta	r9
-	lda	r20
+	sta	r7
+	lda	r16
+	clc
+	adc	#4
+	sta	r2
+	lda	r17
+	adc	#0
+	sta	r3
+	lda	r2
+	clc
+	adc	r6
+	sta	r2
+	lda	r3
+	adc	r7
+	sta	r3
+	lda	r31
+	sta	(r2),y
+	lda	#5
+	jmp	l234
+l245:
+	lda	#0
+l234:
+	sta	r31
+	pla
+	sta	r18
+	pla
+	sta	r17
+	pla
+	sta	r16
+	lda	r31
+	rts
+l264:
+	pla
+	jmp	l245
+l261:
+	pla
+	jmp	l241
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_find_zp_mirror
+_find_zp_mirror:
+	lda	r0
+	sta	r5
+	ldx	#0
+	txa
+	sta	r4
+	lda	#>(_mirrored_ptrs)
+	sta	r3
+	lda	#<(_mirrored_ptrs)
+	sta	r2
+l281:
+	ldy	#0
+	lda	(r2),y
+	cmp	r5
+	beq	l274
+	ldy	r4
+	lda	1+_mirrored_ptrs,y ;am(r4)
+	cmp	r5
+	bne	l275
+l274:
+	ldx	r3
+	lda	r2
+	rts
+l275:
+	inx
+	lda	r4
 	clc
 	adc	#4
 	sta	r4
-	lda	r21
-	adc	#0
+	lda	r2
+	clc
+	adc	#4
+	sta	r2
+	bcc	l284
+	inc	r2+1
+l284:
+	cpx	#3
+	bcc	l281
+	ldx	#0
+	txa
+l268:
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_find_zp_mirror_lo
+_find_zp_mirror_lo:
+	lda	r0
+	sta	r3
+	ldx	#0
+	txa
+	sta	r2
+	lda	#>(_mirrored_ptrs)
 	sta	r5
+	lda	#<(_mirrored_ptrs)
+	sta	r4
+l297:
+	ldy	r2
+	lda	0+_mirrored_ptrs,y ;am(r2)
+	cmp	r3
+	bne	l292
+	ldx	r5
+	lda	r4
+	rts
+l292:
+	inx
+	lda	r2
+	clc
+	adc	#4
+	sta	r2
 	lda	r4
 	clc
-	adc	r8
+	adc	#4
+	sta	r4
+	bcc	l300
+	inc	r4+1
+l300:
+	cpx	#3
+	bcc	l297
+	ldx	#0
+	txa
+l285:
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_emit_zp_mirror_write
+_emit_zp_mirror_write:
+	lda	r2
+	sta	r7
+	lda	r4
+	sta	r10
+	lda	r1
+	sta	r9
+	lda	r0
+	sta	r8
+	lda	r6
+	sta	r0
+	jsr	_find_zp_mirror
+	sta	r4
+	stx	r5
+	txa
+	bne	l304
+	lda	r4
+	bne	l304
+	lda	#0
+	rts
+l304:
+	lda	r6
+	ldy	#0
+	cmp	(r4),y
+	bne	l306
+	ldy	#2
+	lda	(r4),y ;am(2)
+	sta	r0
+	lda	#0
+	sta	r1
+	jmp	l307
+l306:
+	ldy	#2
+	lda	(r4),y ;am(2)
+	ldx	#0
+	clc
+	adc	#1
+	sta	r0
+	txa
+	adc	#0
+	sta	r1
+l307:
+	lda	r0
+	sta	r31
+	lda	r10
+	ldy	r7
+	sta	(r8),y ;am(r7)
+	lda	r7
+	sta	r4
+	lda	#0
+	sta	r5
+	lda	r8
+	clc
+	adc	#1
+	sta	r2
+	lda	r9
+	adc	#0
+	sta	r3
+	lda	r2
+	clc
+	adc	r4
+	sta	r2
+	lda	r3
+	adc	r5
+	sta	r3
+	lda	r31
+	ldy	#0
+	sta	(r2),y
+	lda	#2
+l301:
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_emit_native_sta_indy
+_emit_native_sta_indy:
+	lda	sp
+	bne	l332
+	dec	sp+1
+l332:
+	dec	sp
+	lda	r16
+	pha
+	lda	r17
+	pha
+	lda	r2
+	sta	r9
+	ldx	r4
+	lda	r1
+	sta	r13
+	lda	r0
+	sta	r12
+	stx	r0
+	jsr	_find_zp_mirror_lo
+	sta	r10
+	stx	r11
+	txa
+	bne	l311
+	lda	r10
+	bne	l311
+	lda	#0
+	jmp	l308
+l311:
+	ldy	#0
+	lda	(r10),y
+	ldx	#0
+	sta	r31
+	lda	#>(_RAM_BASE)
+	sta	r3
+	lda	#<(_RAM_BASE)
+	sta	r2
+	lda	r31
+	clc
+	adc	r2
+	sta	_native_sta_indy_emu_lo
+	txa
+	adc	r3
+	sta	1+_native_sta_indy_emu_lo
+	iny
+	lda	(r10),y ;am(1)
+	clc
+	adc	r2
+	sta	_native_sta_indy_emu_hi
+	txa
+	adc	r3
+	sta	1+_native_sta_indy_emu_hi
+	lda	_native_sta_indy_tmpl_size
+	sta	r7
+	txa
+	sta	r8
+	lda	_native_sta_indy_tmpl_size
+	beq	l328
+	lda	r12
+	clc
+	adc	r9
+	sta	r0
+	lda	r13
+	adc	#0
+	sta	r1
+	lda	r8
+	ldy	#0
+	sta	(sp),y
+	tax
+l326:
+	lda	0+_native_sta_indy_tmpl,x ;am(x)
+	ldy	#0
+	sta	(r0),y
+	inx
+	inc	r0
+	bne	l333
+	inc	r1
+l333:
+	cpx	r7
+	bcc	l326
+l328:
+	lda	r10
+	clc
+	adc	#3
+	sta	r4
+	lda	r11
+	adc	#0
+	sta	r5
+	ldy	#0
+	lda	(r4),y
+	beq	l317
+	lda	r7
+	sta	r1
+	inc	r7
+	lda	r9
+	sta	r14
+	lda	#0
+	sta	r15
+	lda	r12
+	clc
+	adc	r1
+	pha
+	lda	r13
+	adc	#0
+	tax
+	pla
+	clc
+	adc	r14
+	sta	r2
+	txa
+	adc	r15
+	sta	r3
+	lda	#8
+	ldy	#0
+	sta	(r2),y
+	lda	r12
+	clc
+	adc	r7
+	pha
+	lda	r13
+	adc	#0
+	tax
+	pla
+	inc	r7
+	clc
+	adc	r14
+	sta	r2
+	txa
+	adc	r15
+	sta	r3
+	lda	#230
+	sta	(r2),y
+	lda	(r4),y
+	cmp	#1
+	bne	l319
+	lda	r6
+	sta	r16
+	lda	#0
+	sta	r17
+	jmp	l320
+l319:
+	ldy	#1
+	lda	(sp),y
+	sta	r16
+	lda	#0
+	sta	r17
+l320:
+	lda	r12
+	clc
+	adc	r7
+	pha
+	lda	r13
+	adc	#0
+	tax
+	pla
+	inc	r7
+	clc
+	adc	r14
+	sta	r2
+	txa
+	adc	r15
+	sta	r3
+	lda	r16
+	ldy	#0
+	sta	(r2),y
+	lda	r12
+	clc
+	adc	r7
+	pha
+	lda	r13
+	adc	#0
+	tax
+	pla
+	inc	r7
+	clc
+	adc	r14
+	sta	r2
+	txa
+	adc	r15
+	sta	r3
+	lda	#40
+	sta	(r2),y
+l317:
+	lda	r7
+l308:
+	sta	r31
+	pla
+	sta	r17
+	pla
+	sta	r16
+	inc	sp
+	bne	l334
+	inc	sp+1
+l334:
+	lda	r31
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	text
+	global	_init_zp_mirror_table
+_init_zp_mirror_table:
+	sec
+	lda	sp
+	sbc	#15
+	sta	sp
+	bcs	l354
+	dec	sp+1
+l354:
+	lda	l335
+	bne	l336
+	lda	sp
+	clc
+	adc	#3
+	sta	r14
+	lda	sp+1
+	adc	#0
+	sta	r15
+	ldy	#11
+l355:
+	lda	l340,y
+	sta	(r14),y
+	dey
+	lda	l340,y
+	sta	(r14),y
+	dey
+	lda	l340,y
+	sta	(r14),y
+	dey
+	lda	l340,y
+	sta	(r14),y
+	dey
+	bpl	l355
+	ldx	#>(_zp_mirror_0)
+	lda	#<(_zp_mirror_0)
+	ldy	#0
+	sta	(sp),y
+	ldx	#>(_zp_mirror_1)
+	lda	#<(_zp_mirror_1)
+	iny
+	sta	(sp),y
+	ldx	#>(_zp_mirror_2)
+	lda	#<(_zp_mirror_2)
+	iny
+	sta	(sp),y
+	lda	#0
+	sta	r5
+	lda	sp
+	clc
+	adc	#3
+	sta	r6
+	lda	sp+1
+	adc	#0
+	sta	r7
+	lda	sp
+	sta	r8
+	lda	sp+1
+	sta	r9
+	lda	#0
+	sta	r4
+l349:
+	lda	r6
+	clc
+	adc	r4
+	sta	r0
+	lda	r7
+	adc	#0
+	sta	r1
+	ldy	#3
+	lda	(r0),y
+	ldy	r4
+	sta	3+_mirrored_ptrs,y ;am(r4)
+	ldy	#2
+	lda	(r0),y
+	ldy	r4
+	sta	2+_mirrored_ptrs,y ;am(r4)
+	ldy	#1
+	lda	(r0),y
+	ldy	r4
+	sta	1+_mirrored_ptrs,y ;am(r4)
+	ldy	#0
+	lda	(r0),y
+	ldy	r4
+	sta	0+_mirrored_ptrs,y ;am(r4)
+	ldy	r5
+	lda	(r8),y ;am(r5)
+	ldy	r4
+	sta	2+_mirrored_ptrs,y ;am(r4)
+	inc	r5
+	lda	r4
+	clc
+	adc	#4
 	sta	r4
 	lda	r5
-	adc	r9
+	cmp	#3
+	bcc	l349
+	lda	#1
+	sta	l335
+l336:
+	clc
+	lda	sp
+	adc	#15
+	sta	sp
+	bcc	l356
+	inc	sp+1
+l356:
+	rts
+; stacksize=0+??
+	section	rodata
+l340:
+	byte	0
+	byte	1
+	byte	0
+	byte	1
+	byte	37
+	byte	38
+	byte	0
+	byte	1
+	byte	105
+	byte	106
+	byte	0
+	byte	1
+;vcprmin=10000
+	section	text
+	global	_emit_dirty_flag
+_emit_dirty_flag:
+	lda	r2
 	sta	r5
-	lda	r31
-	sta	(r4),y
+	lda	r4
+	sec
+	sbc	#140
+	cmp	#3
+	bcc	l362
+	lda	r4
+	cmp	#157
+	beq	l362
+	lda	r4
+	cmp	#153
+	bne	l360
+l362:
+	lda	r6
+	cmp	#64
+	bcc	l360
+	lda	r6
+	cmp	#80
+	bcs	l360
+	lda	#8
+	ldy	r5
+	sta	(r0),y ;am(r5)
+	lda	r5
+	sta	r8
+	lda	#0
+	sta	r9
+	ldx	r1
+	lda	r0
+	clc
+	adc	#1
+	bcc	l373
+	inx
+l373:
+	clc
+	adc	r8
+	sta	r2
+	txa
+	adc	r9
+	sta	r3
+	lda	#230
+	ldy	#0
+	sta	(r2),y
+	lda	r6
+	cmp	#72
+	bcs	l368
+	ldy	#0
+	lda	(sp),y
+	sta	r10
+	tya
+	sta	r11
+	jmp	l369
+l368:
+	ldy	#1
+	lda	(sp),y
+	sta	r10
+	lda	#0
+	sta	r11
+l369:
+	ldx	r1
+	lda	r0
+	clc
+	adc	#2
+	bcc	l374
+	inx
+l374:
+	clc
+	adc	r8
+	sta	r2
+	txa
+	adc	r9
+	sta	r3
+	lda	r10
+	ldy	#0
+	sta	(r2),y
+	ldx	r1
+	lda	r0
+	clc
+	adc	#3
+	bcc	l375
+	inx
+l375:
+	clc
+	adc	r8
+	sta	r2
+	txa
+	adc	r9
+	sta	r3
+	lda	#40
+	sta	(r2),y
+	lda	#4
+	rts
+l360:
+	lda	#0
+l357:
+	rts
+; stacksize=0+??
+;vcprmin=10000
+	section	"bank2"
+	global	_emit_template
+_emit_template:
+	lda	sp
+	bne	l403
+	dec	sp+1
+l403:
+	dec	sp
+	lda	r16
+	pha
+	lda	r17
+	pha
+	lda	r18
+	pha
+	lda	r19
+	pha
+	lda	r1
+	sta	r17
+	lda	r0
+	sta	r16
+	lda	#0
+	sta	r19
+	tay
+	lda	(r16),y
+	cmp	#8
+	bne	l379
+	lda	r2
+	sta	r4
+	lda	#0
+	sta	r5
+	ldx	r17
+	lda	r16
+	sec
+	sbc	#1
+	bcs	l404
+	dex
+l404:
+	clc
+	adc	r4
+	sta	r4
+	txa
+	adc	r5
+	sta	r5
+	ldy	#0
+	lda	(r4),y
+	cmp	#40
+	bne	l379
+	lda	r2
+	cmp	_opcode_6502_pha_size
+	bne	l379
+	lda	#1
+	sta	r19
+l379:
+	lda	r2
+	sec
+	sbc	r19
+	sta	r18
+	lda	_code_index
+	sta	r4
+	lda	#0
+	sta	r5
+	lda	r2
+	ldx	#0
+	clc
+	adc	r4
+	pha
+	txa
+	adc	r5
+	tax
+	pla
+	clc
+	adc	#3
+	bcc	l405
+	inx
+l405:
+	pha
+	cmp	#211
+	txa
+	sbc	#0
+	bvc	l407
+	eor	#128
+l407:
+	bpl	l406
+	pla
+	lda	_cache_index
+	ldx	#0
+	sta	r0
+	stx	r1
+	txa
+	sta	r3
+	lda	#211
+	sta	r2
+	jsr	___mulint16
+	clc
+	adc	#<(_cache_code)
+	pha
+	txa
+	adc	#>(_cache_code)
+	tax
+	pla
+	clc
+	adc	_code_index
+	sta	r10
+	txa
+	adc	#0
+	sta	r11
+	lda	#0
+	sta	r8
+	lda	r18
+	beq	l395
+l394:
+	ldy	r8
+	lda	(r16),y ;am(r8)
+	ldy	r8
+	sta	(r10),y ;am(r8)
+	inc	r8
+	lda	r8
+	cmp	r18
+	bcc	l394
+l395:
 	inc	_pc
-	bne	l548
+	bne	l408
 	inc	1+_pc
-l548:
-	inc	_pc
-	bne	l549
-	inc	1+_pc
-l549:
+l408:
 	lda	_code_index
 	clc
-	adc	#5
+	adc	r18
 	sta	_code_index
-	inc	_cache_branches
-	bne	l550
-	inc	1+_cache_branches
-	bne	l550
-	inc	2+_cache_branches
-	bne	l550
-	inc	3+_cache_branches
-l550:
+; volatile barrier
+	lda	r19
+	sta	l28
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
@@ -2302,6 +3251,7 @@ l550:
 	lda	#>(_cache_flag)
 	adc	#0
 	sta	r5
+	ldy	#0
 	lda	(r4),y
 	ora	#32
 	sta	(r4),y
@@ -2313,36 +3263,56 @@ l550:
 	adc	#0
 	sta	r5
 	lda	(r4),y
-	jmp	l225
-l239:
-	lda	1+_flash_code_address
-	ldy	#4
-	sta	(sp),y
-	lda	_flash_code_address
-	dey
-	sta	(sp),y
-	lda	_flash_code_bank
-	ldy	#5
-	sta	(sp),y
-	lda	_code_index
-	iny
-	sta	(sp),y
-	lda	_code_index
+	jmp	l376
+l383:
+; volatile barrier
+	lda	l28
+	beq	l389
+	lda	_cache_index
 	ldx	#0
-	clc
-	adc	#35
-	bcc	l551
-	inx
-l551:
-	pha
-	cmp	#229
+	sta	r0
+	stx	r1
 	txa
-	sbc	#0
-	bvc	l553
-	eor	#128
-l553:
-	bmi	l552
+	sta	r3
+	lda	#211
+	sta	r2
+	jsr	___mulint16
+	clc
+	adc	#<(_cache_code)
+	pha
+	txa
+	adc	#>(_cache_code)
+	tax
 	pla
+	clc
+	adc	_code_index
+	pha
+	txa
+	adc	#0
+	tax
+	pla
+	sta	r0
+	stx	r1
+; volatile barrier
+	lda	#40
+	ldy	#0
+	sta	(r0),y
+; volatile barrier
+	lda	_code_index
+	clc
+	adc	#1
+	sta	(sp),y
+	lda	#>(_code_index)
+	sta	r1
+	lda	#<(_code_index)
+	sta	r0
+; volatile barrier
+	lda	(sp),y
+	sta	(r0),y
+; volatile barrier
+	lda	#0
+	sta	l28
+l389:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
@@ -2352,7 +3322,7 @@ l553:
 	sta	r5
 	ldy	#0
 	lda	(r4),y
-	ora	#2
+	ora	#6
 	sta	(r4),y
 	lda	#<(_cache_flag)
 	clc
@@ -2372,17 +3342,323 @@ l553:
 	adc	#0
 	sta	r5
 	lda	(r4),y
-	jmp	l225
-l243:
-	lda	r22
-	sta	r0
-	jsr	l221
+l376:
 	sta	r31
-	lda	r20
+	pla
+	sta	r19
+	pla
+	sta	r18
+	pla
+	sta	r17
+	pla
+	sta	r16
+	inc	sp
+	bne	l409
+	inc	sp+1
+l409:
+	lda	r31
+	rts
+l406:
+	pla
+	jmp	l383
+; stacksize=0+??
+;vcprmin=10000
+	section	"bank2"
+l410:
+	sec
+	lda	sp
+	sbc	#19
+	sta	sp
+	bcs	l736
+	dec	sp+1
+l736:
+	ldy	#18
+	jsr	___rsave12
+	jsr	_init_zp_mirror_table
+	lda	_cache_index
+	ldx	#0
+	sta	r0
+	stx	r1
+	txa
+	sta	r3
+	lda	#211
+	sta	r2
+	jsr	___mulint16
+	clc
+	adc	#<(_cache_code)
+	sta	r18
+	txa
+	adc	#>(_cache_code)
+	sta	r19
+	lda	1+_pc
+	sta	r1
+	lda	_pc
+	sta	r0
+	jsr	_read6502
+	sta	r17
+	cmp	#0
+	beq	l505
+	lda	r17
+	cmp	#8
+	beq	l497
+	lda	r17
+	cmp	#16
+	beq	l414
+	lda	r17
+	cmp	#32
+	beq	l462
+	lda	r17
+	cmp	#40
+	beq	l498
+	lda	r17
+	cmp	#48
+	beq	l414
+	lda	r17
+	cmp	#64
+	beq	l478
+	lda	r17
+	cmp	#72
+	beq	l494
+	lda	r17
+	cmp	#76
+	beq	l437
+	lda	r17
+	cmp	#80
+	beq	l414
+	lda	r17
+	cmp	#88
+	beq	l499
+	lda	r17
+	cmp	#96
+	beq	l480
+	lda	r17
+	cmp	#104
+	beq	l496
+	lda	r17
+	cmp	#108
+	beq	l478
+	lda	r17
+	cmp	#112
+	beq	l414
+	lda	r17
+	cmp	#120
+	beq	l499
+	lda	r17
+	cmp	#144
+	beq	l414
+	lda	r17
+	cmp	#148
+	beq	l501
+	lda	r17
+	cmp	#150
+	beq	l501
+	lda	r17
+	cmp	#154
+	beq	l490
+	lda	r17
+	cmp	#176
+	beq	l414
+	lda	r17
+	cmp	#186
+	beq	l487
+	lda	r17
+	cmp	#208
+	beq	l414
+	lda	r17
+	cmp	#234
+	beq	l504
+	lda	r17
+	cmp	#240
+	beq	l414
+	lda	r17
+	cmp	#248
+	beq	l503
+	jmp	l506
+l414:
+	lda	_pc
+	clc
+	adc	#1
+	sta	r0
+	lda	1+_pc
+	adc	#0
+	sta	r1
+	jsr	_read6502
+	ldy	#2
+	sta	(sp),y
+	sec
+	sbc	#0
+	bvc	l737
+	eor	#128
+l737:
+	bmi	l423
+	lda	_pc
+	clc
+	adc	#2
+	sta	r8
+	lda	1+_pc
+	adc	#0
+	sta	r9
+	ldx	#0
+	ldy	#2
+	lda	(sp),y
+	bpl	l738
+	dex
+l738:
+	clc
+	adc	r8
+	sta	r10
+	txa
+	adc	r9
+	sta	r11
+	inc	_branch_forward
+	bne	l739
+	inc	1+_branch_forward
+	bne	l739
+	inc	2+_branch_forward
+	bne	l739
+	inc	3+_branch_forward
+l739:
+	lda	_sa_compile_pass
+	cmp	#2
+	bne	l427
+	lda	r11
+	sta	r1
+	lda	r10
+	sta	r0
+	lda	r17
+	sta	r2
+	lda	r19
+	sta	r5
+	lda	r18
+	sta	r4
+	lda	r11
+	ldy	#3
+	sta	(sp),y
+	lda	r10
+	dey
+	sta	(sp),y
+	jsr	_try_direct_branch
+	ldy	#4
+	sta	(sp),y
+	dey
+	lda	(sp),y
+	sta	r11
+	dey
+	lda	(sp),y
+	sta	r10
+	ldy	#4
+	lda	(sp),y
+	beq	l427
+	inc	_pc
+	bne	l740
+	inc	1+_pc
+l740:
+	inc	_pc
+	bne	l741
+	inc	1+_pc
+l741:
+	lda	_code_index
+	clc
+	ldy	#4
+	adc	(sp),y
+	sta	_code_index
+	inc	_cache_branches
+	bne	l742
+	inc	1+_cache_branches
+	bne	l742
+	inc	2+_cache_branches
+	bne	l742
+	inc	3+_cache_branches
+l742:
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	ldy	#0
+	lda	(r8),y
+	ora	#32
+	sta	(r8),y
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l427:
+	lda	1+_flash_code_address
+	ldy	#3
+	sta	(sp),y
+	lda	_flash_code_address
+	dey
+	sta	(sp),y
+	lda	_flash_code_bank
+	ldy	#4
+	sta	(sp),y
+	lda	_code_index
+	ldy	#6
+	sta	(sp),y
+	lda	_code_index
+	ldx	#0
+	clc
+	adc	#35
+	bcc	l743
+	inx
+l743:
+	pha
+	cmp	#211
+	txa
+	sbc	#0
+	bvc	l745
+	eor	#128
+l745:
+	bmi	l744
+	pla
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	ldy	#0
+	lda	(r8),y
+	ora	#2
+	sta	(r8),y
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	lda	(r8),y
+	and	#223
+	sta	(r8),y
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l429:
+	lda	r17
+	sta	r0
+	jsr	l199
+	sta	r31
+	lda	r18
 	clc
 	adc	_code_index
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r31
@@ -2392,13 +3668,13 @@ l243:
 	sta	r0
 	tya
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#1
-	bcc	l554
+	bcc	l746
 	inx
-l554:
+l746:
 	clc
 	adc	r0
 	sta	r0
@@ -2411,32 +3687,32 @@ l554:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#2
-	bcc	l555
+	bcc	l747
 	inx
-l555:
+l747:
 	clc
 	adc	r0
 	sta	r0
 	txa
 	adc	r1
 	sta	r1
-	lda	r22
+	lda	r17
 	sta	(r0),y
 	lda	_code_index
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#3
-	bcc	l556
+	bcc	l748
 	inx
-l556:
+l748:
 	clc
 	adc	r0
 	sta	r0
@@ -2449,13 +3725,13 @@ l556:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#4
-	bcc	l557
+	bcc	l749
 	inx
-l557:
+l749:
 	clc
 	adc	r0
 	sta	r0
@@ -2468,13 +3744,13 @@ l557:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#5
-	bcc	l558
+	bcc	l750
 	inx
-l558:
+l750:
 	clc
 	adc	r0
 	sta	r0
@@ -2487,13 +3763,13 @@ l558:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#6
-	bcc	l559
+	bcc	l751
 	inx
-l559:
+l751:
 	clc
 	adc	r0
 	sta	r0
@@ -2506,13 +3782,13 @@ l559:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#7
-	bcc	l560
+	bcc	l752
 	inx
-l560:
+l752:
 	clc
 	adc	r0
 	sta	r0
@@ -2530,11 +3806,11 @@ l560:
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#8
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -2550,13 +3826,13 @@ l560:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#9
-	bcc	l561
+	bcc	l753
 	inx
-l561:
+l753:
 	clc
 	adc	r0
 	sta	r0
@@ -2569,13 +3845,13 @@ l561:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#10
-	bcc	l562
+	bcc	l754
 	inx
-l562:
+l754:
 	clc
 	adc	r0
 	sta	r0
@@ -2584,19 +3860,18 @@ l562:
 	sta	r1
 	lda	#169
 	sta	(r0),y
-	iny
-	lda	(sp),y
+	lda	r10
 	and	#255
 	sta	r31
 	lda	_code_index
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#11
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -2607,19 +3882,18 @@ l562:
 	adc	r3
 	sta	r1
 	lda	r31
-	dey
 	sta	(r0),y
 	lda	_code_index
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#12
-	bcc	l563
+	bcc	l755
 	inx
-l563:
+l755:
 	clc
 	adc	r0
 	sta	r0
@@ -2637,11 +3911,11 @@ l563:
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#13
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -2658,11 +3932,11 @@ l563:
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#14
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -2676,8 +3950,7 @@ l563:
 	sta	(r0),y
 	lda	r31
 	sta	r30
-	ldy	#2
-	lda	(sp),y
+	lda	r11
 	ldx	#0
 	sta	r2
 	stx	r3
@@ -2688,35 +3961,34 @@ l563:
 	and	#255
 	sta	r0
 	lda	_code_index
-	sta	r4
+	sta	r6
 	txa
-	sta	r5
-	lda	r20
+	sta	r7
+	lda	r18
 	clc
 	adc	#15
 	sta	r2
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r3
 	lda	r2
 	clc
-	adc	r4
+	adc	r6
 	sta	r2
 	lda	r3
-	adc	r5
+	adc	r7
 	sta	r3
 	lda	r0
-	ldy	#0
 	sta	(r2),y
 	lda	_code_index
 	sta	r2
 	txa
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#16
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -2736,11 +4008,11 @@ l563:
 	sta	r2
 	txa
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#17
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -2756,13 +4028,13 @@ l563:
 	sta	r0
 	txa
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#18
-	bcc	l564
+	bcc	l756
 	inx
-l564:
+l756:
 	clc
 	adc	r0
 	sta	r0
@@ -2776,22 +4048,22 @@ l564:
 	sta	r0
 	sta	r31
 	lda	_code_index
-	sta	r4
+	sta	r6
 	lda	#0
-	sta	r5
-	lda	r20
+	sta	r7
+	lda	r18
 	clc
 	adc	#19
 	sta	r2
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r3
 	lda	r2
 	clc
-	adc	r4
+	adc	r6
 	sta	r2
 	lda	r3
-	adc	r5
+	adc	r7
 	sta	r3
 	lda	r0
 	sta	(r2),y
@@ -2809,11 +4081,11 @@ l564:
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#20
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -2825,16 +4097,23 @@ l564:
 	sta	r1
 	lda	r31
 	sta	(r0),y
+	ldy	#2
+	lda	(sp),y
+	clc
+	adc	#8
+	sta	r0
+	iny
+	lda	(sp),y
+	adc	#0
+	sta	r1
 	ldy	#6
 	lda	(sp),y
 	ldx	#0
 	clc
-	ldy	#3
-	adc	(sp),y
+	adc	r0
 	pha
 	txa
-	iny
-	adc	(sp),y
+	adc	r1
 	tax
 	pla
 	sta	r31
@@ -2847,9 +4126,9 @@ l564:
 	lda	r31
 	clc
 	adc	#5
-	bcc	l565
+	bcc	l757
 	inx
-l565:
+l757:
 	sta	r31
 	lda	#0
 	tay
@@ -2857,14 +4136,12 @@ l565:
 	lda	r31
 	sta	r2
 	stx	r3
-	ldy	#5
+	ldy	#4
 	lda	(sp),y
 	sta	r4
-	ldy	#2
-	lda	(sp),y
+	lda	r11
 	sta	r7
-	dey
-	lda	(sp),y
+	lda	r10
 	sta	r6
 	jsr	_opt2_record_pending_branch_safe
 	lda	1+_pc
@@ -2883,25 +4160,25 @@ l565:
 	sta	r2
 	jsr	_flash_cache_pc_update
 	inc	_pc
-	bne	l566
+	bne	l758
 	inc	1+_pc
-l566:
+l758:
 	inc	_pc
-	bne	l567
+	bne	l759
 	inc	1+_pc
-l567:
+l759:
 	lda	_code_index
 	clc
 	adc	#21
 	sta	_code_index
 	inc	_cache_branches
-	bne	l568
+	bne	l760
 	inc	1+_cache_branches
-	bne	l568
+	bne	l760
 	inc	2+_cache_branches
-	bne	l568
+	bne	l760
 	inc	3+_cache_branches
-l568:
+l760:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
@@ -2921,8 +4198,8 @@ l568:
 	adc	#0
 	sta	r1
 	lda	(r0),y
-	jmp	l225
-l237:
+	jmp	l411
+l423:
 	lda	_pc
 	clc
 	adc	#2
@@ -2931,18 +4208,17 @@ l237:
 	adc	#0
 	sta	r3
 	ldx	#0
-	lda	r9
-	bpl	l569
+	ldy	#2
+	lda	(sp),y
+	bpl	l761
 	dex
-l569:
+l761:
 	clc
 	adc	r2
-	ldy	#1
-	sta	(sp),y
+	sta	r24
 	txa
 	adc	r3
-	iny
-	sta	(sp),y
+	sta	r25
 	ldx	#0
 	stx	r31
 	lsr	r31
@@ -2964,11 +4240,9 @@ l569:
 	clc
 	adc	#27
 	sta	r0
-	dey
-	lda	(sp),y
+	lda	r24
 	pha
-	iny
-	lda	(sp),y
+	lda	r25
 	and	#63
 	tax
 	pla
@@ -2982,90 +4256,86 @@ l569:
 	sta	r2
 	stx	r3
 	jsr	_peek_bank_byte
-	sta	r4
-	and	#128
-	sta	r31
-	lda	r4
-	ldy	#3
-	sta	(sp),y
-	lda	r31
-	beq	l247
-	inc	_branch_not_compiled
-	bne	l570
-	inc	1+_branch_not_compiled
-	bne	l570
-	inc	2+_branch_not_compiled
-	bne	l570
-	inc	3+_branch_not_compiled
-l570:
-	lda	1+_flash_code_address
 	ldy	#4
+	sta	(sp),y
+	and	#128
+	beq	l433
+	inc	_branch_not_compiled
+	bne	l762
+	inc	1+_branch_not_compiled
+	bne	l762
+	inc	2+_branch_not_compiled
+	bne	l762
+	inc	3+_branch_not_compiled
+l762:
+	lda	1+_flash_code_address
+	ldy	#3
 	sta	(sp),y
 	lda	_flash_code_address
 	dey
 	sta	(sp),y
 	lda	_flash_code_bank
-	ldy	#5
+	ldy	#4
 	sta	(sp),y
 	lda	_code_index
-	iny
+	ldy	#6
 	sta	(sp),y
 	lda	_code_index
 	ldx	#0
 	clc
 	adc	#35
-	bcc	l571
+	bcc	l763
 	inx
-l571:
+l763:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l573
+	bvc	l765
 	eor	#128
-l573:
-	bmi	l572
+l765:
+	bmi	l764
 	pla
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l249:
-	lda	r22
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l435:
+	lda	r17
 	sta	r0
-	jsr	l221
+	jsr	l199
 	sta	r31
-	lda	r20
+	lda	r18
 	clc
 	adc	_code_index
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r31
@@ -3075,13 +4345,13 @@ l249:
 	sta	r0
 	tya
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#1
-	bcc	l574
+	bcc	l766
 	inx
-l574:
+l766:
 	clc
 	adc	r0
 	sta	r0
@@ -3094,32 +4364,32 @@ l574:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#2
-	bcc	l575
+	bcc	l767
 	inx
-l575:
+l767:
 	clc
 	adc	r0
 	sta	r0
 	txa
 	adc	r1
 	sta	r1
-	lda	r22
+	lda	r17
 	sta	(r0),y
 	lda	_code_index
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#3
-	bcc	l576
+	bcc	l768
 	inx
-l576:
+l768:
 	clc
 	adc	r0
 	sta	r0
@@ -3132,13 +4402,13 @@ l576:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#4
-	bcc	l577
+	bcc	l769
 	inx
-l577:
+l769:
 	clc
 	adc	r0
 	sta	r0
@@ -3151,13 +4421,13 @@ l577:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#5
-	bcc	l578
+	bcc	l770
 	inx
-l578:
+l770:
 	clc
 	adc	r0
 	sta	r0
@@ -3170,13 +4440,13 @@ l578:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#6
-	bcc	l579
+	bcc	l771
 	inx
-l579:
+l771:
 	clc
 	adc	r0
 	sta	r0
@@ -3189,13 +4459,13 @@ l579:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#7
-	bcc	l580
+	bcc	l772
 	inx
-l580:
+l772:
 	clc
 	adc	r0
 	sta	r0
@@ -3213,11 +4483,11 @@ l580:
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#8
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -3233,13 +4503,13 @@ l580:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#9
-	bcc	l581
+	bcc	l773
 	inx
-l581:
+l773:
 	clc
 	adc	r0
 	sta	r0
@@ -3252,13 +4522,13 @@ l581:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#10
-	bcc	l582
+	bcc	l774
 	inx
-l582:
+l774:
 	clc
 	adc	r0
 	sta	r0
@@ -3267,19 +4537,18 @@ l582:
 	sta	r1
 	lda	#169
 	sta	(r0),y
-	iny
-	lda	(sp),y
+	lda	r24
 	and	#255
 	sta	r31
 	lda	_code_index
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#11
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -3290,19 +4559,18 @@ l582:
 	adc	r3
 	sta	r1
 	lda	r31
-	dey
 	sta	(r0),y
 	lda	_code_index
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#12
-	bcc	l583
+	bcc	l775
 	inx
-l583:
+l775:
 	clc
 	adc	r0
 	sta	r0
@@ -3320,11 +4588,11 @@ l583:
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#13
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -3341,11 +4609,11 @@ l583:
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#14
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -3359,8 +4627,7 @@ l583:
 	sta	(r0),y
 	lda	r31
 	sta	r30
-	ldy	#2
-	lda	(sp),y
+	lda	r25
 	ldx	#0
 	sta	r2
 	stx	r3
@@ -3371,35 +4638,34 @@ l583:
 	and	#255
 	sta	r0
 	lda	_code_index
-	sta	r4
+	sta	r6
 	txa
-	sta	r5
-	lda	r20
+	sta	r7
+	lda	r18
 	clc
 	adc	#15
 	sta	r2
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r3
 	lda	r2
 	clc
-	adc	r4
+	adc	r6
 	sta	r2
 	lda	r3
-	adc	r5
+	adc	r7
 	sta	r3
 	lda	r0
-	ldy	#0
 	sta	(r2),y
 	lda	_code_index
 	sta	r2
 	txa
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#16
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -3419,11 +4685,11 @@ l583:
 	sta	r2
 	txa
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#17
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -3439,13 +4705,13 @@ l583:
 	sta	r0
 	txa
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#18
-	bcc	l584
+	bcc	l776
 	inx
-l584:
+l776:
 	clc
 	adc	r0
 	sta	r0
@@ -3459,22 +4725,22 @@ l584:
 	sta	r0
 	sta	r31
 	lda	_code_index
-	sta	r4
+	sta	r6
 	lda	#0
-	sta	r5
-	lda	r20
+	sta	r7
+	lda	r18
 	clc
 	adc	#19
 	sta	r2
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r3
 	lda	r2
 	clc
-	adc	r4
+	adc	r6
 	sta	r2
 	lda	r3
-	adc	r5
+	adc	r7
 	sta	r3
 	lda	r0
 	sta	(r2),y
@@ -3492,11 +4758,11 @@ l584:
 	sta	r2
 	lda	#0
 	sta	r3
-	lda	r20
+	lda	r18
 	clc
 	adc	#20
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
@@ -3508,16 +4774,23 @@ l584:
 	sta	r1
 	lda	r31
 	sta	(r0),y
+	ldy	#2
+	lda	(sp),y
+	clc
+	adc	#8
+	sta	r0
+	iny
+	lda	(sp),y
+	adc	#0
+	sta	r1
 	ldy	#6
 	lda	(sp),y
 	ldx	#0
 	clc
-	ldy	#3
-	adc	(sp),y
+	adc	r0
 	pha
 	txa
-	iny
-	adc	(sp),y
+	adc	r1
 	tax
 	pla
 	sta	r31
@@ -3530,9 +4803,9 @@ l584:
 	lda	r31
 	clc
 	adc	#5
-	bcc	l585
+	bcc	l777
 	inx
-l585:
+l777:
 	sta	r31
 	lda	#0
 	tay
@@ -3540,14 +4813,12 @@ l585:
 	lda	r31
 	sta	r2
 	stx	r3
-	ldy	#5
+	ldy	#4
 	lda	(sp),y
 	sta	r4
-	ldy	#2
-	lda	(sp),y
+	lda	r25
 	sta	r7
-	dey
-	lda	(sp),y
+	lda	r24
 	sta	r6
 	jsr	_opt2_record_pending_branch_safe
 	lda	1+_pc
@@ -3566,25 +4837,25 @@ l585:
 	sta	r2
 	jsr	_flash_cache_pc_update
 	inc	_pc
-	bne	l586
+	bne	l778
 	inc	1+_pc
-l586:
+l778:
 	inc	_pc
-	bne	l587
+	bne	l779
 	inc	1+_pc
-l587:
+l779:
 	lda	_code_index
 	clc
 	adc	#21
 	sta	_code_index
 	inc	_cache_branches
-	bne	l588
+	bne	l780
 	inc	1+_cache_branches
-	bne	l588
+	bne	l780
 	inc	2+_cache_branches
-	bne	l588
+	bne	l780
 	inc	3+_cache_branches
-l588:
+l780:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
@@ -3604,292 +4875,363 @@ l588:
 	adc	#0
 	sta	r1
 	lda	(r0),y
-	jmp	l225
-l247:
-	lda	r4
+	jmp	l411
+l433:
+	lda	r25
+	sta	r1
+	lda	r24
+	sta	r0
+	lda	r17
+	sta	r2
+	jsr	_try_intra_block_branch
+	cmp	#0
+	beq	l439
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	ldy	#0
+	lda	(r8),y
+	jmp	l411
+l439:
+	ldy	#4
+	lda	(sp),y
 	and	#31
 	cmp	_flash_code_bank
-	beq	l253
-	inc	_branch_wrong_bank
-	bne	l589
-	inc	1+_branch_wrong_bank
-	bne	l589
-	inc	2+_branch_wrong_bank
-	bne	l589
-	inc	3+_branch_wrong_bank
-l589:
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	ldy	#0
-	lda	(r4),y
-	ora	#2
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	and	#223
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l253:
-	ldy	#2
-	lda	(sp),y
-	ldx	#0
-	stx	r31
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	lsr	r31
-	ror
-	ldx	r31
-	sta	r2
-	stx	r3
-	lda	r2
-	clc
-	adc	#19
-	sta	r17
-	lda	(sp),y
-	tax
-	dey
-	lda	(sp),y
-	stx	r31
-	asl
-	rol	r31
-	ldx	r31
-	sta	r18
-	txa
-	and	#63
-	sta	r19
-	lda	#<(_flash_cache_pc)
-	clc
-	adc	r18
-	pha
-	lda	#>(_flash_cache_pc)
-	adc	r19
-	tax
-	pla
-	sta	r31
-	lda	r17
-	sta	r0
-	lda	r31
-	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-	sta	r16
-	lda	#<(1+_flash_cache_pc)
-	clc
-	adc	r18
-	pha
-	lda	#>(1+_flash_cache_pc)
-	adc	r19
-	tax
-	pla
-	sta	r31
-	lda	r17
-	sta	r0
-	lda	r31
-	sta	r2
-	stx	r3
-	jsr	_peek_bank_byte
-	sta	r0
-	ldx	#0
-	sta	r30
-	stx	r29
-	tax
-	lda	#0
-	sta	r2
-	stx	r3
-	ldx	r29
-	lda	r16
-	ldx	#0
-	ora	r2
-	pha
-	txa
-	ora	r3
-	tax
-	pla
-	sta	r31
+	bne	l451
 	lda	_code_index
-	sta	r2
-	lda	#0
-	sta	r3
-	lda	r2
+	ldx	#0
 	clc
-	adc	_flash_code_address
-	sta	r2
-	lda	r3
-	adc	1+_flash_code_address
-	sta	r3
-	lda	r31
-	inc	r2
-	bne	l590
-	inc	r3
-l590:
-	inc	r2
-	bne	l591
-	inc	r3
-l591:
-	sec
-	sbc	r2
-	ldy	#3
-	sta	(sp),y
+	adc	#29
+	bcc	l781
+	inx
+l781:
+	pha
+	cmp	#211
 	txa
-	sbc	r3
+	sbc	#0
+	bvc	l783
+	eor	#128
+l783:
+	bpl	l782
+	pla
+	lda	r25
+	sta	r1
+	lda	r24
+	sta	r0
+	jsr	_lookup_native_addr_safe
+	cmp	#0
+	beq	l451
+	lda	_flash_code_address
+	clc
+	adc	#8
+	sta	r8
+	lda	1+_flash_code_address
+	adc	#0
+	sta	r9
+	lda	_code_index
+	ldx	#0
+	clc
+	adc	r8
+	pha
+	txa
+	adc	r9
+	tax
+	pla
+	clc
+	adc	#2
+	bcc	l784
+	inx
+l784:
+	sta	r8
+	stx	r9
+	lda	_reserve_result_addr
+	sec
+	sbc	r8
+	ldy	#2
+	sta	(sp),y
+	lda	1+_reserve_result_addr
+	sbc	r9
 	iny
 	sta	(sp),y
+	lda	#0
+	sta	r5
 	dey
 	lda	(sp),y
 	cmp	#128
 	iny
 	lda	(sp),y
 	sbc	#255
-	bvc	l592
+	bvc	l785
 	eor	#128
-l592:
-	bmi	l256
+l785:
+	bmi	l445
 	lda	#127
-	ldy	#3
+	ldy	#2
 	cmp	(sp),y
 	lda	#0
 	iny
 	sbc	(sp),y
-	bvc	l593
+	bvc	l786
 	eor	#128
-l593:
-	bmi	l256
-	lda	r20
+l786:
+	bmi	l445
+	lda	r18
 	clc
 	adc	_code_index
-	sta	r4
-	lda	r21
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r22
+	sta	r9
+	lda	r17
 	ldy	#0
-	sta	(r4),y
-	ldy	#3
+	sta	(r8),y
+	ldy	#2
 	lda	(sp),y
 	sta	r31
+	lda	_code_index
+	sta	r10
+	lda	#0
+	sta	r11
+	lda	r18
+	clc
+	adc	#1
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r31
+	ldy	#0
+	sta	(r8),y
+	lda	#2
+	sta	r5
+	jmp	l449
+l445:
+	lda	_code_index
+	ldx	#0
+	clc
+	adc	#32
+	bcc	l787
+	inx
+l787:
+	pha
+	cmp	#211
+	txa
+	sbc	#0
+	bvc	l789
+	eor	#128
+l789:
+	bpl	l788
+	pla
+	lda	r17
+	sta	r0
+	jsr	l199
+	sta	r31
+	lda	r18
+	clc
+	adc	_code_index
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r31
+	ldy	#0
+	sta	(r8),y
+	lda	_code_index
+	sta	r8
+	tya
+	sta	r9
+	ldx	r19
+	lda	r18
+	clc
+	adc	#1
+	bcc	l790
+	inx
+l790:
+	clc
+	adc	r8
+	sta	r8
+	txa
+	adc	r9
+	sta	r9
+	lda	#3
+	sta	(r8),y
 	lda	_code_index
 	sta	r8
 	lda	#0
 	sta	r9
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
-	adc	#1
-	sta	r4
-	lda	r21
-	adc	#0
-	sta	r5
-	lda	r4
+	adc	#2
+	bcc	l791
+	inx
+l791:
 	clc
 	adc	r8
-	sta	r4
-	lda	r5
+	sta	r8
+	txa
 	adc	r9
-	sta	r5
+	sta	r9
+	lda	#76
+	sta	(r8),y
+	lda	_reserve_result_addr
+	and	#255
+	sta	r31
+	lda	_code_index
+	sta	r10
+	lda	#0
+	sta	r11
+	lda	r18
+	clc
+	adc	#3
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
-	ldy	#0
-	sta	(r4),y
+	sta	(r8),y
+	lda	1+_reserve_result_addr
+	ldx	#0
+	sta	r8
+	stx	r9
+	lda	r8
+	and	#255
+	sta	r31
+	lda	_code_index
+	sta	r10
+	txa
+	sta	r11
+	lda	r18
+	clc
+	adc	#4
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r31
+	sta	(r8),y
+	lda	#5
+	sta	r5
+l449:
+	lda	r5
+	beq	l451
+	lda	1+_pc
+	sta	r1
+	lda	_pc
+	sta	r0
+	lda	1+_flash_cache_index
+	sta	r3
+	lda	_flash_cache_index
+	sta	r2
+	jsr	_setup_flash_address
+	lda	_code_index
+	sta	r0
+	lda	#128
+	sta	r2
+	lda	r5
+	ldy	#2
+	sta	(sp),y
+	jsr	_flash_cache_pc_update
+	ldy	#2
+	lda	(sp),y
+	sta	r5
 	inc	_pc
-	bne	l594
+	bne	l792
 	inc	1+_pc
-l594:
+l792:
 	inc	_pc
-	bne	l595
+	bne	l793
 	inc	1+_pc
-l595:
-	inc	_code_index
-	inc	_code_index
+l793:
+	lda	_code_index
+	clc
+	adc	r5
+	sta	_code_index
 	inc	_cache_branches
-	bne	l596
+	bne	l794
 	inc	1+_cache_branches
-	bne	l596
+	bne	l794
 	inc	2+_cache_branches
-	bne	l596
+	bne	l794
 	inc	3+_cache_branches
-l596:
+l794:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r0
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	ora	#32
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l256:
-	inc	_branch_out_of_range
-	bne	l597
-	inc	1+_branch_out_of_range
-	bne	l597
-	inc	2+_branch_out_of_range
-	bne	l597
-	inc	3+_branch_out_of_range
-l597:
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
+	sta	r1
 	ldy	#0
-	lda	(r4),y
+	lda	(r0),y
+	ora	#32
+	sta	(r0),y
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r0
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r1
+	lda	(r0),y
+	jmp	l411
+l451:
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	ldy	#0
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l259:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l437:
 	lda	_pc
 	clc
 	adc	#1
@@ -3914,33 +5256,157 @@ l259:
 	tax
 	lda	#0
 	ora	r16
-	ldy	#1
+	ldy	#2
 	sta	(sp),y
 	txa
 	ora	r17
 	iny
 	sta	(sp),y
+	lda	_sa_compile_pass
+	cmp	#2
+	bne	l458
+	lda	_code_index
+	ldx	#0
+	clc
+	adc	#3
+	bcc	l795
+	inx
+l795:
+	pha
+	cmp	#211
+	txa
+	sbc	#0
+	bvc	l797
+	eor	#128
+l797:
+	bpl	l796
+	pla
+	ldy	#3
+	lda	(sp),y
+	sta	r1
+	dey
+	lda	(sp),y
+	sta	r0
+	jsr	_lookup_entry_list
+	cmp	#0
+	beq	l458
+	lda	_reserve_result_bank
+	cmp	_flash_code_bank
+	bne	l458
+	lda	r18
+	clc
+	adc	_code_index
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	#76
+	ldy	#0
+	sta	(r8),y
+	lda	_reserve_result_addr
+	and	#255
+	sta	r31
+	lda	_code_index
+	sta	r10
+	tya
+	sta	r11
+	lda	r18
+	clc
+	adc	#1
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r31
+	sta	(r8),y
+	stx	r30
+	lda	1+_reserve_result_addr
+	ldx	#0
+	sta	r8
+	stx	r9
+	ldx	r30
+	lda	r8
+	and	#255
+	sta	r31
+	lda	_code_index
+	sta	r10
+	tya
+	sta	r11
+	lda	r18
+	clc
+	adc	#2
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r31
+	sta	(r8),y
+	ldy	#3
+	lda	(sp),y
+	sta	1+_pc
+	dey
+	lda	(sp),y
+	sta	_pc
+	lda	_code_index
+	clc
+	adc	#3
+	sta	_code_index
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	ldy	#0
+	lda	(r8),y
+	and	#223
+	sta	(r8),y
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l458:
 	lda	_code_index
 	ldx	#0
 	clc
 	adc	#9
-	bcc	l598
+	bcc	l798
 	inx
-l598:
+l798:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l600
+	bvc	l800
 	eor	#128
-l600:
-	bpl	l599
+l800:
+	bpl	l799
 	pla
-	lda	r20
+	lda	r18
 	clc
 	adc	_code_index
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	#8
@@ -3950,13 +5416,13 @@ l600:
 	sta	r0
 	tya
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#1
-	bcc	l601
+	bcc	l801
 	inx
-l601:
+l801:
 	clc
 	adc	r0
 	sta	r0
@@ -3969,13 +5435,13 @@ l601:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#2
-	bcc	l602
+	bcc	l802
 	inx
-l602:
+l802:
 	clc
 	adc	r0
 	sta	r0
@@ -3988,13 +5454,13 @@ l602:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#3
-	bcc	l603
+	bcc	l803
 	inx
-l603:
+l803:
 	clc
 	adc	r0
 	sta	r0
@@ -4007,13 +5473,13 @@ l603:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#4
-	bcc	l604
+	bcc	l804
 	inx
-l604:
+l804:
 	clc
 	adc	r0
 	sta	r0
@@ -4026,13 +5492,13 @@ l604:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#5
-	bcc	l605
+	bcc	l805
 	inx
-l605:
+l805:
 	clc
 	adc	r0
 	sta	r0
@@ -4045,13 +5511,13 @@ l605:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#6
-	bcc	l606
+	bcc	l806
 	inx
-l606:
+l806:
 	clc
 	adc	r0
 	sta	r0
@@ -4064,13 +5530,13 @@ l606:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#7
-	bcc	l607
+	bcc	l807
 	inx
-l607:
+l807:
 	clc
 	adc	r0
 	sta	r0
@@ -4083,13 +5549,13 @@ l607:
 	sta	r0
 	lda	#0
 	sta	r1
-	ldx	r21
-	lda	r20
+	ldx	r19
+	lda	r18
 	clc
 	adc	#8
-	bcc	l608
+	bcc	l808
 	inx
-l608:
+l808:
 	clc
 	adc	r0
 	sta	r0
@@ -4098,13 +5564,20 @@ l608:
 	sta	r1
 	lda	#40
 	sta	(r0),y
+	lda	_flash_code_address
+	clc
+	adc	#8
+	sta	r0
+	lda	1+_flash_code_address
+	adc	#0
+	sta	r1
 	lda	_code_index
 	ldx	#0
 	clc
-	adc	_flash_code_address
+	adc	r0
 	pha
 	txa
-	adc	1+_flash_code_address
+	adc	r1
 	tax
 	pla
 	sta	r31
@@ -4117,9 +5590,9 @@ l608:
 	lda	r31
 	clc
 	adc	#6
-	bcc	l609
+	bcc	l809
 	inx
-l609:
+l809:
 	sta	r31
 	lda	#0
 	sta	(sp),y
@@ -4128,14 +5601,14 @@ l609:
 	stx	r3
 	lda	_flash_code_bank
 	sta	r4
-	ldy	#2
+	ldy	#3
 	lda	(sp),y
 	sta	r7
 	dey
 	lda	(sp),y
 	sta	r6
 	jsr	_opt2_record_pending_branch_safe
-	ldy	#2
+	ldy	#3
 	lda	(sp),y
 	sta	1+_pc
 	dey
@@ -4152,7 +5625,7 @@ l609:
 	lda	#>(_cache_flag)
 	adc	#0
 	sta	r1
-	dey
+	ldy	#0
 	lda	(r0),y
 	and	#223
 	sta	(r0),y
@@ -4164,39 +5637,39 @@ l609:
 	adc	#0
 	sta	r1
 	lda	(r0),y
-	jmp	l225
-l264:
+	jmp	l411
+l460:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l266:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l462:
 	lda	_pc
 	clc
 	adc	#1
@@ -4221,196 +5694,188 @@ l266:
 	tax
 	lda	#0
 	ora	r16
-	ldy	#1
-	sta	(sp),y
+	sta	r26
 	txa
 	ora	r17
-	iny
-	sta	(sp),y
+	sta	r27
 	lda	_pc
 	clc
 	adc	#2
-	iny
+	ldy	#2
 	sta	(sp),y
 	lda	1+_pc
 	adc	#0
 	iny
 	sta	(sp),y
-	ldy	#2
-	lda	(sp),y
+	lda	r27
 	sta	r1
-	dey
-	lda	(sp),y
+	lda	r26
 	sta	r0
 	jsr	_sa_subroutine_lookup
 	cmp	#0
-	bne	l268
+	bne	l464
 	lda	_code_index
-	sta	r4
+	sta	r8
 	lda	#0
-	sta	r5
+	sta	r9
 	lda	_opcode_6502_njsr_size
 	ldx	#0
 	clc
-	adc	r4
+	adc	r8
 	pha
 	txa
-	adc	r5
+	adc	r9
 	tax
 	pla
 	clc
 	adc	#27
-	bcc	l610
+	bcc	l810
 	inx
-l610:
+l810:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l612
+	bvc	l812
 	eor	#128
-l612:
-	bpl	l611
+l812:
+	bpl	l811
 	pla
 	lda	#0
-	sta	r2
+	sta	r1
 	lda	_opcode_6502_njsr_size
-	beq	l409
-	lda	r21
-	sta	r25
-	lda	r20
-	sta	r24
-	lda	r2
-	ldy	#5
+	beq	l604
+	lda	r19
+	sta	r23
+	lda	r18
+	sta	r22
+	lda	r1
+	ldy	#4
 	sta	(sp),y
 	tax
-l395:
-	lda	r24
+l594:
+	lda	r22
 	clc
 	adc	_code_index
-	sta	r8
-	lda	r25
+	sta	r10
+	lda	r23
 	adc	#0
-	sta	r9
+	sta	r11
 	lda	0+_opcode_6502_njsr,x ;am(x)
 	ldy	#0
-	sta	(r8),y
+	sta	(r10),y
 	inx
-	inc	r24
-	bne	l613
-	inc	r25
-l613:
+	inc	r22
+	bne	l813
+	inc	r23
+l813:
 	cpx	_opcode_6502_njsr_size
-	bcc	l395
-l409:
+	bcc	l594
+l604:
 	stx	r30
-	ldy	#4
-	lda	(sp),y
-	ldx	#0
-	sta	r4
-	stx	r5
-	ldx	r30
-	lda	r4
-	sta	r31
-	lda	_code_index
-	sta	r8
-	lda	#0
-	sta	r9
-	lda	r20
-	clc
-	adc	_opcode_6502_njsr_ret_hi
-	sta	r4
-	lda	r21
-	adc	#0
-	sta	r5
-	lda	r4
-	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
-	lda	r31
-	ldy	#0
-	sta	(r4),y
 	ldy	#3
 	lda	(sp),y
+	ldx	#0
+	sta	r8
+	stx	r9
+	ldx	r30
+	lda	r8
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r10
 	lda	#0
-	sta	r9
-	lda	r20
+	sta	r11
+	lda	r18
 	clc
-	adc	_opcode_6502_njsr_ret_lo
-	sta	r4
-	lda	r21
+	adc	_opcode_6502_njsr_ret_hi
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r9
+	lda	r8
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
 	ldy	#0
-	sta	(r4),y
-	iny
-	lda	(sp),y
-	sta	r31
-	lda	_code_index
-	sta	r8
-	lda	#0
-	sta	r9
-	lda	r20
-	clc
-	adc	_opcode_6502_njsr_tgt_lo
-	sta	r4
-	lda	r21
-	adc	#0
-	sta	r5
-	lda	r4
-	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
-	lda	r31
-	dey
-	sta	(r4),y
-	stx	r30
+	sta	(r8),y
 	ldy	#2
 	lda	(sp),y
-	ldx	#0
-	sta	r4
-	stx	r5
-	ldx	r30
-	lda	r4
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r10
 	lda	#0
-	sta	r9
-	lda	r20
+	sta	r11
+	lda	r18
 	clc
-	adc	_opcode_6502_njsr_tgt_hi
-	sta	r4
-	lda	r21
+	adc	_opcode_6502_njsr_ret_lo
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r9
+	lda	r8
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
 	ldy	#0
-	sta	(r4),y
+	sta	(r8),y
+	lda	r26
+	sta	r31
+	lda	_code_index
+	sta	r10
+	tya
+	sta	r11
+	lda	r18
+	clc
+	adc	_opcode_6502_njsr_tgt_lo
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r31
+	sta	(r8),y
+	stx	r30
+	lda	r27
+	ldx	#0
+	sta	r8
+	stx	r9
+	ldx	r30
+	lda	r8
+	sta	r31
+	lda	_code_index
+	sta	r10
+	tya
+	sta	r11
+	lda	r18
+	clc
+	adc	_opcode_6502_njsr_tgt_hi
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r31
+	sta	(r8),y
 	lda	_pc
 	clc
 	adc	#3
@@ -4422,192 +5887,185 @@ l409:
 	clc
 	adc	_opcode_6502_njsr_size
 	sta	_code_index
+	lda	#1
+	sta	_block_has_jsr
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	ora	#32
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l268:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l464:
 	lda	_code_index
-	sta	r4
+	sta	r8
 	lda	#0
-	sta	r5
+	sta	r9
 	lda	_opcode_6502_jsr_size
 	ldx	#0
 	clc
-	adc	r4
+	adc	r8
 	pha
 	txa
-	adc	r5
+	adc	r9
 	tax
 	pla
 	clc
 	adc	#27
-	bcc	l614
+	bcc	l814
 	inx
-l614:
+l814:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l616
+	bvc	l816
 	eor	#128
-l616:
-	bpl	l615
+l816:
+	bpl	l815
 	pla
-	lda	#0
-	sta	r3
+	ldx	#0
 	lda	_opcode_6502_jsr_size
-	beq	l410
-	lda	r21
-	sta	r17
-	lda	r20
-	sta	r16
-	lda	r3
-	ldy	#5
-	sta	(sp),y
-	tax
-l396:
-	lda	r16
+	beq	l605
+	lda	r19
+	sta	r7
+	lda	r18
+	sta	r6
+l600:
+	lda	r6
 	clc
 	adc	_code_index
-	sta	r8
-	lda	r17
+	sta	r10
+	lda	r7
 	adc	#0
-	sta	r9
+	sta	r11
 	lda	0+_opcode_6502_jsr,x ;am(x)
 	ldy	#0
-	sta	(r8),y
+	sta	(r10),y
 	inx
-	inc	r16
-	bne	l617
-	inc	r17
-l617:
+	inc	r6
+	bne	l817
+	inc	r7
+l817:
 	cpx	_opcode_6502_jsr_size
-	bcc	l396
-l410:
+	bcc	l600
+l605:
 	stx	r30
-	ldy	#4
-	lda	(sp),y
-	ldx	#0
-	sta	r4
-	stx	r5
-	ldx	r30
-	lda	r4
-	sta	r31
-	lda	_code_index
-	sta	r8
-	lda	#0
-	sta	r9
-	lda	r20
-	clc
-	adc	_opcode_6502_jsr_ret_hi
-	sta	r4
-	lda	r21
-	adc	#0
-	sta	r5
-	lda	r4
-	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
-	lda	r31
-	ldy	#0
-	sta	(r4),y
 	ldy	#3
 	lda	(sp),y
+	ldx	#0
+	sta	r8
+	stx	r9
+	ldx	r30
+	lda	r8
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r10
 	lda	#0
-	sta	r9
-	lda	r20
+	sta	r11
+	lda	r18
 	clc
-	adc	_opcode_6502_jsr_ret_lo
-	sta	r4
-	lda	r21
+	adc	_opcode_6502_jsr_ret_hi
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r9
+	lda	r8
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
 	ldy	#0
-	sta	(r4),y
-	iny
-	lda	(sp),y
-	sta	r31
-	lda	_code_index
-	sta	r8
-	lda	#0
-	sta	r9
-	lda	r20
-	clc
-	adc	_opcode_6502_jsr_tgt_lo
-	sta	r4
-	lda	r21
-	adc	#0
-	sta	r5
-	lda	r4
-	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
-	lda	r31
-	dey
-	sta	(r4),y
-	stx	r30
+	sta	(r8),y
 	ldy	#2
 	lda	(sp),y
-	ldx	#0
-	sta	r4
-	stx	r5
-	ldx	r30
-	lda	r4
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r10
 	lda	#0
-	sta	r9
-	lda	r20
+	sta	r11
+	lda	r18
 	clc
-	adc	_opcode_6502_jsr_tgt_hi
-	sta	r4
-	lda	r21
+	adc	_opcode_6502_jsr_ret_lo
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r9
+	lda	r8
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
 	ldy	#0
-	sta	(r4),y
+	sta	(r8),y
+	lda	r26
+	sta	r31
+	lda	_code_index
+	sta	r10
+	tya
+	sta	r11
+	lda	r18
+	clc
+	adc	_opcode_6502_jsr_tgt_lo
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r31
+	sta	(r8),y
+	stx	r30
+	lda	r27
+	ldx	#0
+	sta	r8
+	stx	r9
+	ldx	r30
+	lda	r8
+	sta	r31
+	lda	_code_index
+	sta	r10
+	tya
+	sta	r11
+	lda	r18
+	clc
+	adc	_opcode_6502_jsr_tgt_hi
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r31
+	sta	(r8),y
 	lda	_pc
 	clc
 	adc	#3
@@ -4619,26 +6077,28 @@ l410:
 	clc
 	adc	_opcode_6502_jsr_size
 	sta	_code_index
+	lda	#1
+	sta	_block_has_jsr
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	ora	#32
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l276:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l472:
 	lda	_pc
 	clc
 	adc	#1
@@ -4705,101 +6165,101 @@ l276:
 	adc	#0
 	sta	r1
 	lda	(r0),y
-	jmp	l225
-l282:
+	jmp	l411
+l478:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l284:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l480:
 	lda	_code_index
-	sta	r4
+	sta	r8
 	lda	#0
-	sta	r5
+	sta	r9
 	lda	_opcode_6502_nrts_size
 	ldx	#0
 	clc
-	adc	r4
+	adc	r8
 	pha
 	txa
-	adc	r5
+	adc	r9
 	tax
 	pla
 	clc
 	adc	#27
-	bcc	l618
+	bcc	l818
 	inx
-l618:
+l818:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l620
+	bvc	l820
 	eor	#128
-l620:
-	bpl	l619
+l820:
+	bpl	l819
 	pla
 	lda	#0
-	sta	r7
+	sta	r3
 	lda	_opcode_6502_nrts_size
-	beq	l411
-	lda	r21
-	sta	r13
-	lda	r20
-	sta	r12
-	lda	r7
-	ldy	#1
+	beq	l606
+	lda	r19
+	sta	r15
+	lda	r18
+	sta	r14
+	lda	r3
+	ldy	#2
 	sta	(sp),y
 	tax
-l397:
-	lda	r12
+l596:
+	lda	r14
 	clc
 	adc	_code_index
-	sta	r8
-	lda	r13
+	sta	r10
+	lda	r15
 	adc	#0
-	sta	r9
+	sta	r11
 	lda	0+_opcode_6502_nrts,x ;am(x)
 	ldy	#0
-	sta	(r8),y
+	sta	(r10),y
 	inx
-	inc	r12
-	bne	l621
-	inc	r13
-l621:
+	inc	r14
+	bne	l821
+	inc	r15
+l821:
 	cpx	_opcode_6502_nrts_size
-	bcc	l397
-l411:
+	bcc	l596
+l606:
 	inc	_pc
-	bne	l622
+	bne	l822
 	inc	1+_pc
-l622:
+l822:
 	lda	_code_index
 	clc
 	adc	_opcode_6502_nrts_size
@@ -4807,705 +6267,510 @@ l622:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l286:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l482:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l291:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l487:
 	lda	_code_index
 	ldx	#0
 	clc
 	adc	#6
-	bcc	l623
+	bcc	l823
 	inx
-l623:
+l823:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l625
+	bvc	l825
 	eor	#128
-l625:
-	bpl	l624
+l825:
+	bpl	l824
 	pla
-	lda	r20
+	lda	r18
 	clc
 	adc	_code_index
-	sta	r4
-	lda	r21
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
+	sta	r9
 	lda	#166
 	ldy	#0
-	sta	(r4),y
+	sta	(r8),y
 	ldx	#>(_sp)
 	lda	#<(_sp)
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r10
 	tya
-	sta	r9
-	lda	r20
+	sta	r11
+	lda	r18
 	clc
 	adc	#1
-	sta	r4
-	lda	r21
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r9
+	lda	r8
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
-	sta	(r4),y
+	sta	(r8),y
 	inc	_pc
-	bne	l626
+	bne	l826
 	inc	1+_pc
-l626:
+l826:
 	inc	_code_index
 	inc	_code_index
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	ora	#32
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l293:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l489:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#6
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l294:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l490:
 	lda	_code_index
 	ldx	#0
 	clc
 	adc	#6
-	bcc	l627
+	bcc	l827
 	inx
-l627:
+l827:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l629
+	bvc	l829
 	eor	#128
-l629:
-	bpl	l628
+l829:
+	bpl	l828
 	pla
-	lda	r20
+	lda	r18
 	clc
 	adc	_code_index
-	sta	r4
-	lda	r21
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
+	sta	r9
 	lda	#134
 	ldy	#0
-	sta	(r4),y
+	sta	(r8),y
 	ldx	#>(_sp)
 	lda	#<(_sp)
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r10
 	tya
-	sta	r9
-	lda	r20
+	sta	r11
+	lda	r18
 	clc
 	adc	#1
-	sta	r4
-	lda	r21
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r9
+	lda	r8
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
-	sta	(r4),y
+	sta	(r8),y
 	inc	_pc
-	bne	l630
+	bne	l830
 	inc	1+_pc
-l630:
+l830:
 	inc	_code_index
 	inc	_code_index
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	ora	#32
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l297:
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	ldy	#0
-	lda	(r4),y
-	ora	#6
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	and	#223
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l298:
-	lda	_code_index
-	sta	r4
-	lda	#0
-	sta	r5
-	lda	_opcode_6502_pha_size
-	ldx	#0
-	clc
-	adc	r4
-	pha
-	txa
-	adc	r5
-	tax
-	pla
-	clc
-	adc	#3
-	bcc	l631
-	inx
-l631:
-	pha
-	cmp	#229
-	txa
-	sbc	#0
-	bvc	l633
-	eor	#128
-l633:
-	bpl	l632
-	pla
-	lda	#0
-	sta	r6
-	lda	_opcode_6502_pha_size
-	beq	l412
-	lda	r21
-	sta	r15
-	lda	r20
-	sta	r14
-	lda	r6
-	ldy	#1
-	sta	(sp),y
-	tax
-l398:
-	lda	r14
-	clc
-	adc	_code_index
 	sta	r8
-	lda	r15
+	lda	#>(_cache_flag)
 	adc	#0
 	sta	r9
-	lda	0+_opcode_6502_pha,x ;am(x)
-	ldy	#0
-	sta	(r8),y
-	inx
-	inc	r14
-	bne	l634
-	inc	r15
-l634:
-	cpx	_opcode_6502_pha_size
-	bcc	l398
-l412:
-	inc	_pc
-	bne	l635
-	inc	1+_pc
-l635:
-	lda	_code_index
-	clc
-	adc	_opcode_6502_pha_size
-	sta	_code_index
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#32
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l301:
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	ldy	#0
-	lda	(r4),y
-	ora	#6
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	and	#223
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l306:
-	lda	_code_index
-	sta	r4
-	lda	#0
-	sta	r5
-	lda	_opcode_6502_pla_size
-	ldx	#0
-	clc
-	adc	r4
-	pha
-	txa
-	adc	r5
-	tax
-	pla
-	clc
-	adc	#3
-	bcc	l636
-	inx
-l636:
-	pha
-	cmp	#229
-	txa
-	sbc	#0
-	bvc	l638
-	eor	#128
-l638:
-	bpl	l637
-	pla
-	ldx	#0
-	lda	_opcode_6502_pla_size
-	beq	l413
-	lda	r21
-	sta	r11
-	lda	r20
-	sta	r10
-l406:
-	lda	r10
-	clc
-	adc	_code_index
 	sta	r8
-	lda	r11
+	lda	#>(_cache_flag)
 	adc	#0
 	sta	r9
-	lda	0+_opcode_6502_pla,x ;am(x)
-	ldy	#0
-	sta	(r8),y
-	inx
-	inc	r10
-	bne	l639
-	inc	r11
-l639:
-	cpx	_opcode_6502_pla_size
-	bcc	l406
-l413:
-	inc	_pc
-	bne	l640
-	inc	1+_pc
-l640:
+	lda	(r8),y
+	jmp	l411
+l493:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
-	ora	#32
-	sta	(r4),y
-	lda	_code_index
-	clc
-	adc	_opcode_6502_pla_size
-	sta	_code_index
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l309:
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#6
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l314:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l494:
+	lda	#>(_opcode_6502_pha)
+	sta	r1
+	lda	#<(_opcode_6502_pha)
+	sta	r0
+	lda	_opcode_6502_pha_size
+	sta	r2
+	jsr	_emit_template
+	jmp	l411
+l496:
+	lda	#>(_opcode_6502_pla)
+	sta	r1
+	lda	#<(_opcode_6502_pla)
+	sta	r0
+	lda	_opcode_6502_pla_size
+	sta	r2
+	jsr	_emit_template
+	jmp	l411
+l497:
+	lda	#>(_opcode_6502_php)
+	sta	r1
+	lda	#<(_opcode_6502_php)
+	sta	r0
+	lda	_opcode_6502_php_size
+	sta	r2
+	jsr	_emit_template
+	jmp	l411
+l498:
+	lda	#>(_opcode_6502_plp)
+	sta	r1
+	lda	#<(_opcode_6502_plp)
+	sta	r0
+	lda	_opcode_6502_plp_size
+	sta	r2
+	jsr	_emit_template
+	jmp	l411
+l499:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l319:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l501:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l321:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l503:
 	lda	#1
 	sta	_decimal_mode
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l322:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l504:
 	inc	_pc
-	bne	l641
+	bne	l831
 	inc	1+_pc
-l641:
+l831:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#32
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l323:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l505:
 ; volatile barrier
 	lda	#0
 	sta	16417
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l324:
-	lda	r20
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l506:
+	lda	r18
 	clc
 	adc	_code_index
-	sta	r4
-	lda	r21
-	adc	#0
-	sta	r5
-	lda	r22
-	ldy	#0
-	sta	(r4),y
-	ldy	r22
-	lda	0+_addrmodes,y ;am(r22)
 	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r17
+	ldy	#0
+	sta	(r8),y
+	ldy	r17
+	lda	0+_addrmodes,y ;am(r17)
+	sta	r4
 	cmp	#0
-	beq	l357
-	lda	r8
+	beq	l566
+	lda	r4
 	cmp	#1
-	beq	l357
-	lda	r8
+	beq	l566
+	lda	r4
 	cmp	#2
-	beq	l355
-	lda	r8
+	beq	l564
+	lda	r4
 	cmp	#3
-	beq	l333
-	lda	r8
+	beq	l530
+	lda	r4
 	cmp	#4
-	beq	l334
-	lda	r8
+	beq	l538
+	lda	r4
 	cmp	#5
-	beq	l334
-	lda	r8
+	beq	l538
+	lda	r4
 	cmp	#6
-	beq	l355
-	lda	r8
+	beq	l564
+	lda	r4
 	cmp	#7
-	beq	l326
-	lda	r8
+	beq	l508
+	lda	r4
 	cmp	#8
-	beq	l326
-	lda	r8
+	beq	l508
+	lda	r4
 	cmp	#9
-	beq	l326
-	lda	r8
+	beq	l508
+	lda	r4
 	cmp	#10
-	beq	l326
-	lda	r8
+	beq	l508
+	lda	r4
 	cmp	#11
-	beq	l336
-	lda	r8
+	beq	l540
+	lda	r4
 	cmp	#12
-	beq	l337
-	jmp	l359
-l326:
+	beq	l541
+	jmp	l568
+l508:
 	lda	_pc
 	clc
 	adc	#1
@@ -5542,96 +6807,96 @@ l326:
 	sta	r1
 	lda	_encoded_address
 	sta	r0
-	jsr	l1
+	jsr	_translate_address
 	sta	_decoded_address
 	stx	1+_decoded_address
 	lda	_decoded_address
 	ora	1+_decoded_address
-	beq	l331
+	beq	l513
 	lda	_decoded_address
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r10
 	lda	#0
-	sta	r9
-	lda	r20
+	sta	r11
+	lda	r18
 	clc
 	adc	#1
-	sta	r4
-	lda	r21
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r9
+	lda	r8
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
 	ldy	#0
-	sta	(r4),y
+	sta	(r8),y
 	stx	r30
 	lda	1+_decoded_address
 	ldx	#0
-	sta	r4
-	stx	r5
+	sta	r8
+	stx	r9
 	ldx	r30
-	lda	r4
+	lda	r8
 	sta	r31
 	lda	_code_index
-	sta	r8
+	sta	r10
 	tya
-	sta	r9
-	lda	r20
+	sta	r11
+	lda	r18
 	clc
 	adc	#2
-	sta	r4
-	lda	r21
+	sta	r8
+	lda	r19
 	adc	#0
-	sta	r5
-	lda	r4
+	sta	r9
+	lda	r8
 	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
 	lda	r31
-	sta	(r4),y
-	jmp	l332
-l331:
+	sta	(r8),y
+	jmp	l514
+l513:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l332:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l514:
 	lda	_pc
 	clc
 	adc	#3
@@ -5643,398 +6908,594 @@ l332:
 	clc
 	adc	#3
 	sta	_code_index
-	jmp	l325
-l333:
-	lda	r20
-	clc
-	adc	_code_index
-	sta	r0
-	lda	r21
-	adc	#0
-	sta	r1
-	ldy	#0
-	lda	(r0),y
-	ora	#8
-	sta	(r0),y
-	lda	_pc
-	clc
-	adc	#1
-	sta	r0
-	lda	1+_pc
-	adc	#0
-	sta	r1
-	jsr	_read6502
-	sta	r31
-	sta	r0
-	lda	#0
-	sta	r1
-	ldx	#>(_RAM_BASE)
-	lda	#<(_RAM_BASE)
-	clc
-	adc	r0
-	pha
-	txa
-	adc	r1
-	tax
-	pla
-	sta	r1
-	sta	r31
-	lda	_code_index
-	sta	r8
-	lda	#0
-	sta	r9
-	lda	r20
-	clc
-	adc	#1
-	sta	r4
-	lda	r21
-	adc	#0
-	sta	r5
-	lda	r4
-	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
-	lda	r1
-	ldy	#0
-	sta	(r4),y
-	lda	r31
-	sta	r30
-	stx	r29
-	txa
+	lda	_decoded_address
+	ora	1+_decoded_address
+	beq	l507
+	lda	1+_encoded_address
 	ldx	#0
-	sta	r0
-	stx	r1
-	ldx	r29
-	lda	r0
-	sta	r31
-	lda	_code_index
-	sta	r4
-	tya
-	sta	r5
-	lda	r20
-	clc
-	adc	#2
-	sta	r0
-	lda	r21
-	adc	#0
-	sta	r1
-	lda	r0
-	clc
-	adc	r4
-	sta	r0
-	lda	r1
-	adc	r5
-	sta	r1
-	lda	r31
-	sta	(r0),y
-	inc	_pc
-	bne	l642
-	inc	1+_pc
-l642:
-	inc	_pc
-	bne	l643
-	inc	1+_pc
-l643:
-	lda	_code_index
-	clc
-	adc	#3
-	sta	_code_index
-	jmp	l325
-l334:
-	lda	r20
-	clc
-	adc	_code_index
-	sta	r0
-	lda	r21
-	adc	#0
-	sta	r1
-	ldy	#0
-	lda	(r0),y
-	ora	#8
-	sta	(r0),y
-	lda	_pc
-	clc
-	adc	#1
-	sta	r0
-	lda	1+_pc
-	adc	#0
-	sta	r1
-	jsr	_read6502
-	sta	r31
-	sta	r0
+	sta	r16
+	cmp	#64
+	bcc	l507
+	lda	r16
+	cmp	#80
+	bcs	l507
+	lda	r16
+	cmp	#72
+	bcs	l523
+	lda	l26
+	ldy	#2
+	sta	(sp),y
 	lda	#0
-	sta	r1
-	ldx	#>(_RAM_BASE)
-	lda	#<(_RAM_BASE)
-	clc
-	adc	r0
-	pha
-	txa
-	adc	r1
-	tax
-	pla
-	sta	r1
-	sta	r31
-	lda	_code_index
-	sta	r8
+	iny
+	sta	(sp),y
+	jmp	l524
+l523:
+	lda	l27
+	ldy	#2
+	sta	(sp),y
 	lda	#0
-	sta	r9
-	lda	r20
-	clc
-	adc	#1
-	sta	r4
-	lda	r21
-	adc	#0
-	sta	r5
-	lda	r4
-	clc
-	adc	r8
-	sta	r4
-	lda	r5
-	adc	r9
-	sta	r5
-	lda	r1
-	ldy	#0
-	sta	(r4),y
-	lda	r31
-	sta	r30
-	stx	r29
-	txa
-	ldx	#0
-	sta	r0
-	stx	r1
-	ldx	r29
-	lda	r0
-	sta	r31
+	iny
+	sta	(sp),y
+l524:
+	ldy	#2
+	lda	(sp),y
+	iny
+	ora	(sp),y
+	bne	l507
 	lda	_code_index
-	sta	r4
-	tya
-	sta	r5
-	lda	r20
-	clc
-	adc	#2
-	sta	r0
-	lda	r21
-	adc	#0
-	sta	r1
-	lda	r0
-	clc
-	adc	r4
-	sta	r0
-	lda	r1
-	adc	r5
-	sta	r1
-	lda	r31
-	sta	(r0),y
-	inc	_pc
-	bne	l644
-	inc	1+_pc
-l644:
-	inc	_pc
-	bne	l645
-	inc	1+_pc
-l645:
-	lda	_code_index
-	clc
-	adc	#3
-	sta	_code_index
-	jmp	l325
-l336:
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	ldy	#0
-	lda	(r4),y
-	ora	#2
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	and	#223
-	sta	(r4),y
-	lda	#<(_cache_flag)
-	clc
-	adc	_cache_index
-	sta	r4
-	lda	#>(_cache_flag)
-	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l337:
-	lda	_pc
-	clc
-	adc	#1
-	sta	r0
-	lda	1+_pc
-	adc	#0
-	sta	r1
-	jsr	_read6502
-	sta	r23
-	lda	r22
-	cmp	#145
-	bne	l339
-	lda	_code_index
-	sta	r4
-	lda	#0
-	sta	r5
-	lda	_sta_indy_template_size
 	ldx	#0
 	clc
-	adc	r4
-	pha
-	txa
-	adc	r5
-	tax
-	pla
-	clc
-	adc	#3
-	bcc	l646
+	adc	#25
+	bcc	l832
 	inx
-l646:
+l832:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l648
+	bvc	l834
 	eor	#128
-l648:
-	bpl	l647
+l834:
+	bpl	l833
 	pla
-	lda	r23
-	sta	_sta_indy_zp_patch
-	lda	#0
+	lda	#>(_screen_ram_updated)
 	sta	r1
-	lda	_sta_indy_template_size
-	beq	l414
-	lda	r21
-	sta	r27
-	lda	r20
-	sta	r26
-	lda	r1
-	ldy	#1
+	lda	#<(_screen_ram_updated)
+	sta	r0
+	ldy	#0
 	sta	(sp),y
-	tax
-l400:
-	lda	r26
+	lda	#>(_character_ram_updated)
+	sta	r1
+	lda	#<(_character_ram_updated)
+	sta	r0
+	iny
+	sta	(sp),y
+	lda	r19
+	sta	r1
+	lda	r18
+	sta	r0
+	lda	_code_index
+	sta	r2
+	lda	r17
+	sta	r4
+	lda	r16
+	sta	r6
+	jsr	_emit_dirty_flag
+	sta	r9
+	cmp	#0
+	beq	l507
+	lda	_code_index
+	clc
+	adc	r9
+	sta	_code_index
+	lda	r16
+	cmp	#72
+	bcs	l528
+	lda	#1
+	sta	l26
+	jmp	l507
+l528:
+	lda	#1
+	sta	l27
+	jmp	l507
+l530:
+	lda	r18
 	clc
 	adc	_code_index
+	sta	r0
+	lda	r19
+	adc	#0
+	sta	r1
+	ldy	#0
+	lda	(r0),y
+	ora	#8
+	sta	(r0),y
+	lda	_pc
+	clc
+	adc	#1
+	sta	r0
+	lda	1+_pc
+	adc	#0
+	sta	r1
+	jsr	_read6502
+	ldy	#2
+	sta	(sp),y
+	sta	r0
+	lda	#0
+	sta	r1
+	ldx	#>(_RAM_BASE)
+	lda	#<(_RAM_BASE)
+	clc
+	adc	r0
+	pha
+	txa
+	adc	r1
+	tax
+	pla
+	sta	r1
+	sta	r31
+	lda	_code_index
+	sta	r10
+	lda	#0
+	sta	r11
+	lda	r18
+	clc
+	adc	#1
 	sta	r8
-	lda	r27
+	lda	r19
 	adc	#0
 	sta	r9
-	lda	0+_sta_indy_template,x ;am(x)
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r1
 	ldy	#0
 	sta	(r8),y
+	lda	r31
+	sta	r30
+	stx	r29
+	txa
+	ldx	#0
+	sta	r0
+	stx	r1
+	ldx	r29
+	lda	r0
+	sta	r31
+	lda	_code_index
+	sta	r8
+	tya
+	sta	r9
+	lda	r18
+	clc
+	adc	#2
+	sta	r0
+	lda	r19
+	adc	#0
+	sta	r1
+	lda	r0
+	clc
+	adc	r8
+	sta	r0
+	lda	r1
+	adc	r9
+	sta	r1
+	lda	r31
+	sta	(r0),y
+	inc	_pc
+	bne	l835
+	inc	1+_pc
+l835:
+	inc	_pc
+	bne	l836
+	inc	1+_pc
+l836:
+	lda	_code_index
+	clc
+	adc	#3
+	sta	_code_index
+	lda	r17
+	sec
+	sbc	#132
+	cmp	#3
+	bcc	l533
+	lda	r17
+	cmp	#230
+	beq	l533
+	lda	r17
+	cmp	#198
+	bne	l507
+l533:
+	lda	_code_index
+	ldx	#0
+	clc
+	adc	#23
+	bcc	l837
 	inx
-	inc	r26
-	bne	l649
-	inc	r27
-l649:
+l837:
+	pha
+	cmp	#211
+	txa
+	sbc	#0
+	bvc	l839
+	eor	#128
+l839:
+	bpl	l838
+	pla
+	lda	r19
+	sta	r1
+	lda	r18
+	sta	r0
+	lda	_code_index
+	sta	r2
+	lda	r17
+	sta	r4
+	ldy	#2
+	lda	(sp),y
+	sta	r6
+	jsr	_emit_zp_mirror_write
+	clc
+	adc	_code_index
+	sta	_code_index
+	jmp	l507
+l538:
+	lda	r18
+	clc
+	adc	_code_index
+	sta	r0
+	lda	r19
+	adc	#0
+	sta	r1
+	ldy	#0
+	lda	(r0),y
+	ora	#8
+	sta	(r0),y
+	lda	_pc
+	clc
+	adc	#1
+	sta	r0
+	lda	1+_pc
+	adc	#0
+	sta	r1
+	jsr	_read6502
+	sta	r31
+	sta	r0
+	lda	#0
+	sta	r1
+	ldx	#>(_RAM_BASE)
+	lda	#<(_RAM_BASE)
+	clc
+	adc	r0
+	pha
+	txa
+	adc	r1
+	tax
+	pla
+	sta	r1
+	sta	r31
+	lda	_code_index
+	sta	r10
+	lda	#0
+	sta	r11
+	lda	r18
+	clc
+	adc	#1
+	sta	r8
+	lda	r19
+	adc	#0
+	sta	r9
+	lda	r8
+	clc
+	adc	r10
+	sta	r8
+	lda	r9
+	adc	r11
+	sta	r9
+	lda	r1
+	ldy	#0
+	sta	(r8),y
+	lda	r31
+	sta	r30
+	stx	r29
+	txa
+	ldx	#0
+	sta	r0
+	stx	r1
+	ldx	r29
+	lda	r0
+	sta	r31
+	lda	_code_index
+	sta	r8
+	tya
+	sta	r9
+	lda	r18
+	clc
+	adc	#2
+	sta	r0
+	lda	r19
+	adc	#0
+	sta	r1
+	lda	r0
+	clc
+	adc	r8
+	sta	r0
+	lda	r1
+	adc	r9
+	sta	r1
+	lda	r31
+	sta	(r0),y
+	inc	_pc
+	bne	l840
+	inc	1+_pc
+l840:
+	inc	_pc
+	bne	l841
+	inc	1+_pc
+l841:
+	lda	_code_index
+	clc
+	adc	#3
+	sta	_code_index
+	jmp	l507
+l540:
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	ldy	#0
+	lda	(r8),y
+	ora	#2
+	sta	(r8),y
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	lda	(r8),y
+	and	#223
+	sta	(r8),y
+	lda	#<(_cache_flag)
+	clc
+	adc	_cache_index
+	sta	r8
+	lda	#>(_cache_flag)
+	adc	#0
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l541:
+	lda	_pc
+	clc
+	adc	#1
+	sta	r0
+	lda	1+_pc
+	adc	#0
+	sta	r1
+	jsr	_read6502
+	ldy	#2
+	sta	(sp),y
+	lda	r17
+	cmp	#145
+	bne	l543
+	lda	#0
+	sta	r8
+	lda	_code_index
+	ldx	#0
+	clc
+	adc	#46
+	bcc	l842
+	inx
+l842:
+	pha
+	cmp	#211
+	txa
+	sbc	#0
+	bvc	l844
+	eor	#128
+l844:
+	bpl	l843
+	pla
+	lda	#>(_character_ram_updated)
+	sta	r1
+	lda	#<(_character_ram_updated)
+	sta	r0
+	ldy	#0
+	sta	(sp),y
+	lda	#>(_screen_ram_updated)
+	sta	r1
+	lda	#<(_screen_ram_updated)
+	sta	r0
+	sta	r31
+	lda	r19
+	sta	r1
+	lda	r18
+	sta	r0
+	lda	_code_index
+	sta	r2
+	lda	r31
+	ldy	#2
+	lda	(sp),y
+	sta	r4
+	lda	r31
+	sta	r6
+	jsr	_emit_native_sta_indy
+	sta	r8
+l545:
+	lda	r8
+	beq	l547
+	lda	_code_index
+	clc
+	adc	r8
+	sta	_code_index
+	inc	_pc
+	bne	l845
+	inc	1+_pc
+l845:
+	inc	_pc
+	bne	l846
+	inc	1+_pc
+l846:
+	jmp	l507
+l547:
+	lda	_code_index
+	sta	r8
+	lda	#0
+	sta	r9
+	lda	_sta_indy_template_size
+	ldx	#0
+	clc
+	adc	r8
+	pha
+	txa
+	adc	r9
+	tax
+	pla
+	clc
+	adc	#3
+	bcc	l847
+	inx
+l847:
+	pha
+	cmp	#211
+	txa
+	sbc	#0
+	bvc	l849
+	eor	#128
+l849:
+	bpl	l848
+	pla
+	ldy	#2
+	lda	(sp),y
+	sta	_sta_indy_zp_patch
+	lda	#0
+	sta	r2
+	lda	_sta_indy_template_size
+	beq	l607
+	lda	r19
+	sta	r13
+	lda	r18
+	sta	r12
+	lda	r2
+	ldy	#2
+	sta	(sp),y
+	tax
+l597:
+	lda	r12
+	clc
+	adc	_code_index
+	sta	r10
+	lda	r13
+	adc	#0
+	sta	r11
+	lda	0+_sta_indy_template,x ;am(x)
+	ldy	#0
+	sta	(r10),y
+	inx
+	inc	r12
+	bne	l850
+	inc	r13
+l850:
 	cpx	_sta_indy_template_size
-	bcc	l400
-l414:
+	bcc	l597
+l607:
 	inc	_pc
-	bne	l650
+	bne	l851
 	inc	1+_pc
-l650:
+l851:
 	inc	_pc
-	bne	l651
+	bne	l852
 	inc	1+_pc
-l651:
+l852:
 	lda	_code_index
 	clc
 	adc	_sta_indy_template_size
 	sta	_code_index
-	jmp	l325
-l341:
+	jmp	l507
+l550:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#6
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l339:
-	lda	r23
-	sta	r4
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l543:
+	ldy	#2
+	lda	(sp),y
+	sta	r8
 	lda	#0
-	sta	r5
+	sta	r9
 	ldx	#>(_RAM_BASE)
 	lda	#<(_RAM_BASE)
 	clc
-	adc	r4
-	ldy	#1
+	adc	r8
+	ldy	#4
 	sta	(sp),y
 	txa
-	adc	r5
+	adc	r9
 	iny
 	sta	(sp),y
 	lda	_code_index
-	sta	r4
+	sta	r8
 	lda	#0
-	sta	r5
+	sta	r9
 	lda	_addr_6502_indy_size
 	ldx	#0
 	clc
-	adc	r4
+	adc	r8
 	pha
 	txa
-	adc	r5
+	adc	r9
 	tax
 	pla
 	clc
 	adc	#3
-	bcc	l652
+	bcc	l853
 	inx
-l652:
+l853:
 	pha
-	cmp	#229
+	cmp	#211
 	txa
 	sbc	#0
-	bvc	l654
+	bvc	l855
 	eor	#128
-l654:
-	bpl	l653
+l855:
+	bpl	l854
 	pla
-	lda	r22
+	lda	r17
 	sta	_indy_opcode_location
-	ldy	#2
+	ldy	#5
 	lda	(sp),y
 	sta	1+_indy_address_lo
 	dey
@@ -6051,79 +7512,79 @@ l654:
 	lda	#0
 	sta	r0
 	lda	_addr_6502_indy_size
-	beq	l415
-	lda	r21
-	sta	r19
-	lda	r20
-	sta	r18
+	beq	l608
+	lda	r19
+	sta	r21
+	lda	r18
+	sta	r20
 	lda	r0
-	ldy	#1
+	ldy	#2
 	sta	(sp),y
 	tax
-l401:
-	lda	r18
+l598:
+	lda	r20
 	clc
 	adc	_code_index
-	sta	r8
-	lda	r19
+	sta	r10
+	lda	r21
 	adc	#0
-	sta	r9
+	sta	r11
 	lda	0+_addr_6502_indy,x ;am(x)
 	ldy	#0
-	sta	(r8),y
+	sta	(r10),y
 	inx
-	inc	r18
-	bne	l655
-	inc	r19
-l655:
+	inc	r20
+	bne	l856
+	inc	r21
+l856:
 	cpx	_addr_6502_indy_size
-	bcc	l401
-l415:
+	bcc	l598
+l608:
 	inc	_pc
-	bne	l656
+	bne	l857
 	inc	1+_pc
-l656:
+l857:
 	inc	_pc
-	bne	l657
+	bne	l858
 	inc	1+_pc
-l657:
+l858:
 	lda	_code_index
 	clc
 	adc	_addr_6502_indy_size
 	sta	_code_index
-	jmp	l325
-l349:
+	jmp	l507
+l558:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#6
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l355:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l564:
 	lda	_pc
 	clc
 	adc	#1
@@ -6134,96 +7595,96 @@ l355:
 	jsr	_read6502
 	sta	r31
 	lda	_code_index
-	sta	r4
+	sta	r8
 	lda	#0
-	sta	r5
-	lda	r20
+	sta	r9
+	lda	r18
 	clc
 	adc	#1
 	sta	r0
-	lda	r21
+	lda	r19
 	adc	#0
 	sta	r1
 	lda	r0
 	clc
-	adc	r4
+	adc	r8
 	sta	r0
 	lda	r1
-	adc	r5
+	adc	r9
 	sta	r1
 	lda	r31
 	ldy	#0
 	sta	(r0),y
 	inc	_pc
-	bne	l658
+	bne	l859
 	inc	1+_pc
-l658:
+l859:
 	inc	_pc
-	bne	l659
+	bne	l860
 	inc	1+_pc
-l659:
+l860:
 	inc	_code_index
 	inc	_code_index
-	jmp	l325
-l357:
+	jmp	l507
+l566:
 	inc	_pc
-	bne	l660
+	bne	l861
 	inc	1+_pc
-l660:
+l861:
 	inc	_code_index
-	jmp	l325
-l359:
+	jmp	l507
+l568:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#2
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
+	sta	r9
+	lda	(r8),y
 	and	#223
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-	jmp	l225
-l325:
+	sta	r9
+	lda	(r8),y
+	jmp	l411
+l507:
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
+	sta	r9
 	ldy	#0
-	lda	(r4),y
+	lda	(r8),y
 	ora	#32
-	sta	(r4),y
+	sta	(r8),y
 	lda	#<(_cache_flag)
 	clc
 	adc	_cache_index
-	sta	r4
+	sta	r8
 	lda	#>(_cache_flag)
 	adc	#0
-	sta	r5
-	lda	(r4),y
-l225:
+	sta	r9
+	lda	(r8),y
+l411:
 	sta	r31
 	ldy	#18
 	jsr	___rload12
@@ -6231,50 +7692,59 @@ l225:
 	lda	sp
 	adc	#19
 	sta	sp
-	bcc	l661
+	bcc	l862
 	inc	sp+1
-l661:
+l862:
 	lda	r31
 	rts
-l653:
+l854:
 	pla
-	jmp	l349
-l647:
+	jmp	l558
+l848:
 	pla
-	jmp	l341
-l637:
+	jmp	l550
+l843:
 	pla
-	jmp	l309
-l632:
+	jmp	l545
+l838:
 	pla
-	jmp	l301
-l628:
+	jmp	l507
+l833:
 	pla
-	jmp	l297
-l624:
+	jmp	l507
+l828:
 	pla
-	jmp	l293
-l619:
+	jmp	l493
+l824:
 	pla
-	jmp	l286
-l615:
+	jmp	l489
+l819:
 	pla
-	jmp	l276
-l611:
+	jmp	l482
+l815:
 	pla
-	jmp	l268
-l599:
+	jmp	l472
+l811:
 	pla
-	jmp	l264
-l572:
+	jmp	l464
+l799:
 	pla
-	jmp	l249
-l552:
+	jmp	l460
+l796:
 	pla
-	jmp	l243
-l544:
+	jmp	l458
+l788:
 	pla
-	jmp	l239
+	jmp	l449
+l782:
+	pla
+	jmp	l451
+l764:
+	pla
+	jmp	l435
+l744:
+	pla
+	jmp	l429
 ; stacksize=0+??
 ;vcprmin=10000
 	section	text
@@ -6285,14 +7755,25 @@ _recompile_opcode:
 	lda	r17
 	pha
 	lda	_mapper_prg_bank
-	sta	r17
+	sta	r16
 	lda	#2
 	jsr	_bankswitch_prg
-	jsr	l224
-	sta	r16
-	lda	r17
-	jsr	_bankswitch_prg
+	jsr	l410
+	sta	r17
 	lda	r16
+	jsr	_bankswitch_prg
+	lda	_compile_ppu_active
+	beq	l866
+	lda	_compile_ppu_effect
+	eor	#32
+	sta	_compile_ppu_effect
+	ora	#59
+	sta	_lnPPUMASK
+; volatile barrier
+	lda	_lnPPUMASK
+	sta	8193
+l866:
+	lda	r17
 	sta	r31
 	pla
 	sta	r17
@@ -6303,7 +7784,7 @@ _recompile_opcode:
 ; stacksize=0+??
 ;vcprmin=10000
 	section	"bank2"
-l664:
+l867:
 	lda	r16
 	pha
 	lda	r17
@@ -6320,12 +7801,12 @@ l664:
 	sta	r1
 	lda	#1
 	ldy	r0
-	beq	l669
-l670:
+	beq	l872
+l873:
 	asl
 	dey
-	bne	l670
-l669:
+	bne	l873
+l872:
 	sta	r31
 	eor	#-1
 	sta	r18
@@ -6371,11 +7852,11 @@ l669:
 ; stacksize=0+??
 ;vcprmin=10000
 	section	"bank2"
-l671:
+l874:
 	lda	sp
-	bne	l686
+	bne	l889
 	dec	sp+1
-l686:
+l889:
 	dec	sp
 	lda	r16
 	pha
@@ -6410,25 +7891,25 @@ l686:
 	sta	r1
 	lda	r16
 	cmp	#7
-	bcc	l675
+	bcc	l878
 	lda	r16
 	cmp	#7
-	bne	l683
-l675:
+	bne	l886
+l878:
 	lda	r1
 	and	#128
 	ldy	#0
 	sta	(sp),y
-l683:
+l886:
 	ldy	#0
 	lda	(sp),y
 	sta	r31
 	pla
 	sta	r16
 	inc	sp
-	bne	l687
+	bne	l890
 	inc	sp+1
-l687:
+l890:
 	lda	r31
 	rts
 ; stacksize=0+??
@@ -6454,7 +7935,7 @@ _cache_bit_enable:
 	sta	r1
 	lda	r18
 	sta	r0
-	jsr	l664
+	jsr	l867
 	lda	r16
 	jsr	_bankswitch_prg
 	pla
@@ -6489,7 +7970,7 @@ _cache_bit_check:
 	sta	r1
 	lda	r18
 	sta	r0
-	jsr	l671
+	jsr	l874
 	sta	r16
 	lda	r17
 	jsr	_bankswitch_prg
@@ -6506,13 +7987,21 @@ _cache_bit_check:
 	lda	r31
 	rts
 ; stacksize=0+??
-	global	_reservation_count
+	global	_sa_compile_pass
 	section	data
-_reservation_count:
+_sa_compile_pass:
 	byte	0
-	global	_reservations_enabled
+	global	_sa_block_exit_pc
 	section	data
-_reservations_enabled:
+_sa_block_exit_pc:
+	word	65535
+	global	_entry_list_offset
+	section	data
+_entry_list_offset:
+	word	0
+	global	_sa_block_alloc_size
+	section	data
+_sa_block_alloc_size:
 	byte	0
 	global	_addrmodes
 	section	"data"
@@ -6831,19 +8320,29 @@ _matched:
 	section	zpage
 _decimal_mode:
 	byte	0
-	global	_pc_2b27_count
-	zpage	_pc_2b27_count
+	global	_block_has_jsr
+	zpage	_block_has_jsr
 	section	zpage
-_pc_2b27_count:
+_block_has_jsr:
+	byte	0
+	global	_compile_ppu_effect
+	zpage	_compile_ppu_effect
+	section	zpage
+_compile_ppu_effect:
+	byte	0
+	global	_compile_ppu_active
+	zpage	_compile_ppu_active
+	section	zpage
+_compile_ppu_active:
 	byte	0
 	global	_flash_enabled
 	section	data
 _flash_enabled:
 	byte	0
-	global	_next_free_block
+	global	_next_free_sector
 	section	data
-_next_free_block:
-	word	0
+_next_free_sector:
+	byte	0
 	global	_cache_branch_long
 	section	data
 _cache_branch_long:
@@ -6861,6 +8360,8 @@ _indy_hit_count:
 	global	_mapper_prg_bank
 	global	_dispatch_on_pc
 	global	_cross_bank_dispatch
+	global	_xbank_trampoline
+	global	_xbank_addr
 	global	_addr_6502_indy
 	global	_addr_6502_indy_size
 	global	_indy_opcode_location
@@ -6868,8 +8369,12 @@ _indy_hit_count:
 	global	_indy_address_hi
 	global	_opcode_6502_pha_size
 	global	_opcode_6502_pla_size
+	global	_opcode_6502_php_size
+	global	_opcode_6502_plp_size
 	global	_opcode_6502_pha
 	global	_opcode_6502_pla
+	global	_opcode_6502_php
+	global	_opcode_6502_plp
 	global	_opcode_6502_jsr_size
 	global	_opcode_6502_jsr
 	global	_opcode_6502_jsr_ret_hi
@@ -6889,14 +8394,6 @@ _indy_hit_count:
 	global	_sta_indy_zp_patch
 	global	_flash_cache_pc
 	global	_flash_cache_pc_flags
-	global	_reserved_pc
-	section	bss
-_reserved_pc:
-	reserve	64
-	global	_reserved_block
-	section	bss
-_reserved_block:
-	reserve	64
 	global	_reserve_result_addr
 	section	bss
 _reserve_result_addr:
@@ -6905,6 +8402,10 @@ _reserve_result_addr:
 	section	bss
 _reserve_result_bank:
 	reserve	1
+	global	_mirrored_ptrs
+	section	bss
+_mirrored_ptrs:
+	reserve	12
 	global	_ROM_NAME
 	global	_status
 	zpage	_status
@@ -6926,6 +8427,7 @@ _encoded_address:
 	global	_opt2_notify_block_compiled
 	global	_opt2_sweep_pending_patches
 	global	_opt2_scan_and_patch_epilogues
+	global	_lnPPUMASK
 	global	_sp
 	zpage	_sp
 	global	_a
@@ -6942,6 +8444,14 @@ _pc_end:
 	section	zpage
 _flash_cache_index:
 	reserve	2
+	global	_block_ci_map
+	section	bss
+_block_ci_map:
+	reserve	64
+	global	_sector_free_offset
+	section	bss
+_sector_free_offset:
+	reserve	112
 	global	_l1_cache_code
 	section	bss
 _l1_cache_code:
@@ -6949,7 +8459,7 @@ _l1_cache_code:
 	global	_cache_code
 	section	bss
 _cache_code:
-	reserve	1832
+	reserve	1688
 	global	_cache_flag
 	section	bss
 _cache_flag:
@@ -7002,14 +8512,6 @@ _code_index:
 	section	zpage
 _address_8:
 	reserve	1
-	global	_flash_block_flags
-	global	_peek_bank_byte
-	global	_opt2_stat_total
-	global	_opt2_stat_direct
-	global	_opt2_stat_pending
-	global	_next_free_block
-	global	_stats_frame
-	global	_sa_blocks_total
 	global	_pc_jump_address
 	section	bss
 _pc_jump_address:
@@ -7038,11 +8540,44 @@ _flash_code_bank:
 	section	"bank3"
 _cache_bit_array:
 	reserve	8192
-	global	_sa_code_bitmap
+	global	_sector_free_offset
+	global	_next_free_sector
+	global	_native_sta_indy_tmpl
+	global	_native_sta_indy_tmpl_size
+	global	_native_sta_indy_emu_lo
+	global	_native_sta_indy_emu_hi
+	global	_zp_mirror_0
+	zpage	_zp_mirror_0
+	global	_zp_mirror_1
+	zpage	_zp_mirror_1
+	global	_zp_mirror_2
+	zpage	_zp_mirror_2
 	global	_peek_bank_byte
+	global	_screen_ram_updated
+	zpage	_screen_ram_updated
+	global	_character_ram_updated
+	zpage	_character_ram_updated
+	section	data
+l25:
+	word	0
 	section	data
 l26:
-	word	0
+	byte	0
+	section	data
+l27:
+	byte	0
+	section	data
+l28:
+	byte	0
+	section	data
+l29:
+	byte	0
+	section	data
+l30:
+	byte	0
+	section	data
+l335:
+	byte	0
 	zpage	sp
 	zpage	r0
 	zpage	r1

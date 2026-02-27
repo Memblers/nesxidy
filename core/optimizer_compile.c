@@ -35,7 +35,7 @@ extern void opt_tramp_erase(uint8_t sector);
 #pragma section bank1
 
 // External data references
-extern uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
+extern uint8_t cache_code[BLOCK_COUNT][CACHE_CODE_BUF_SIZE];
 extern uint8_t cache_flag[BLOCK_COUNT];
 extern uint8_t cache_index;
 extern uint16_t code_index;

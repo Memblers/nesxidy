@@ -298,7 +298,7 @@ SECTIONS
         bank13: { *(bank13) } >b13 AT>out
 	fill13: { .=0xC000; } >b13 AT>out
 	
-	text14: { .=0x8000; *(text11) } >b14 AT>out
+	text14: { .=0x8000; *(text14) } >b14 AT>out
 	rodata14: { *(rodata14) } >b14 AT>out
         bank14: { *(bank14) } >b14 AT>out
 	fill14: { .=0xC000; } >b14 AT>out

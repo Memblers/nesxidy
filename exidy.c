@@ -5,11 +5,13 @@
 #include "config.h"
 #include "exidy.h"
 #include "dynamos.h"
+#include "bank_map.h"
 #include "mapper30.h"
 #include "core/optimizer.h"
 #ifdef ENABLE_STATIC_ANALYSIS
 #include "core/static_analysis.h"
 #endif
+#include "core/metrics.h"
 
 
 // ******************************************************************************************
@@ -23,17 +25,17 @@
 
 // Side Track
 #ifdef GAME_SIDE_TRACK
-#pragma section bank1
+#pragma section bank23
 	extern const unsigned char rom_sidetrac[];
 	extern const unsigned char chr_sidetrac[];
 	extern const unsigned char spr_sidetrac[];
 #pragma section default
-	const uint8_t palette[] = { 0x0F,0x30,0x30,0x28, 0x0F,0x21,0x11,0x01, 0x0F,0x28,0x18,0x08, 0x0F,0x26,0x16,0x06, 0x0F,0x24,0x14,0x04, 0x0F,0x24,0x14,0x04, 0x0F,0x24,0x14,0x04, 0x0F,0x24,0x14,0x04 };	
+	const uint8_t palette[] = { 0x0F,0x30,0x30,0x28, 0x0F,0x21,0x11,0x01, 0x0F,0x28,0x18,0x08, 0x0F,0x26,0x16,0x06, 0x0F,0x30,0x30,0x28, 0x0F,0x30,0x30,0x28, 0x0F,0x30,0x30,0x28, 0x0F,0x30,0x30,0x28 };	
 #endif
 
 // CPU 6502 Test
 #ifdef GAME_CPU_6502_TEST
-#pragma section bank1
+#pragma section bank23
 extern const unsigned char rom_cpu6502test[];
 #pragma section default
 const uint8_t palette[] = { 0x0F,0x00,0x10,0x20, 0x0F,0x10,0x20,0x30, 0x0F,0x20,0x30,0x00, 0x0F,0x30,0x00,0x10, 0x0F,0x00,0x10,0x20, 0x0F,0x10,0x20,0x30, 0x0F,0x20,0x30,0x00, 0x0F,0x30,0x00,0x10 };
@@ -122,11 +124,11 @@ __zpage uint8_t fps_nmi_start = 0;
 // ******************************************************************************************
 
 // ==========================================================================
-// convert_sprite / convert_sprites — moved to bank 2.
+// convert_sprite / convert_sprites — moved to BANK_INIT_CODE (bank25).
 // Init-only code, saves ~481 bytes of fixed-bank space.
 // Only touches PPU registers ($2006/$2007) and reads source data.
 // ==========================================================================
-#pragma section bank2
+#pragma section bank25
 
 // Convert a single 16x16 Exidy sprite (32 bytes, 1bpp) to 4 NES 8x8 tiles
 // Exidy format: 16 bytes left column (8 pixels wide, 16 rows), 16 bytes right column
@@ -186,7 +188,7 @@ static void convert_sprites_b2(const uint8_t *src)
 void convert_sprite(const uint8_t *src, uint16_t nes_chr_addr)
 {
 	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(2);
+	bankswitch_prg(BANK_INIT_CODE);
 	convert_sprite_b2(src, nes_chr_addr);
 	bankswitch_prg(saved_bank);
 }
@@ -194,7 +196,7 @@ void convert_sprite(const uint8_t *src, uint16_t nes_chr_addr)
 void convert_sprites(const uint8_t *src)
 {
 	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(2);
+	bankswitch_prg(BANK_INIT_CODE);
 	convert_sprites_b2(src);
 	bankswitch_prg(saved_bank);
 }
@@ -239,10 +241,10 @@ int main(void)
 	for (uint8_t i = 0; i < 64; i++) IO8(0x2007) = 0;
 
 #ifdef ENABLE_CHR_ROM
-	// Copy ROM CHR/sprite data from bank1 to WRAM before converting,
-	// because convert_chr/convert_sprites trampolines switch to bank2
-	// which unmaps the bank1 source data.
-	bankswitch_prg(1);
+	// Copy ROM CHR/sprite data from BANK_PLATFORM_ROM to WRAM before converting,
+	// because convert_chr/convert_sprites trampolines switch to BANK_RENDER
+	// which unmaps the BANK_PLATFORM_ROM source data.
+	bankswitch_prg(BANK_PLATFORM_ROM);
 	memcpy(CHARACTER_RAM_BASE, (uint8_t*)chr_sidetrac, 1024);
 	memcpy(CHARACTER_RAM_BASE + 1024, (uint8_t*)spr_sidetrac, 512);
 	bankswitch_prg(0);
@@ -325,6 +327,9 @@ int main(void)
 #ifdef ENABLE_DEBUG_STATS
 				debug_stats_update();
 #endif
+#ifdef ENABLE_METRICS
+				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
+#endif
 				render_video();
 				// Re-read AFTER render_video: if an NMI fired during
 				// render setup, absorb the $26 increment so we don't
@@ -342,6 +347,9 @@ int main(void)
 			interrupt_condition |= FLAG_EXIDY_IRQ;
 #ifdef ENABLE_DEBUG_STATS
 			debug_stats_update();
+#endif
+#ifdef ENABLE_METRICS
+			{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
 			render_video();
 			// Re-read AFTER render_video: if an NMI fired during
@@ -407,7 +415,7 @@ uint8_t read6502(uint16_t address)
 	if (address < 0x4000)
 	{
 		uint8_t saved_bank = mapper_prg_bank;
-		bankswitch_prg(1);
+		bankswitch_prg(BANK_PLATFORM_ROM);
 		uint8_t temp = ROM_NAME[address - ROM_OFFSET];
 		bankswitch_prg(saved_bank);
 		return temp;
@@ -418,7 +426,7 @@ uint8_t read6502(uint16_t address)
 	if (address < 0x5000)
 	{
 		uint8_t saved_bank = mapper_prg_bank;
-		bankswitch_prg(1);
+		bankswitch_prg(BANK_PLATFORM_ROM);
 		uint8_t temp = CHR_NAME[address - CHR_OFFSET];
 		bankswitch_prg(saved_bank);
 		return temp;
@@ -446,7 +454,7 @@ uint8_t read6502(uint16_t address)
 	if (address >= 0xFF00)
 	{
 		uint8_t saved_bank = mapper_prg_bank;
-		bankswitch_prg(1);
+		bankswitch_prg(BANK_PLATFORM_ROM);
 		uint8_t temp = ROM_NAME[(address & 0x3FFF) - ROM_OFFSET];
 		bankswitch_prg(saved_bank);
 		return temp;
@@ -569,10 +577,10 @@ static void ln_fire_and_forget(void)
 }
 
 // ==========================================================================
-// render_video — moved to bank 2 to save fixed-bank space.
+// render_video — moved to BANK_RENDER (bank22 for Exidy) to free bank2 space.
 // Called once per frame; only touches fixed-bank LazyNES calls and WRAM.
 // ==========================================================================
-#pragma section bank2
+#pragma section bank22
 
 void render_video_b2(void)
 {
@@ -706,12 +714,12 @@ void render_video_b2(void)
 
 #pragma section default
 
-// Fixed-bank trampoline: saves current bank, switches to bank 2, calls
+// Fixed-bank trampoline: saves current bank, switches to BANK_RENDER, calls
 // render_video_b2(), then restores the previous bank.
 void render_video(void)
 {
 	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(2);
+	bankswitch_prg(BANK_RENDER);
 	render_video_b2();
 	bankswitch_prg(saved_bank);
 }
@@ -719,10 +727,10 @@ void render_video(void)
 // ******************************************************************************************
 
 // ==========================================================================
-// convert_chr — moved to bank 2 to save ~968 bytes of fixed-bank space.
+// convert_chr — moved to BANK_INIT_CODE (bank25) to free bank22 space.
 // Only called at init and when character RAM is updated.
 // ==========================================================================
-#pragma section bank2
+#pragma section bank25
 
 static void convert_chr_b2(uint8_t *source)
 {
@@ -794,7 +802,7 @@ static void convert_chr_b2(uint8_t *source)
 void convert_chr(uint8_t *source)
 {
 	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(2);
+	bankswitch_prg(BANK_INIT_CODE);
 	convert_chr_b2(source);
 	bankswitch_prg(saved_bank);
 }
@@ -802,11 +810,11 @@ void convert_chr(uint8_t *source)
 
 // ******************************************************************************************
 // ==========================================================================
-// flash_format — moved to bank 2 to save fixed-bank space.
+// flash_format — moved to BANK_INIT_CODE (bank25) to free bank2 space.
 // Startup-only.  Calls flash_sector_erase() which lives in WRAM and
 // manages its own bank switching internally.
 // ==========================================================================
-#pragma section bank2
+#pragma section bank25
 
 #ifdef ENABLE_STATIC_ANALYSIS
 // Extern refs for SA_SECTOR_FIRST/LAST macros (defined in static_analysis.c)
@@ -818,7 +826,14 @@ extern uint8_t sa_subroutine_list[];
 static void flash_format_b2(void)
 {	
 	for (uint8_t bank = 3; bank < 31; bank++)
-	{		
+	{
+		// Skip banks that contain our code/data — erasing them
+		// would destroy the running program and ROM assets.
+		if (bank == BANK_RENDER)       continue;  // render_video_b2, metrics
+		if (bank == BANK_PLATFORM_ROM) continue;  // ROM incbin data
+		if (bank == BANK_SA_CODE)      continue;  // static analysis code
+		if (bank == BANK_INIT_CODE)    continue;  // this function + convert_chr_b2
+
 		for (uint16_t sector = 0x8000; sector < 0xC000; sector += 0x1000)
 		{
 #ifdef ENABLE_STATIC_ANALYSIS
@@ -841,7 +856,7 @@ static void flash_format_b2(void)
 void flash_format(void)
 {
 	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(2);
+	bankswitch_prg(BANK_INIT_CODE);
 	flash_format_b2();
 	bankswitch_prg(saved_bank);
 }

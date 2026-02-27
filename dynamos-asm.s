@@ -1,4 +1,6 @@
+	ifnd GAME_NUMBER
 GAME_NUMBER = 0
+	endif
 
 ;=======================================================	
 ; Kludgeville city limits
@@ -6,7 +8,7 @@ GAME_NUMBER = 0
 	global _ROM_NAME, _ROM_OFFSET
 
 ; - dynamos.h settings MUST match these
-ASM_BLOCK_COUNT = 8
+ASM_BLOCK_COUNT = 1
 ASM_CODE_SIZE = 250
 
 FLASH_CACHE_BLOCKS 		= 960
@@ -33,6 +35,11 @@ _ROM_OFFSET = $1000
 _ROM_NAME = _rom_spectar
 	endif
 
+	if (GAME_NUMBER == 10)
+_ROM_OFFSET = $C000
+_ROM_NAME = _rom_nes_prg
+	endif
+
 ; end of that
 
 ;=======================================================	
@@ -41,8 +48,14 @@ _ROM_NAME = _rom_spectar
 RECOMPILED	=	$80
 INTERPRETED	=	$40
 
+; --- Bank assignments: MUST match bank_map.h ---
 BANK_PC			=	19
 BANK_PC_FLAGS	=	27
+	ifnd PLATFORM_NES
+BANK_RENDER		=	22
+	else
+BANK_RENDER		=	21
+	endif
 
 BLOCK_CONFIG_BASE	=	250
 
@@ -68,7 +81,7 @@ _SCREEN_RAM_BASE: reserve $400
 	
 
 ;=======================================================	
-	section "bank1"
+	section "bank23"
 	global _rom_sidetrac, _chr_sidetrac
 ;-------------------------------------------------------
 	
@@ -89,7 +102,7 @@ _spr_sidetrac:
 	endif
 	
 ;=======================================================	
-	section "bank1"
+	section "bank23"
 	global _rom_targ
 ;-------------------------------------------------------
 
@@ -104,7 +117,7 @@ _rom_targ:
 	endif
 	
 ;=======================================================	
-	section "bank1"
+	section "bank23"
 	global _rom_targtest
 ;-------------------------------------------------------
 	if (GAME_NUMBER == 2)
@@ -118,7 +131,7 @@ _rom_targtest:
 	endif
 
 ;=======================================================	
-	section "bank1"
+	section "bank23"
 	global _rom_spectar
 ;-------------------------------------------------------
 	if (GAME_NUMBER == 3)
@@ -134,7 +147,7 @@ _rom_spectar:
 
 
 ;=======================================================
-	section "bank1"
+	section "bank23"
 	global _rom_cpu6502test
 ;-------------------------------------------------------
 	if (GAME_NUMBER == 4)
@@ -143,7 +156,23 @@ _rom_cpu6502test:
 	incbin "cpu_6502_test.bin"
 	endif
 
-endif
+;=======================================================
+; NES ROM data — bank20 = PRG, bank23 = CHR
+;=======================================================
+
+	if (GAME_NUMBER == 10)
+	section "bank20"
+	global _rom_nes_prg
+	align 8
+_rom_nes_prg:
+	incbin "roms\nes\donkeykong.prg"
+
+	section "bank23"
+	global _chr_nes
+	align 8
+_chr_nes:
+	incbin "roms\nes\donkeykong.chr"
+	endif
 
 
 ;=======================================================	
@@ -1374,20 +1403,48 @@ _flash_cache_code:	reserve 16384
 	section "bank19"	; banks 19-26, 8 banks
 	global _flash_cache_pc, _flash_cache_pc_flags
 ;-------------------------------------------------------	
-	align 14
+	ifnd PLATFORM_NES
+	align 14		; PC table: $0000-$1FFF (Exidy has no code here)
+	endif
+	; bank19 on NES = SA/init code, no align — section used by C code
 _flash_cache_pc:	
 	section "bank20"
-	align 14
+	ifnd PLATFORM_NES
+	align 14		; PC table: Exidy ROM $2000-$3FFF
+	endif
+	; bank20 on NES = NES PRG-ROM data, no align — section used by asm incbin
+	ifdef PLATFORM_NES
+	; NES: skip bank21 entirely — used for BANK_RENDER C code.
+	; If we enter section "bank21" here, the linker overlaps this
+	; reserve with the C-emitted render_video_b2 / metrics code.
+	; PC table for $4000-$5FFF is dead on NES anyway (I/O space).
+	else
 	section "bank21"
-	align 14
+	align 14		; PC table: $4000-$5FFF (dead on Exidy but allocated)
+	endif
 	section "bank22"
-	align 14	
+	ifdef PLATFORM_NES
+	align 14		; PC table: NES PRG-RAM $6000-$7FFF
+	endif
+	; bank22 on Exidy = BANK_RENDER code, no align
 	section "bank23"
-	align 14
+	ifdef PLATFORM_NES
+	; NES: bank23 repurposed for CHR data, no align
+	else
+	; Exidy: bank23 repurposed for platform ROM data, no align
+	endif
 	section "bank24"
-	align 14
+	ifdef PLATFORM_NES
+	align 14		; NES: PC table for $A000-$BFFF (PRG-ROM mirror)
+	else
+	; Exidy: bank24 repurposed for SA code, no align
+	endif
 	section "bank25"
-	align 14
+	ifdef PLATFORM_NES
+	align 14		; NES: PC table for $C000-$DFFF (PRG-ROM)
+	else
+	; Exidy: bank25 repurposed for init code, no align
+	endif
 	section "bank26"
 	align 14
 	section "bank27"

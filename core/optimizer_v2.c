@@ -38,7 +38,7 @@ extern void backup_copy_to_flash(uint8_t slot, uint16_t flash_addr, uint8_t flas
 #pragma section bank1
 
 // External data
-extern uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
+extern uint8_t cache_code[BLOCK_COUNT][CACHE_CODE_BUF_SIZE];
 extern uint8_t cache_flag[BLOCK_COUNT];
 extern uint8_t cache_index;
 extern uint16_t code_index;
@@ -346,7 +346,7 @@ static void update_all_entries(void) {
 extern uint8_t opt_tramp_recompile(void);
 
 // Cache buffers from dynamos.c
-extern uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
+extern uint8_t cache_code[BLOCK_COUNT][CACHE_CODE_BUF_SIZE];
 
 // Register variables
 extern uint8_t a;

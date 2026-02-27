@@ -25,7 +25,7 @@
 
 extern void bankswitch_prg(__reg("a") uint8_t bank);
 extern uint8_t flash_block_flags[];
-extern const uint8_t flash_cache_pc_flags[];
+// flash_cache_pc_flags is a macro in core/cache.h
 extern uint8_t read6502(uint16_t address);
 
 // Trampoline functions (in opt_trampoline.s, fixed bank)

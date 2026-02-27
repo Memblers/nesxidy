@@ -4,6 +4,11 @@
 
 #include "config.h"
 
+// Redirect to NES header when building for NES platform.
+// All shared code includes "exidy.h" — this avoids changing those includes.
+#ifdef PLATFORM_NES
+#include "nes.h"
+#else
 // ******************************************************************************************
 
 #ifndef TRACK_TICKS
@@ -105,5 +110,6 @@ uint8_t cache_check_signature(void);
 void flash_init_persist(void);
 #endif
 
-#endif
+#endif  // PLATFORM_NES else
+#endif  // EXIDY_H
 #pragma section default

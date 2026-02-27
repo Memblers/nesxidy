@@ -82,7 +82,7 @@ extern uint32_t branch_forward;
 
 // Cache buffers
 extern uint8_t l1_cache_code[CACHE_L1_CODE_SIZE];
-extern uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
+extern uint8_t cache_code[BLOCK_COUNT][CACHE_CODE_BUF_SIZE];
 extern uint8_t cache_flag[BLOCK_COUNT];
 extern uint8_t cache_entry_pc_lo[BLOCK_COUNT];
 extern uint8_t cache_entry_pc_hi[BLOCK_COUNT];
@@ -108,9 +108,14 @@ extern uint8_t pc_jump_flag_bank;
 extern uint16_t flash_code_address;
 extern uint8_t flash_code_bank;
 
-// Flash cache lookup tables (in flash memory)
-extern uint8_t flash_cache_pc[];
-extern const uint8_t flash_cache_pc_flags[];
+// Flash cache lookup tables (in flash memory, bankswitched to $8000-$BFFF).
+// Macros: base is always FLASH_BANK_BASE regardless of assembly label position.
+// Canonical definition in dynamos.h; repeated here for files that include
+// cache.h without dynamos.h.
+#ifndef flash_cache_pc
+#define flash_cache_pc       ((uint8_t *)FLASH_BANK_BASE)
+#define flash_cache_pc_flags ((const uint8_t *)FLASH_BANK_BASE)
+#endif
 extern uint8_t flash_block_flags[];
 
 // Sector-based cache management

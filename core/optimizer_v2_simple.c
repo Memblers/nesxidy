@@ -36,8 +36,7 @@ extern void bankswitch_prg(__reg("a") uint8_t bank);
 extern void flash_byte_program(uint16_t addr, uint8_t bank, uint8_t data);
 extern uint8_t mapper_prg_bank;
 extern uint8_t flash_block_flags[];
-extern uint8_t flash_cache_pc[];
-extern const uint8_t flash_cache_pc_flags[];
+// flash_cache_pc / flash_cache_pc_flags are macros in core/cache.h
 extern uint16_t sector_free_offset[];
 
 // WRAM helper: reads one byte from an arbitrary bank and restores the
@@ -116,7 +115,7 @@ void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operan
 #pragma section default
 
 void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t native_bank) {
-    (void)block_pc; (void)native_addr; (void)native_bank;
+    if (block_pc | native_addr | native_bank) {}  // suppress unused-parameter warning
 }
 
 // Fixed-bank trampoline: bank2 code can safely call this to reach

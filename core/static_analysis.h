@@ -117,7 +117,10 @@ void sa_record_indirect_target(uint16_t target_pc, uint8_t type);
 
 // Check if a JSR target is stack-clean.  Returns SA_SUB_CLEAN,
 // SA_SUB_DIRTY, or SA_SUB_EMPTY (target not found in subroutine table).
-// Lives in the fixed bank — safe to call from recompile_opcode in any bank.
+// Lives in bank2 — called from recompile_opcode_b2 (also bank2).
+// Declaration must match the definition's section to avoid vbcc warning 371.
+#pragma section bank2
 uint8_t sa_subroutine_lookup(uint16_t target_pc);
+#pragma section default
 
 #endif // STATIC_ANALYSIS_H

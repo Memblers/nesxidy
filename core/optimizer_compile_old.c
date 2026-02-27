@@ -20,7 +20,7 @@ extern uint16_t flash_code_address;
 extern uint8_t flash_code_bank;
 extern uint16_t code_index;
 extern uint8_t flash_block_flags[];
-extern uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
+extern uint8_t cache_code[BLOCK_COUNT][CACHE_CODE_BUF_SIZE];
 extern uint8_t cache_flag[BLOCK_COUNT];
 extern uint8_t cache_index;
 extern uint16_t pc;

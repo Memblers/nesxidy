@@ -5,6 +5,15 @@
 
 //#define DEBUG_OUT 1
 
+// Collect and report compilation metrics (BFS discovery, optimizer stats, cache behavior)
+// Minimal overhead when not printing — metrics_*() calls are very fast
+// Enable ENABLE_METRICS_DISPLAY to print stats to WRAM debug area every N frames
+#define ENABLE_METRICS
+
+// Display metrics on-screen (writes to WRAM $7E00 area every frame)
+// Requires ENABLE_METRICS
+//#define ENABLE_METRICS_DISPLAY
+
 // Write JIT stats (hit/miss/branch counters, opt2 stats, block count)
 // to WRAM $7E00 every frame.  Costs ~840 NES cycles/frame (~2.8%)
 // due to 6 peek_bank_byte calls (12 bank switches) for opt2 stats.
@@ -38,14 +47,14 @@
 
 // Peephole PLP/PHP elimination - elide redundant PLP/PHP pairs between
 // consecutive PHA/PLA templates.  Saves 2 bytes + 2 cycles per pair.
-#define ENABLE_PEEPHOLE
+//#define ENABLE_PEEPHOLE
 // Sub-option: defer trailing PLP (trim).  Without this, the peephole
 // codepath is compiled but never activates — tests for vbcc miscompilation.
-#define ENABLE_PEEPHOLE_TRIM
+//#define ENABLE_PEEPHOLE_TRIM
 // Sub-option: skip leading PHP when flags already saved (full optimisation).
 // Requires TRIM.  Without this, trim defers PLP but every PHP is still
 // emitted — tests the defer/flush machinery in isolation.
-#define ENABLE_PEEPHOLE_SKIP
+//#define ENABLE_PEEPHOLE_SKIP
 
 // Patchable epilogue - block chaining via patchable epilogues (requires V2)
 #ifdef ENABLE_OPTIMIZER_V2
@@ -71,17 +80,21 @@
 // When disabled (default), zpx/zpy are compiled as absolute indexed (absx/absy),
 // which is faster but won't wrap at the zero page boundary.
 // Most games don't rely on ZP index wrapping, so leaving this off is usually safe.
-#define ENABLE_ZP_INDEX_WRAP
+//#define ENABLE_ZP_INDEX_WRAP
 
 // Optimizer features
 #define OPT_BLOCK_METADATA   0    // Store metadata after epilogue (required for copy-based optimization)
 #define OPT_TRACK_CYCLES     0    // Track emulated cycles per block (requires OPT_BLOCK_METADATA)
 #define OPT_COPY_BLOCKS      0    // Copy blocks instead of recompile during optimization
 
+// Game selection — only ONE game should be active.
+// Exidy games: define here.  NES games: pass -DGAME_DONKEY_KONG on command line.
+#ifndef PLATFORM_NES
 #define GAME_SIDE_TRACK
 //#define GAME_TARG
 //#define GAME_TARG_TEST_ROM
 //#define GAME_SPECTAR
+#endif
 
 // --- Static analysis pass ---
 // Run a one-time BFS walk of the guest ROM at power-on to discover all
@@ -144,5 +157,12 @@
 #ifdef GAME_SPECTAR
 #define ROM_ADDR_MIN  0x1000
 #define ROM_ADDR_MAX  0x3FFF
+#endif
+
+// --- NES games ---
+// Donkey Kong (NROM-128: 16KB PRG mirrored, 8KB CHR)
+#ifdef GAME_DONKEY_KONG
+#define ROM_ADDR_MIN  0xC000
+#define ROM_ADDR_MAX  0xFFFF
 #endif
 

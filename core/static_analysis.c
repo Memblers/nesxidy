@@ -21,6 +21,7 @@
 #include "../exidy.h"
 #include "../mapper30.h"
 #include "static_analysis.h"
+#include "metrics.h"
 
 // -------------------------------------------------------------------------
 // External references
@@ -47,7 +48,7 @@ __zpage extern uint16_t pc;
 __zpage extern uint8_t code_index;
 __zpage extern uint8_t cache_index;
 extern uint8_t cache_flag[];
-extern uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
+extern uint8_t cache_code[BLOCK_COUNT][CACHE_CODE_BUF_SIZE];
 extern uint8_t flash_sector_alloc(uint8_t total_size);
 extern void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);
 extern void setup_flash_pc_tables(uint16_t emulated_pc);
@@ -60,8 +61,7 @@ extern uint16_t sector_free_offset[];
 extern uint8_t next_free_sector;
 
 extern uint8_t flash_block_flags[];
-extern uint8_t flash_cache_pc[];
-extern const uint8_t flash_cache_pc_flags[];
+// flash_cache_pc / flash_cache_pc_flags are macros in core/cache.h
 __zpage extern uint8_t a;
 extern void flash_dispatch_return(void);
 extern void cross_bank_dispatch(void);
@@ -73,6 +73,13 @@ extern uint8_t block_ci_map[];
 __zpage extern uint8_t block_has_jsr;
 __zpage extern uint8_t cache_entry_pc_lo[];
 __zpage extern uint8_t cache_entry_pc_hi[];
+
+// Peephole state (from dynamos.c)
+#ifdef ENABLE_PEEPHOLE
+extern volatile uint8_t block_flags_saved;
+extern uint8_t peephole_skipped;
+#endif
+extern uint8_t recompile_instr_start;
 
 #ifdef ENABLE_OPTIMIZER_V2
 #include "optimizer_v2_simple.h"
@@ -184,14 +191,19 @@ static uint8_t q_count;
 // Bank 2 section — BFS walker, header helpers, queue, opcode helpers
 // =========================================================================
 
-// Forward declaration: sa_record_subroutine is in the fixed bank section
-// but called from sa_walk_b2 (bank2).  Bank2 at $8000 can call fixed at $C000+.
+#ifdef PLATFORM_NES
+#pragma section bank19
+#else
+#pragma section bank24
+#endif
+
+// Forward declaration: sa_record_subroutine is in the bank24 section below.
+// Called from sa_walk_b2 (same bank, direct call).
+// Must be declared AFTER the #pragma so vbcc binds it to the correct section.
 void sa_record_subroutine(uint16_t target);
 
-#pragma section bank2
-
 // -------------------------------------------------------------------------
-// Opcode length helper (bank2) — only called from sa_walk_b2.
+// Opcode length helper (bank24) — only called from sa_walk_b2.
 // -------------------------------------------------------------------------
 
 static uint8_t opcode_length(uint8_t opcode)
@@ -371,6 +383,8 @@ static void sa_walk_b2(void)
 
     q_init();
 
+    metrics_bfs_start();
+
     // Seed from reset, NMI, IRQ vectors
     uint16_t reset_pc = read6502(0xFFFC) | ((uint16_t)read6502(0xFFFD) << 8);
     uint16_t nmi_pc   = read6502(0xFFFA) | ((uint16_t)read6502(0xFFFB) << 8);
@@ -402,6 +416,7 @@ static void sa_walk_b2(void)
     while (!q_empty())
     {
         uint16_t cur_pc = q_pop();
+        metrics_bfs_visit_address();
 
 #ifdef ENABLE_COMPILE_PPU_EFFECT
         // Toggle blue emphasis (bit 7) per BFS node
@@ -435,6 +450,7 @@ static void sa_walk_b2(void)
                     uint16_t target = read6502(cur_pc + 1)
                                     | ((uint16_t)read6502(cur_pc + 2) << 8);
                     sa_enqueue_if_valid(target);
+                    metrics_bfs_entry_point();
                     goto next_path;     // unconditional — stop linear walk
                 }
 
@@ -452,6 +468,7 @@ static void sa_walk_b2(void)
                                     | ((uint16_t)read6502(cur_pc + 2) << 8);
                     sa_enqueue_if_valid(target);
                     sa_record_subroutine(target);
+                    metrics_bfs_entry_point();
                     // Continue linear walk after JSR (return address = cur_pc+3)
                     cur_pc += 3;
                     if (cur_pc <= ROM_ADDR_MAX)
@@ -471,6 +488,7 @@ static void sa_walk_b2(void)
                     int8_t offset = (int8_t)read6502(cur_pc + 1);
                     uint16_t target = cur_pc + 2 + offset;
                     sa_enqueue_if_valid(target);
+                    metrics_bfs_entry_point();
                     // Fall through to the not-taken path
                     cur_pc += 2;
                     if (cur_pc <= ROM_ADDR_MAX)
@@ -492,6 +510,8 @@ static void sa_walk_b2(void)
 next_path:
         ;   // pop next BFS entry
     }
+
+    metrics_bfs_end();
 }
 
 // -------------------------------------------------------------------------
@@ -514,7 +534,8 @@ static void sa_compile_b2(void)
 
     uint16_t addr = pc;
 
-    while (addr <= ROM_ADDR_MAX)
+    // Note: use != instead of <= to handle ROM_ADDR_MAX == 0xFFFF
+    while (addr != (uint16_t)(ROM_ADDR_MAX + 1u))
     {
         // Check if this address is known code
         if (sa_bitmap_is_unknown(addr))
@@ -545,11 +566,15 @@ static void sa_compile_b2(void)
 
 #endif // ENABLE_STATIC_COMPILE
 
-#pragma section default
+#ifdef PLATFORM_NES
+#pragma section bank19
+#else
+#pragma section bank24
+#endif
 
 // -------------------------------------------------------------------------
-// Compile a single block from the fixed bank.
-// Called repeatedly by the sa_run trampoline during batch compilation.
+// Compile a single block — moved to BANK_SA_CODE (compile-time only, not perf).
+// Called repeatedly by sa_run during batch compilation.
 // Returns 1 if a block was compiled, 0 if nothing to do.
 // -------------------------------------------------------------------------
 
@@ -620,6 +645,9 @@ static uint8_t sa_compile_one_block(void)
     code_index = 0;
     cache_flag[0] = 0;
     block_has_jsr = 0;  // reset for new block
+#ifdef ENABLE_PEEPHOLE
+    block_flags_saved = 0;
+#endif
 
     // Set entry PC so try_intra_block_branch can find block start
     cache_entry_pc_lo[0] = (uint8_t)entry_pc;
@@ -637,15 +665,26 @@ static uint8_t sa_compile_one_block(void)
         uint16_t pc_old = pc;
         uint8_t code_index_old = code_index;
 
-        // Record this instruction's code_index for intra-block branch lookup.
-        {
-            uint8_t ci_slot = (uint8_t)(pc_old - entry_pc) & 0x3F;
-            block_ci_map[ci_slot] = code_index_old + 1;
-        }
-
+#ifdef ENABLE_PEEPHOLE
+        peephole_skipped = 0;
+#endif
         recompile_opcode();
 
         uint8_t instr_len = code_index - code_index_old;
+
+        // Use recompile_instr_start (set inside recompile_opcode_b2 after
+        // any deferred PLP flush) so dispatch/branch targets skip the PLP.
+#ifdef ENABLE_PEEPHOLE
+        uint8_t native_offset = recompile_instr_start;
+#else
+        uint8_t native_offset = code_index_old;
+#endif
+
+        // Record this instruction's code_index for intra-block branch lookup.
+        {
+            uint8_t ci_slot = (uint8_t)(pc_old - entry_pc) & 0x3F;
+            block_ci_map[ci_slot] = native_offset + 1;
+        }
 
         setup_flash_pc_tables(pc_old);
 
@@ -675,17 +714,23 @@ static uint8_t sa_compile_one_block(void)
 
         if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
         {
-            flash_cache_pc_update(code_index_old, INTERPRETED);
+            flash_cache_pc_update(native_offset, INTERPRETED);
         }
+#ifdef ENABLE_PEEPHOLE
+        else if (peephole_skipped)
+        {
+            flash_cache_pc_update(native_offset, INTERPRETED);
+        }
+#endif
         else if (instr_len || pc != pc_old)
         {
-            flash_cache_pc_update(code_index_old, RECOMPILED);
+            flash_cache_pc_update(native_offset, RECOMPILED);
 
 #ifdef ENABLE_OPTIMIZER_V2
             if (sa_compile_pass == 2)
             {
                 opt2_notify_block_compiled(pc_old,
-                    flash_code_address + BLOCK_HEADER_SIZE + code_index_old,
+                    flash_code_address + BLOCK_HEADER_SIZE + native_offset,
                     flash_code_bank);
             }
 #endif
@@ -705,6 +750,15 @@ static uint8_t sa_compile_one_block(void)
 
     {
         uint16_t exit_pc = pc;
+
+#ifdef ENABLE_PEEPHOLE
+        // Flush deferred PLP from peephole before epilogue
+        if (block_flags_saved) {
+            *(volatile uint8_t *)&cache_code[0][code_index] = 0x28;  // PLP
+            code_index++;
+            block_flags_saved = 0;
+        }
+#endif
         uint8_t epilogue_start = code_index;
 
 #ifdef ENABLE_PATCHABLE_EPILOGUE
@@ -791,12 +845,18 @@ static uint8_t sa_compile_one_block(void)
 
 #endif // ENABLE_STATIC_COMPILE
 
-#pragma section default
+#ifdef PLATFORM_NES
+#pragma section bank19
+#else
+#pragma section bank24
+#endif
 
 // -------------------------------------------------------------------------
-// Subroutine table helpers (fixed bank) — record JSR targets and analyze
-// stack safety.  These live in the fixed bank ($C000+) and are called
-// from bank2 code (BFS walker) and from sa_run (fixed bank).
+// Subroutine table helpers — moved to BANK_SA_CODE (compile-time only).
+// sa_record_subroutine is called from sa_walk_b2 (same bank, direct call).
+// sa_subroutine_lookup is kept in bank2 (called from recompile_opcode_b2).
+// sa_run has a fixed-bank trampoline below.
+// sa_record_indirect_target has a fixed-bank trampoline below.
 // -------------------------------------------------------------------------
 
 // Opcode length helper (fixed bank copy for stack-safety analysis)
@@ -986,7 +1046,7 @@ static void sa_analyze_all_subroutines(void)
 // templates that opt2 patches post-compile.
 // -------------------------------------------------------------------------
 
-void sa_run(void)
+static void sa_run_b2(void)
 {
     // Save pc — reset6502() has already set it to the entry point.
     // The batch compile pass uses pc as scratch, so we must restore it.
@@ -997,15 +1057,12 @@ void sa_run(void)
     compile_ppu_active = 1;
 #endif
 
-    // Run BFS walker (bank 2) — includes header check and sector erase
-    uint8_t saved_bank = mapper_prg_bank;
-    bankswitch_prg(2);
+    // Run BFS walker — sa_walk_b2 is in bank2 (same bank, direct call)
     sa_walk_b2();
-    bankswitch_prg(saved_bank);
 
     // Analyze stack safety for all discovered subroutines.
-    // Runs from fixed bank; uses peek_bank_byte/flash_byte_program
-    // for flash access and read6502 for ROM reads.
+    // sa_analyze_all_subroutines is in bank2 now (direct call).
+    // Uses peek_bank_byte/flash_byte_program (WRAM) and read6502 (fixed bank).
     sa_analyze_all_subroutines();
 
 #ifdef ENABLE_STATIC_COMPILE
@@ -1019,7 +1076,8 @@ void sa_run(void)
     //   iterates this list (not the bitmap) to find block entry points and
     //   uses lookup_entry_list() for forward branch resolution.
     //
-    //   Between passes, ALL code sectors (4-17), PC address sectors (19-26),
+    //   Between passes, ALL code sectors (4-17), PC address sectors (19-26,
+    //   except BANK_RENDER and BANK_PLATFORM_ROM),
     //   and PC flag sectors (27-30) are erased.  Only the entry list (bank 18)
     //   and the SA metadata (bank 3) survive.  Pass 2 rewrites everything
     //   fresh, with correct code_index values for the final native layout.
@@ -1055,13 +1113,20 @@ void sa_run(void)
     //   3. Records each block's entry_pc, exit_pc, native_addr, and bank
     //      in the entry list for pass 2 to iterate.
     // =====================================================================
+    metrics_compile_start();
     sa_compile_pass = 0;
     sa_blocks_total = 0;
 
-    for (uint16_t scan_cursor = ROM_ADDR_MIN; scan_cursor <= ROM_ADDR_MAX; scan_cursor++)
+    // Note: use != instead of <= to handle ROM_ADDR_MAX == 0xFFFF
+    // (uint16_t can never exceed 0xFFFF, so <= would loop forever).
+    for (uint16_t scan_cursor = ROM_ADDR_MIN;
+         scan_cursor != (uint16_t)(ROM_ADDR_MAX + 1u);
+         scan_cursor++)
     {
         if (sa_bitmap_is_unknown(scan_cursor))
             continue;
+
+        metrics_bitmap_entry();
 
         // Check PC flags: already handled?  The compile loop in
         // sa_compile_one_block sets flags for every instruction within
@@ -1070,7 +1135,10 @@ void sa_run(void)
             (scan_cursor >> 14) + BANK_PC_FLAGS,
             (uint16_t)&flash_cache_pc_flags[scan_cursor & FLASH_BANK_MASK]);
         if (flag != 0xFF)
+        {
+            metrics_block_skipped();
             continue;
+        }
 
         // Compile block to RAM (no flash writes when sa_compile_pass==0).
         // This allocates a max-size flash slot and updates PC tables for
@@ -1103,6 +1171,11 @@ void sa_run(void)
             flash_byte_program(addr + 6, BANK_ENTRY_LIST, flash_code_bank);
             flash_byte_program(addr + 7, BANK_ENTRY_LIST, code_index);  // code_len
             entry_list_offset += 8;
+            metrics_block_compiled(code_index);
+        }
+        else
+        {
+            metrics_block_failed();
         }
 
         sa_blocks_total++;
@@ -1113,10 +1186,11 @@ void sa_run(void)
     //
     // Code banks 4-17 (14 banks, 56 sectors): erased so pass 2 can
     //   rewrite code with correct branch encodings.
-    // PC address banks 19-26 (8 banks, 32 sectors): erased because
+    // PC address banks 19-26 (up to 8 banks): erased because
     //   mid-block code_index values shift when pass 2 uses shorter branches.
     //   flash_cache_pc_update's AND-corruption guard requires erased (0xFF)
     //   flag bytes before writing.
+    //   SKIPPED: BANK_RENDER, BANK_PLATFORM_ROM, BANK_SA_CODE, BANK_INIT_CODE (and NES PRG banks).
     // PC flag banks 27-30 (4 banks, 16 sectors): erased for the same
     //   reason — pass 2 rewrites all PC flags fresh.
     //
@@ -1130,9 +1204,16 @@ void sa_run(void)
             flash_sector_erase(sector, bank);
     }
 
-    // Erase PC address sectors (banks 19-26)
+    // Erase PC address sectors (banks 19-26), skip repurposed banks
     for (uint8_t bank = BANK_PC; bank < BANK_PC + 8; bank++)
     {
+        if (bank == BANK_RENDER) continue;        // render/init code lives here
+        if (bank == BANK_PLATFORM_ROM) continue;  // guest ROM data lives here
+        if (bank == BANK_SA_CODE) continue;       // SA walker/compiler code
+        if (bank == BANK_INIT_CODE) continue;     // init-only code + metrics
+#ifdef PLATFORM_NES
+        if (bank == BANK_NES_PRG_LO) continue;   // NES PRG-ROM low bank
+#endif
         for (uint16_t sector = FLASH_BANK_BASE; sector < FLASH_BANK_BASE + FLASH_BANK_SIZE; sector += FLASH_ERASE_SECTOR_SIZE)
             flash_sector_erase(sector, bank);
     }
@@ -1224,7 +1305,9 @@ void sa_run(void)
     // dispatcher will return 2 (interpret) for $80 flags.
     // =====================================================================
     {
-        for (uint16_t scan_addr = ROM_ADDR_MIN; scan_addr <= ROM_ADDR_MAX; scan_addr++)
+        for (uint16_t scan_addr = ROM_ADDR_MIN;
+             scan_addr != (uint16_t)(ROM_ADDR_MAX + 1u);
+             scan_addr++)
         {
             if (sa_bitmap_is_unknown(scan_addr))
                 continue;
@@ -1301,6 +1384,11 @@ void sa_run(void)
     *(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame restore
 #endif
 
+    // Dump SA metrics — metrics_compile_end() is a WRAM macro (safe here).
+    // metrics_dump_sa_b2() lives in BANK_RENDER — called from the
+    // fixed-bank sa_run() trampoline after we return.
+    metrics_compile_end();
+
     // Restore pc — reset6502() set it to the game's entry point before
     // sa_run() was called.  The batch compile pass clobbered it.
     pc = saved_pc;
@@ -1308,10 +1396,10 @@ void sa_run(void)
 
 // -------------------------------------------------------------------------
 // Subroutine lookup — check if a JSR target is stack-clean.
-// Lives in the fixed bank so it can be called from recompile_opcode
-// in any bank context.  Returns SA_SUB_CLEAN, SA_SUB_DIRTY, or
-// SA_SUB_EMPTY (not found).
+// Lives in bank2 so recompile_opcode_b2 (also bank2) can call it directly.
+// Returns SA_SUB_CLEAN, SA_SUB_DIRTY, or SA_SUB_EMPTY (not found).
 // -------------------------------------------------------------------------
+#pragma section bank2
 
 uint8_t sa_subroutine_lookup(uint16_t target_pc)
 {
@@ -1343,11 +1431,15 @@ uint8_t sa_subroutine_lookup(uint16_t target_pc)
 
 // -------------------------------------------------------------------------
 // Runtime feedback: record an indirect-jump target discovered during
-// execution.  Called from the interpreter.  Lives in the fixed bank so
-// it can be called from any context.
+// execution.  Called from the interpreter via fixed-bank trampoline.
 // -------------------------------------------------------------------------
+#ifdef PLATFORM_NES
+#pragma section bank19
+#else
+#pragma section bank24
+#endif
 
-void sa_record_indirect_target(uint16_t target_pc, uint8_t type)
+static void sa_record_indirect_target_b2(uint16_t target_pc, uint8_t type)
 {
     // Quick check: is this address already in the bitmap?
     // If the walker already found it, no need to record.
@@ -1372,6 +1464,31 @@ void sa_record_indirect_target(uint16_t target_pc, uint8_t type)
 
     // Also mark it in the bitmap for the walker
     sa_bitmap_mark(target_pc);
+}
+
+// -------------------------------------------------------------------------
+// Fixed-bank trampolines for functions moved to bank24 (BANK_SA_CODE)
+// -------------------------------------------------------------------------
+#pragma section default
+
+void sa_run(void)
+{
+    uint8_t saved_bank = mapper_prg_bank;
+    bankswitch_prg(BANK_SA_CODE);
+    sa_run_b2();
+#ifdef ENABLE_METRICS
+    bankswitch_prg(BANK_RENDER);
+    metrics_dump_sa_b2();
+#endif
+    bankswitch_prg(saved_bank);
+}
+
+void sa_record_indirect_target(uint16_t target_pc, uint8_t type)
+{
+    uint8_t saved_bank = mapper_prg_bank;
+    bankswitch_prg(BANK_SA_CODE);
+    sa_record_indirect_target_b2(target_pc, type);
+    bankswitch_prg(saved_bank);
 }
 
 #endif // ENABLE_STATIC_ANALYSIS

@@ -135,6 +135,16 @@ __zpage uint8_t compile_ppu_active = 0;  // 1 = PPU effect enabled (SA boot only
 __zpage uint16_t flash_cache_index;
 uint8_t flash_enabled = 0;
 
+#ifdef ENABLE_IDLE_DETECT
+// Idle loop detection state (see config.h ENABLE_IDLE_DETECT).
+// idle_anchor = PC of the detected backward-branch target.
+// idle_count  = consecutive hits before fast-path activates.
+// idle_prev_pc = previous guest PC (for backward-branch detection).
+__zpage uint16_t idle_anchor  = 0;
+__zpage uint16_t idle_prev_pc = 0;
+__zpage uint8_t  idle_count   = 0;
+#endif
+
 // Static compilation pass indicator:
 //   0 = dynamic (runtime) or pass-1 measure — forward branches use 21-byte patchable template
 //   2 = pass-2 emit — forward branches use lookup_entry_list() for direct branches
@@ -346,11 +356,53 @@ void run_6502(void)
 		}
 	}
 	
+#ifdef ENABLE_BATCH_DISPATCH
+	// Batch dispatch: loop here until an exit condition is met.
+	// Saves one __rsave12/__rload12 pair (~260 NES cycles) per dispatch
+	// by amortising the vbcc callee-save cost across all dispatches
+	// within a single VBlank period.
+	uint8_t batch_nmi = *(volatile uint8_t*)0x26;
+	uint8_t result;
+	do {
+	result = dispatch_on_pc();
+#else
 	uint8_t result = dispatch_on_pc();
+#endif
 	switch (result)
 	{
 		case 2:  // interpret
 		{
+#ifdef ENABLE_IDLE_DETECT
+			// Idle loop detection — ONLY in the interpret path.
+			// When a non-JIT'd PC keeps looping back to the same address,
+			// batch-interpret a full iteration instead of paying the
+			// dispatch round-trip each time.  JIT'd loops (case 0) are
+			// already fast and must NOT be caught here.
+			if (pc == idle_anchor) {
+				if (++idle_count >= IDLE_DETECT_THRESHOLD) {
+					cache_interpret++;
+					bankswitch_prg(0);
+					uint16_t anchor = pc;
+					uint8_t steps = 8;
+					do {
+						interpret_6502();
+					} while (pc != anchor && --steps);
+					if (pc != anchor) {
+						idle_count = 0;
+						idle_anchor = 0;
+					}
+#ifdef TRACK_TICKS
+					clockticks6502 += DISPATCH_OVERHEAD;
+#endif
+					idle_prev_pc = pc;
+					return;
+				}
+			} else if (pc < idle_prev_pc) {
+				idle_anchor = pc;
+				idle_count = 1;
+			}
+			idle_prev_pc = pc;
+#endif
 			cache_interpret++;
 			bankswitch_prg(0);
 			interpret_6502();
@@ -367,11 +419,20 @@ void run_6502(void)
 			// round-trip cost but only counts a few guest cycles.
 			clockticks6502 += DISPATCH_OVERHEAD;
 #endif
+#ifdef ENABLE_BATCH_DISPATCH
+			break;  // continue batch loop
+#else
 			return;
+#endif
 		}
 		case 0:  // executed from flash
 		{
 			cache_hits++;
+#ifdef ENABLE_IDLE_DETECT
+			// JIT block ran successfully — this PC is compiled.
+			// Reset idle state so we never intercept compiled loops.
+			idle_count = 0;
+#endif
 #ifdef TRACK_TICKS
 			// JIT blocks already have accurate cycle counts in the header,
 			// but the dispatch round-trip overhead (~200 NES cycles) isn't
@@ -380,11 +441,35 @@ void run_6502(void)
 			// DEX;BNE = 4 guest cycles + 80 overhead = 84 per dispatch).
 			clockticks6502 += DISPATCH_OVERHEAD;
 #endif
+#ifdef ENABLE_BATCH_DISPATCH
+			break;  // continue batch loop
+#else
 			return;
+#endif
 		}
 		case 1:  // recompile needed
+#ifdef ENABLE_BATCH_DISPATCH
+			goto batch_exit;  // must return to compile
+#else
 			break;
+#endif
 	}
+#ifdef ENABLE_BATCH_DISPATCH
+	// Batch exit conditions — check after each dispatch:
+	// 1. VBlank occurred — must return for NMI processing
+	if (*(volatile uint8_t*)0x26 != batch_nmi) break;
+	// 2. Known idle loop — stop dispatching, let main loop poll VBlank
+#ifdef GAME_IDLE_PC
+	if (pc == GAME_IDLE_PC) break;
+#endif
+	// 3. RTI completed — NMI handler finished, return for state update
+#ifdef PLATFORM_NES
+	if (nmi_active && sp == nmi_sp_guard) break;
+#endif
+	} while (1);
+	return;  // VBlank / idle / RTI exit — return to main loop
+batch_exit:  // case 1 (compile needed) jumps here
+#endif
 	
 	// Guard: don't compile addresses outside the ROM range.
 	// Transient stack corruption (or IO-space PCs) can produce

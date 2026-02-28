@@ -66,6 +66,14 @@
 // Signature includes ROM hash to invalidate when game ROM changes.
 //#define ENABLE_CACHE_PERSIST
 
+// Idle loop detection — detect tight backward-branch loops (busy-waits,
+// delay loops, random seed incrementers) and bypass the dispatch overhead.
+// When a guest PC is seen as a backward-branch target IDLE_DETECT_THRESHOLD
+// times, subsequent visits interpret a full loop iteration directly instead
+// of going through flash dispatch (saving bank-switch + lookup each time).
+#define ENABLE_IDLE_DETECT
+#define IDLE_DETECT_THRESHOLD  8   // backward branches to same PC before activating
+
 // Native JSR mode - for stack-clean subroutines (no TSX/TXS), JSR calls a
 // WRAM trampoline that dispatches subroutine blocks in a tight assembly loop
 // until RTS, avoiding C round-trips for each block dispatch.
@@ -105,7 +113,7 @@
 
 // After the walk, compile every discovered entry point in address order.
 // Gated separately so the walker can be tested without the compile pass.
-#define ENABLE_STATIC_COMPILE
+//#define ENABLE_STATIC_COMPILE
 
 // Visual PPU effect during static analysis: monochrome + toggling
 // emphasis bits during BFS walk and batch compile.  Writes the lazynes
@@ -164,5 +172,11 @@
 #ifdef GAME_DONKEY_KONG
 #define ROM_ADDR_MIN  0xC000
 #define ROM_ADDR_MAX  0xFFFF
+// GameLoop_CFE1:  JSR RNG_F4ED / JMP GameLoop_CFE1
+// Main thread spins through RNG; ALL game logic runs inside NMI handler.
+#define GAME_IDLE_PC  0xCFE1
+// Batch-dispatch: loop inside run_6502() until VBlank, avoiding
+// vbcc __rsave12/__rload12 overhead on every single dispatch.
+#define ENABLE_BATCH_DISPATCH
 #endif
 

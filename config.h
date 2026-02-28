@@ -47,14 +47,14 @@
 
 // Peephole PLP/PHP elimination - elide redundant PLP/PHP pairs between
 // consecutive PHA/PLA templates.  Saves 2 bytes + 2 cycles per pair.
-//#define ENABLE_PEEPHOLE
+#define ENABLE_PEEPHOLE
 // Sub-option: defer trailing PLP (trim).  Without this, the peephole
 // codepath is compiled but never activates — tests for vbcc miscompilation.
-//#define ENABLE_PEEPHOLE_TRIM
+#define ENABLE_PEEPHOLE_TRIM
 // Sub-option: skip leading PHP when flags already saved (full optimisation).
 // Requires TRIM.  Without this, trim defers PLP but every PHP is still
 // emitted — tests the defer/flush machinery in isolation.
-//#define ENABLE_PEEPHOLE_SKIP
+#define ENABLE_PEEPHOLE_SKIP
 
 // Patchable epilogue - block chaining via patchable epilogues (requires V2)
 #ifdef ENABLE_OPTIMIZER_V2
@@ -168,15 +168,58 @@
 #endif
 
 // --- NES games ---
-// Donkey Kong (NROM-128: 16KB PRG mirrored, 8KB CHR)
+// All NROM-128: 16KB PRG mirrored at $8000/$C000, 8KB CHR.
+// Pass -DGAME_xxx on the compiler command line (w_nes.bat handles this).
+// Common NES settings applied at the bottom of this block.
+
 #ifdef GAME_DONKEY_KONG
-#define ROM_ADDR_MIN  0xC000
-#define ROM_ADDR_MAX  0xFFFF
 // GameLoop_CFE1:  JSR RNG_F4ED / JMP GameLoop_CFE1
 // Main thread spins through RNG; ALL game logic runs inside NMI handler.
 #define GAME_IDLE_PC  0xCFE1
+#endif
+
+#ifdef GAME_BATTLE_CITY
+// No known idle PC — main loop processes input every frame.
+#endif
+
+#ifdef GAME_BURGER_TIME
+// No known idle PC.
+#endif
+
+#ifdef GAME_DEFENDER
+// No known idle PC.
+#endif
+
+#ifdef GAME_GALAXIAN
+// No known idle PC.
+#endif
+
+#ifdef GAME_HYPER_SPORTS
+// No known idle PC.
+#endif
+
+#ifdef GAME_LODE_RUNNER
+// No known idle PC.
+#endif
+
+#ifdef GAME_M82
+// No known idle PC.
+#endif
+
+#ifdef GAME_ZIPPY_RACE
+// No known idle PC.
+#endif
+
+// Common NES config: any GAME_xxx above implies PLATFORM_NES
+#ifdef PLATFORM_NES
+#ifndef ROM_ADDR_MIN
+#define ROM_ADDR_MIN  0xC000
+#define ROM_ADDR_MAX  0xFFFF
+#endif
 // Batch-dispatch: loop inside run_6502() until VBlank, avoiding
 // vbcc __rsave12/__rload12 overhead on every single dispatch.
+#ifndef ENABLE_BATCH_DISPATCH
 #define ENABLE_BATCH_DISPATCH
+#endif
 #endif
 

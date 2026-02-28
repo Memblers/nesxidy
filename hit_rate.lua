@@ -38,9 +38,20 @@ local function find_addr_in_mlb(filename, label)
     return nil
 end
 
--- Try the loaded ROM's .mlb first by checking which one has valid data,
--- then fall back to the other.
-local MLB_FILES = { "nes_dk.mlb", "exidy.mlb" }
+-- Build a list of .mlb files to search.  Try all nes_*.mlb plus exidy.mlb.
+-- The opcode verification step (below) ensures we pick the right one.
+local MLB_FILES = {}
+do
+    -- Use io.popen to glob nes_*.mlb from the project directory
+    local p = io.popen('dir /b "' .. PROJECT_DIR .. 'nes_*.mlb" 2>nul')
+    if p then
+        for line in p:lines() do
+            table.insert(MLB_FILES, line)
+        end
+        p:close()
+    end
+    table.insert(MLB_FILES, "exidy.mlb")
+end
 
 local function resolve(label)
     for _, mlb in ipairs(MLB_FILES) do

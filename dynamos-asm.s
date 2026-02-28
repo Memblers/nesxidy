@@ -159,6 +159,8 @@ _rom_cpu6502test:
 
 ;=======================================================
 ; NES ROM data — bank20 = PRG, bank23 = CHR
+; Build script copies the target game's .prg/.chr to
+; roms\nes\_active.prg and roms\nes\_active.chr.
 ;=======================================================
 
 	if (GAME_NUMBER == 10)
@@ -166,13 +168,13 @@ _rom_cpu6502test:
 	global _rom_nes_prg
 	align 8
 _rom_nes_prg:
-	incbin "roms\nes\donkeykong.prg"
+	incbin "roms\nes\_active.prg"
 
 	section "bank23"
 	global _chr_nes
 	align 8
 _chr_nes:
-	incbin "roms\nes\donkeykong.chr"
+	incbin "roms\nes\_active.chr"
 	endif
 
 

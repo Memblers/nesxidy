@@ -37,7 +37,7 @@ extern const unsigned char chr_nes[];
 #pragma section default
 
 // ******************************************************************************************
-// NES palette for Donkey Kong
+// NES default palette (loaded at boot, games override via $2006/$2007 writes)
 // ******************************************************************************************
 const uint8_t palette[] = {
 	0x0F,0x06,0x16,0x30, 0x0F,0x0A,0x2A,0x30, 0x0F,0x02,0x12,0x30, 0x0F,0x08,0x18,0x30,

@@ -89,6 +89,13 @@ extern void flash_cache_init_sectors(void);
 __zpage uint8_t last_nmi_frame;  // __zpage: ASM dispatch references it directly
 static uint8_t fps_counter;
 
+// Nested NMI prevention: guest NMI handler runs through the main-loop
+// dispatches and may span several real VBlanks.  Without a guard, each
+// VBlank would fire nmi6502() again, corrupting the guest stack.
+// We detect RTI completion by monitoring the guest stack pointer.
+uint8_t nmi_active = 0;
+uint8_t nmi_sp_guard;  // sp value just before nmi6502()
+
 
 // ******************************************************************************************
 // PPU register write handler (NES $2000-$2007)
@@ -101,12 +108,14 @@ void nes_register_write(uint16_t address, uint8_t value)
 		case 0: // $2000 PPUCTRL
 			lnPPUCTRL = (value | 0x80);
 			PPUCTRL_soft = value;
-			lnSync(0);
+			// Don't lnSync here — the NMI handler applies lnPPUCTRL
+			// to $2000 every VBlank.  Blocking here causes multi-frame
+			// stalls because DK writes $2000 several times per game frame.
 			break;
 		case 1: // $2001 PPUMASK
 			lnPPUMASK = value;
 			PPUMASK_soft = value;
-			lnSync(0);
+			// Same — shadow applied by NMI handler at next VBlank.
 			break;
 		case 5: // $2005 PPUSCROLL
 			PPUSCROLL_soft[PPUADDR_latch++ & 1] = value;
@@ -208,11 +217,20 @@ int main(void)
 
 	while (1)
 	{
-#ifdef INTERPRETER_ONLY
-		step6502();
-#else
-		run_6502();
+#ifdef GAME_IDLE_PC
+		if (pc != GAME_IDLE_PC)
 #endif
+		{
+#ifdef INTERPRETER_ONLY
+			step6502();
+#else
+			run_6502();
+#endif
+		}
+
+		// Detect guest NMI handler completion: RTI restores sp to pre-NMI value
+		if (nmi_active && sp == nmi_sp_guard)
+			nmi_active = 0;
 
 		// NMI-driven frame timing (same approach as exidy.c)
 #ifndef TRACK_TICKS
@@ -220,10 +238,19 @@ int main(void)
 			uint8_t cur_nmi = *(volatile uint8_t*)0x26;
 			if (cur_nmi != last_nmi_frame)
 			{
-				render_video();
-				// Fire NMI if guest has NMI enabled
-				if (PPUCTRL_soft & 0x80)
-					nmi6502();
+				if (!nmi_active)
+				{
+					// Guest main loop — safe to render and fire NMI
+					nes_gamepad_refresh();
+					render_video();
+					if (PPUCTRL_soft & 0x80)
+					{
+						nmi_sp_guard = sp;
+						nmi6502();
+						nmi_active = 1;
+					}
+				}
+				// Always absorb counter changes to prevent re-triggering
 				last_nmi_frame = *(volatile uint8_t*)0x26;
 			}
 		}
@@ -231,6 +258,7 @@ int main(void)
 		if (clockticks6502 > frame_time)
 		{
 			frame_time += FRAME_LENGTH;
+			nes_gamepad_refresh();
 #ifdef ENABLE_METRICS
 			{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
@@ -326,9 +354,12 @@ void write6502(uint16_t address, uint8_t value)
 
 // ******************************************************************************************
 // Gamepad — NES standard controller via lazynes
+// Cached once per frame to avoid expensive lnGetPad calls on every $5101 poll.
 // ******************************************************************************************
 
-uint8_t nes_gamepad(void)
+static uint8_t cached_gamepad = 0xFF;  // all buttons released
+
+void nes_gamepad_refresh(void)
 {
 	uint8_t targ = 0;
 	uint8_t joypad = lnGetPad(1);
@@ -339,14 +370,32 @@ uint8_t nes_gamepad(void)
 	targ |= (joypad & lfA) ? TARG_FIRE  : 0;
 	targ |= (joypad & lfSelect) ? TARG_COIN1  : 0;
 	targ |= (joypad & lfStart)  ? TARG_1START : 0;
-	return (targ ^= 0xFF);
+	cached_gamepad = (targ ^ 0xFF);
+}
+
+uint8_t nes_gamepad(void)
+{
+	return cached_gamepad;
 }
 
 
 // ******************************************************************************************
-// render_video — flush PPU queue
+// render_video — flush PPU queue and sync to VBlank
 // ******************************************************************************************
 
+// Flush the PPU queue without blocking.  Used when the emulator
+// has more guest work to do and doesn't want to waste a full VBlank.
+void render_video_noblock(void)
+{
+	if (ppu_queue_index == 0)
+		return;  // nothing to flush
+	ppu_queue[ppu_queue_index] = lfEnd;
+	lnList(ppu_queue);
+	ppu_queue_index = 0;
+}
+
+// Flush the PPU queue AND block until VBlank completes.
+// Use sparingly — each call costs one real frame (~16.7ms).
 void render_video(void)
 {
 	ppu_queue[ppu_queue_index] = lfEnd;

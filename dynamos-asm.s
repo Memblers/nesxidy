@@ -73,6 +73,7 @@ target_bank:	reserve 1
 	global _RAM_BASE, _CHARACTER_RAM_BASE, _SCREEN_RAM_BASE
 	align 1
 ;-------------------------------------------------------	
+	align 8
 _RAM_BASE:	reserve $400
 _CHARACTER_RAM_BASE:	reserve $800
 	section "nesram"

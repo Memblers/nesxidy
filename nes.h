@@ -10,7 +10,7 @@
 
 // Frame timing
 #ifndef TRACK_TICKS
-#define FRAME_LENGTH	(const uint16_t) ((1789772 / 60) / 4)	// estimate number of instructions
+#define FRAME_LENGTH	(const uint16_t) ((1789772 / 60) / 1)	// estimate number of instructions
 #else
 #define FRAME_LENGTH	(const uint32_t) (1789772 / 60)
 #endif
@@ -52,8 +52,14 @@ __zpage extern uint8_t status;
 __zpage extern uint16_t decoded_address;
 __zpage extern uint16_t encoded_address;
 
+// NMI guard state (used by ENABLE_BATCH_DISPATCH in dynamos.c)
+extern uint8_t nmi_active;
+extern uint8_t nmi_sp_guard;
+__zpage extern uint8_t last_nmi_frame;
+
 // Platform functions
 uint8_t nes_gamepad(void);
+void nes_gamepad_refresh(void);
 void render_video(void);
 uint8_t read6502(uint16_t address);
 void write6502(uint16_t address, uint8_t value);

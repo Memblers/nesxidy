@@ -330,6 +330,7 @@ int main(void)
 #ifdef ENABLE_METRICS
 				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
+				nes_gamepad_refresh();
 				render_video();
 				// Re-read AFTER render_video: if an NMI fired during
 				// render setup, absorb the $26 increment so we don't
@@ -351,6 +352,7 @@ int main(void)
 #ifdef ENABLE_METRICS
 			{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
+			nes_gamepad_refresh();
 			render_video();
 			// Re-read AFTER render_video: if an NMI fired during
 			// render setup, absorb the $26 increment so the backstop
@@ -518,7 +520,9 @@ void write6502(uint16_t address, uint8_t value)
 
 // ******************************************************************************************
 
-uint8_t nes_gamepad(void)
+static uint8_t cached_gamepad = 0xFF;  // all buttons released
+
+void nes_gamepad_refresh(void)
 {	
 	uint8_t targ = 0;		
 	uint8_t joypad = lnGetPad(1);
@@ -529,7 +533,12 @@ uint8_t nes_gamepad(void)
 	targ |= (joypad & lfA) ? TARG_FIRE : 0x00;
 	targ |= (joypad & lfSelect) ? TARG_COIN1 : 0x00;
 	targ |= (joypad & lfStart) ? TARG_1START : 0x00;	
-	return (targ ^= 0xFF);
+	cached_gamepad = (targ ^ 0xFF);
+}
+
+uint8_t nes_gamepad(void)
+{
+	return cached_gamepad;
 }
 
 // ******************************************************************************************

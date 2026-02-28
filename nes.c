@@ -242,6 +242,9 @@ int main(void)
 				{
 					// Guest main loop — safe to render and fire NMI
 					nes_gamepad_refresh();
+#ifdef ENABLE_METRICS
+					{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
+#endif
 					render_video();
 					if (PPUCTRL_soft & 0x80)
 					{

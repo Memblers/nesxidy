@@ -26,10 +26,11 @@
 --         +$39  magic 'M' 'E'
 
 local BASE = 0x7E30   -- CPU address (WRAM $6000-$7FFF mapped)
+local MEM  = emu.memType.nesDebug  -- side-effect-free reads
 
 -- helpers
 local function r8(off)
-  return emu.read(BASE + off, emu.memType.nesMemory)
+  return emu.read(BASE + off, MEM)
 end
 local function r16(off)
   return r8(off) + r8(off+1) * 256
@@ -48,7 +49,7 @@ local COL_WARN  = 0xFF2020     -- bright red
 emu.addEventCallback(function()
   -- Check magic signature
   if r8(0x39) ~= 0x4D or r8(0x3A) ~= 0x45 then
-    emu.drawString(2, 2, "Metrics: no data", COL_WARN, COL_BG)
+    emu.drawString(2, 2, "Metrics: no data (waiting for frame dump)", COL_WARN, COL_BG)
     return
   end
 

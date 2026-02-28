@@ -15,10 +15,13 @@
 --               W:XXXX:name  (WRAM,   addr = XXXX + $6000)
 --               P:XXXX:name  (PRG,    addr = XXXX + $8000)
 
-local SCRIPT_DIR = debug.getinfo(1, "S").source:match("@?(.*[\\/])")  or ""
+-- Mesen Lua cwd is NOT the script directory, and debug.getinfo only
+-- returns the bare filename — so use an absolute path like every other
+-- Lua script in this project.
+local PROJECT_DIR = "c:\\proj\\c\\NES\\nesxidy-co\\nesxidy\\"
 
 local function find_addr_in_mlb(filename, label)
-    local f = io.open(SCRIPT_DIR .. filename, "r")
+    local f = io.open(PROJECT_DIR .. filename, "r")
     if not f then return nil end
     for line in f:lines() do
         local prefix, hex, name = line:match("^(%a):(%x+):(.+)$")
@@ -43,6 +46,9 @@ local function resolve(label)
     for _, mlb in ipairs(MLB_FILES) do
         local addr = find_addr_in_mlb(mlb, label)
         if addr then return addr, mlb end
+    end
+    for _, mlb in ipairs(MLB_FILES) do
+        emu.log("[hit_rate] Could not find '" .. label .. "' in " .. PROJECT_DIR .. mlb)
     end
     return nil, nil
 end

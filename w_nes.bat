@@ -16,3 +16,4 @@ if %errorlevel% neq 0 (
 )
 echo BUILD OK: nes_dk.nes
 python convertlabels.py vicemap.map nes_dk.mlb
+python patch_oam_dma.py nes_dk.nes vicemap.map

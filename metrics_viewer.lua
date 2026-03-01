@@ -123,10 +123,25 @@ emu.addEventCallback(function()
   local ir_pct     = 0
   if ir_before > 0 then ir_pct = ir_saved * 100 / ir_before end
 
-  local COL_IR = 0xFF80FF  -- magenta/pink
+  local COL_IR   = 0xFF80FF  -- magenta/pink
+  local COL_IR2  = 0xCC66CC  -- dim magenta for detail lines
+
   emu.drawString(2, y, "=== IR Optimizer ===", COL_TITLE, COL_BG); y = y + 10
-  emu.drawString(2, y, string.format("Blocks: %d  Killed:%d", ir_blocks, ir_killed), COL_IR, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Before:%dB After:%dB -%dB (%.1f%%)", ir_before, ir_after, ir_saved, ir_pct), COL_IR, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("RL:%d DS:%d PP:%d PR:%d", ir_rl, ir_ds, ir_pp, ir_pr), COL_IR, COL_BG); y = y + 9
+
+  if ir_blocks > 0 then
+    local avg_before = ir_before / ir_blocks
+    local avg_after  = ir_after  / ir_blocks
+    local avg_saved  = avg_before - avg_after
+    emu.drawString(2, y, string.format("Blocks: %d  Nodes killed: %d", ir_blocks, ir_killed), COL_IR, COL_BG); y = y + 9
+    emu.drawString(2, y, string.format("Total: %dB -> %dB  (-%dB, %.1f%%)", ir_before, ir_after, ir_saved, ir_pct), COL_IR, COL_BG); y = y + 9
+    emu.drawString(2, y, string.format("Avg/blk: %.1fB -> %.1fB  (-%.1fB)", avg_before, avg_after, avg_saved), COL_IR2, COL_BG); y = y + 9
+  else
+    emu.drawString(2, y, "No IR blocks yet", COL_IR2, COL_BG); y = y + 9
+  end
+
+  local ir_total_changes = ir_rl + ir_ds + ir_pp + ir_pr
+  emu.drawString(2, y, string.format("Pass hits (%d total):", ir_total_changes), COL_IR, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("  RedundLoad: %d  DeadStore: %d", ir_rl, ir_ds), COL_IR2, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("  PHP/PLP:    %d  PairRwrt: %d", ir_pp, ir_pr), COL_IR2, COL_BG); y = y + 9
 
 end, emu.eventType.endFrame)

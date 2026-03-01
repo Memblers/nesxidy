@@ -290,6 +290,44 @@ uint8_t ir_opt_redundant_load(ir_ctx_t *ctx)
             }
         }
 
+        /* --- Identity-op elimination: AND #$FF, ORA #$00, EOR #$00 ---
+         * These are no-ops for A.  Kill if flags side-effect unused. */
+        if ((n->op == IR_AND_IMM && (uint8_t)n->operand == 0xFF) ||
+            (n->op == IR_ORA_IMM && (uint8_t)n->operand == 0x00) ||
+            (n->op == IR_EOR_IMM && (uint8_t)n->operand == 0x00)) {
+            uint8_t flags_needed = 0;
+            for (uint8_t j = i + 1; j < ctx->node_count; j++) {
+                if (ctx->nodes[j].op == IR_DEAD) continue;
+                if (reads_flags(ctx->nodes[j].op)) { flags_needed = 1; break; }
+                if (writes_flags(ctx->nodes[j].op)) break;
+            }
+            if (!flags_needed) {
+                ir_kill(ctx, i);
+                changes++;
+                continue;
+            }
+        }
+
+        /* --- Zero/full-mask folding ---
+         * AND #$00 always yields 0, ORA #$FF always yields $FF,
+         * regardless of A's current value. Rewrite to LDA #imm. */
+        if (n->op == IR_AND_IMM && (uint8_t)n->operand == 0x00) {
+            n->op = IR_LDA_IMM;
+            n->operand = 0x00;
+            n->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
+            r->a_val = 0x00; r->a_known = 1;
+            changes++;
+            continue;
+        }
+        if (n->op == IR_ORA_IMM && (uint8_t)n->operand == 0xFF) {
+            n->op = IR_LDA_IMM;
+            n->operand = 0xFF;
+            n->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
+            r->a_val = 0xFF; r->a_known = 1;
+            changes++;
+            continue;
+        }
+
         /* --- Constant folding: AND/ORA/EOR #imm with known A --- */
         if (r->a_known) {
             if (n->op == IR_AND_IMM) {
@@ -842,6 +880,63 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
             if (!y_used) {
                 a->op = IR_LDA_ZP;
                 a->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
+                ir_kill(ctx, j);
+                changes++;
+                continue;
+            }
+        }
+
+        /* --- CMP #$00 / CPX #$00 / CPY #$00 elimination ---
+         * CMP #$00 sets N/Z identically to any instruction that
+         * writes A+flags, and sets C=1 unconditionally (A >= 0).
+         * Safe to kill if:
+         *   1. Preceding instruction writes the register AND flags,
+         *   2. The carry flag is NOT read before being overwritten
+         *      (since we'd lose the unconditional C=1 from CMP).
+         * Same logic applies to CPX #$00 / CPY #$00. */
+        if (b->op == IR_CMP_IMM && (uint8_t)b->operand == 0x00 &&
+            writes_a(a->op) && writes_flags(a->op)) {
+            uint8_t c_needed = 0;
+            for (uint8_t k = j + 1; k < ctx->node_count; k++) {
+                if (ctx->nodes[k].op == IR_DEAD) continue;
+                if (reads_flags(ctx->nodes[k].op)) { c_needed = 1; break; }
+                if (writes_flags(ctx->nodes[k].op)) break;
+                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op))
+                    { c_needed = 1; break; }
+            }
+            if (!c_needed) {
+                ir_kill(ctx, j);
+                changes++;
+                continue;
+            }
+        }
+        if (b->op == IR_CPX_IMM && (uint8_t)b->operand == 0x00 &&
+            writes_x(a->op) && writes_flags(a->op)) {
+            uint8_t c_needed = 0;
+            for (uint8_t k = j + 1; k < ctx->node_count; k++) {
+                if (ctx->nodes[k].op == IR_DEAD) continue;
+                if (reads_flags(ctx->nodes[k].op)) { c_needed = 1; break; }
+                if (writes_flags(ctx->nodes[k].op)) break;
+                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op))
+                    { c_needed = 1; break; }
+            }
+            if (!c_needed) {
+                ir_kill(ctx, j);
+                changes++;
+                continue;
+            }
+        }
+        if (b->op == IR_CPY_IMM && (uint8_t)b->operand == 0x00 &&
+            writes_y(a->op) && writes_flags(a->op)) {
+            uint8_t c_needed = 0;
+            for (uint8_t k = j + 1; k < ctx->node_count; k++) {
+                if (ctx->nodes[k].op == IR_DEAD) continue;
+                if (reads_flags(ctx->nodes[k].op)) { c_needed = 1; break; }
+                if (writes_flags(ctx->nodes[k].op)) break;
+                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op))
+                    { c_needed = 1; break; }
+            }
+            if (!c_needed) {
                 ir_kill(ctx, j);
                 changes++;
                 continue;

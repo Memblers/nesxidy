@@ -56,6 +56,7 @@
 #ifdef ENABLE_IR
 #define ENABLE_IR_OPT_REDUNDANT_LOAD   // shadow-track A/X/Y, kill dup loads, const-fold
 #define ENABLE_IR_OPT_DEAD_STORE       // STA/STX/STY zp killed if overwritten before read
+#define ENABLE_IR_OPT_DEAD_LOAD        // LDR zp killed if register+flags overwritten before read
 #define ENABLE_IR_OPT_PHP_PLP          // generalised PLP→PHP elision (superset of old peephole)
 #define ENABLE_IR_OPT_PAIR_REWRITE     // 27 pair rewrite rules from peephole_patterns.txt
 #endif

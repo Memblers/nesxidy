@@ -212,6 +212,19 @@ static uint8_t is_opaque(uint8_t op)
     return 0;
 }
 
+/* Helper: does this instruction write to a ZP memory location? */
+static uint8_t writes_to_zp(uint8_t op)
+{
+    switch (op) {
+        case IR_STA_ZP: case IR_STX_ZP: case IR_STY_ZP:
+        case IR_INC_ZP: case IR_DEC_ZP:
+        case IR_ASL_ZP: case IR_LSR_ZP:
+        case IR_ROL_ZP: case IR_ROR_ZP:
+            return 1;
+    }
+    return 0;
+}
+
 /* ===================================================================
  * Pass 1: Redundant load elimination
  * (from opt65.c opti1 / peephole_patterns.txt Phase 1)
@@ -352,6 +365,42 @@ uint8_t ir_opt_dead_store(ir_ctx_t *ctx)
         uint8_t target_addr = (uint8_t)n->operand;
         uint8_t store_op = n->op;
 
+        /* --- Store-back elimination (backward scan) ---
+         * If the register was loaded from this same ZP address and
+         * neither the register nor the address changed since, the
+         * store writes back an identical value — kill it. */
+        {
+            uint8_t load_op;
+            if (store_op == IR_STA_ZP) load_op = IR_LDA_ZP;
+            else if (store_op == IR_STX_ZP) load_op = IR_LDX_ZP;
+            else load_op = IR_LDY_ZP;
+
+            uint8_t killed = 0;
+            uint8_t j = i;
+            while (j > 0) {
+                j--;
+                uint8_t op = ctx->nodes[j].op;
+                if (op == IR_DEAD) continue;
+
+                /* Found matching load from same address → store-back */
+                if (op == load_op && (uint8_t)ctx->nodes[j].operand == target_addr) {
+                    ir_kill(ctx, i);
+                    changes++;
+                    killed = 1;
+                    break;
+                }
+                /* Register was clobbered */
+                if (store_op == IR_STA_ZP && writes_a(op)) break;
+                if (store_op == IR_STX_ZP && writes_x(op)) break;
+                if (store_op == IR_STY_ZP && writes_y(op)) break;
+                /* ZP address was modified by another instruction */
+                if (writes_to_zp(op) && (uint8_t)ctx->nodes[j].operand == target_addr) break;
+                /* Opaque / branch barrier */
+                if (is_opaque(op) || is_branch(op)) break;
+            }
+            if (killed) continue;
+        }
+
         /* Scan forward: look for another store to same address,
          * or a read from same address (which makes this store live) */
         for (uint8_t j = i + 1; j < ctx->node_count; j++) {
@@ -380,6 +429,66 @@ uint8_t ir_opt_dead_store(ir_ctx_t *ctx)
                  m->op == IR_BIT_ZP) &&
                 (uint8_t)m->operand == target_addr)
                 break;  /* store is live */
+        }
+    }
+
+    return changes;
+}
+
+/* ===================================================================
+ * Pass 2b: Dead load elimination
+ *
+ * Forward scan: if a ZP load writes a register that is overwritten
+ * before being read, AND the flags the load sets (N, Z) are also
+ * overwritten before being read, the load is dead.
+ * =================================================================== */
+uint8_t ir_opt_dead_load(ir_ctx_t *ctx)
+{
+    uint8_t changes = 0;
+
+    for (uint8_t i = 0; i < ctx->node_count; i++) {
+        ir_node_t *n = &ctx->nodes[i];
+        if (n->op == IR_DEAD) continue;
+
+        if (n->op != IR_LDA_ZP && n->op != IR_LDX_ZP && n->op != IR_LDY_ZP)
+            continue;
+
+        uint8_t reg_dead = 0, flags_dead = 0;
+
+        for (uint8_t j = i + 1; j < ctx->node_count; j++) {
+            uint8_t op = ctx->nodes[j].op;
+            if (op == IR_DEAD) continue;
+
+            /* Barrier — conservatively assume register/flags live */
+            if (is_opaque(op) || is_branch(op)) break;
+
+            /* --- Register liveness --- */
+            if (!reg_dead) {
+                uint8_t rused = 0;
+                if (n->op == IR_LDA_ZP && reads_a(op)) rused = 1;
+                if (n->op == IR_LDX_ZP && reads_x(op)) rused = 1;
+                if (n->op == IR_LDY_ZP && reads_y(op)) rused = 1;
+                if (rused) break;  /* register is live */
+
+                if (n->op == IR_LDA_ZP && writes_a(op)) reg_dead = 1;
+                if (n->op == IR_LDX_ZP && writes_x(op)) reg_dead = 1;
+                if (n->op == IR_LDY_ZP && writes_y(op)) reg_dead = 1;
+            }
+
+            /* --- Flags liveness ---
+             * PLP replaces all flags from the stack; it does NOT
+             * read the current N/Z values, so treat it as a flag
+             * writer only. */
+            if (!flags_dead) {
+                if (op != IR_PLP && reads_flags(op)) break;
+                if (writes_flags(op)) flags_dead = 1;
+            }
+
+            if (reg_dead && flags_dead) {
+                ir_kill(ctx, i);
+                changes++;
+                break;
+            }
         }
     }
 
@@ -766,6 +875,9 @@ uint8_t ir_optimize(ir_ctx_t *ctx)
 
         c = ir_opt_dead_store(ctx);
         ctx->stat_dead_store += c; changes += c;
+
+        c = ir_opt_dead_load(ctx);
+        ctx->stat_redundant_load += c; changes += c;
 
         c = ir_opt_php_plp_elision(ctx);
         ctx->stat_php_plp += c; changes += c;

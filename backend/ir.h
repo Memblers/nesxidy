@@ -322,6 +322,7 @@ uint8_t ir_optimize(ir_ctx_t *ctx);
 /* Individual passes (called by ir_optimize, or directly for testing) */
 uint8_t ir_opt_redundant_load(ir_ctx_t *ctx);
 uint8_t ir_opt_dead_store(ir_ctx_t *ctx);
+uint8_t ir_opt_dead_load(ir_ctx_t *ctx);
 uint8_t ir_opt_php_plp_elision(ir_ctx_t *ctx);
 uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx);
 

@@ -657,12 +657,19 @@ batch_exit:  // case 1 (compile needed) jumps here
 			// carry stale pre-IR offsets, so leave them unprogrammed
 			// ($FF).  Dispatch will treat them as cache-miss → compile
 			// a new block starting at that PC when it is hit.
-			if (pc_old == entry_pc) {
-				flash_cache_pc_update(recompile_instr_start, RECOMPILED);
-#ifdef ENABLE_OPTIMIZER_V2
-				opt2_notify_block_compiled(pc_old, flash_code_address + recompile_instr_start + BLOCK_PREFIX_SIZE, flash_code_bank);
-#endif
-			}
+			//
+			// DEFERRED: The PC table update for the entry PC is deferred
+			// to AFTER the code bytes are written to flash.  Writing the
+			// table entry here (before IR optimisation and the bulk code
+			// write) creates a window where the table says "dispatch to
+			// $XXXX" but the code at $XXXX isn't in flash yet.  If IR
+			// optimisation eliminates all nodes (code_index == 0), the
+			// early-return path undoes the flash allocation — but this
+			// premature table entry persists, becoming a stale pointer
+			// to flash space that will be reused by a future block.
+			// See "Deferred IR entry-PC table update" below the code
+			// write loop.
+			(void)0;  // entry PC table update deferred
 #else
 			flash_cache_pc_update(recompile_instr_start, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
@@ -822,12 +829,35 @@ batch_exit:  // case 1 (compile needed) jumps here
 #else
 		// flash_code_address + 6 = flags (leave 0xFF = erased)
 #endif
-		// flash_code_address + 7 = reserved (leave 0xFF = erased)
+		// flash_code_address + 7 = reserved — used as block-complete sentinel
 
 		// --- Write code + epilogue to flash ---
 		for (uint8_t i = 0; i < code_index; i++) {
 			flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + i, flash_code_bank, cache_code[0][i]);
 		}
+
+		// Block-complete sentinel: write $AA to the reserved header byte
+		// (offset 7 = dispatch_addr - 1) AFTER all code bytes are in flash.
+		// The dispatch asm guard checks this byte before jumping to the
+		// block — if it's still $FF (erased), the block is incomplete and
+		// dispatch treats it as a cache miss.  This catches:
+		//  - Stale PC table entries pointing to erased/reused flash
+		//  - Partial flash writes (power loss, programming failure)
+		//  - Any future bugs that create premature table entries
+		flash_byte_program(flash_code_address + 7, flash_code_bank, 0xAA);
+
+#ifdef ENABLE_IR
+		// --- Deferred IR entry-PC table update ---
+		// Now that both the header and code are in flash, it's safe to
+		// publish the PC table entry.  Re-set up the table pointers
+		// (the compile loop's setup_flash_pc_tables calls for later
+		// instructions may have overwritten them) and commit.
+		setup_flash_pc_tables(entry_pc);
+		flash_cache_pc_update(0, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+		opt2_notify_block_compiled(entry_pc, flash_code_address + BLOCK_PREFIX_SIZE, flash_code_bank);
+#endif
+#endif  /* ENABLE_IR */
 
 		// Shrink sector allocation to actual size used (avoid wasting space)
 		sector_free_offset[next_free_sector] = (flash_code_address & FLASH_SECTOR_MASK) + BLOCK_HEADER_SIZE + code_index;

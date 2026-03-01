@@ -752,9 +752,16 @@ static uint8_t sa_compile_one_block(void)
         uint16_t exit_pc = pc;
 
 #ifdef ENABLE_PEEPHOLE
-        // Flush deferred PLP from peephole before epilogue
+        // Flush deferred PLP from peephole before epilogue.
+        // Must also write to flash — the compile loop only wrote bytes
+        // 0..code_index-1, and the epilogue writer below starts at
+        // epilogue_start, so this byte would otherwise stay $FF (erased).
         if (block_flags_saved) {
             *(volatile uint8_t *)&cache_code[0][code_index] = 0x28;  // PLP
+            if (sa_compile_pass == 2) {
+                flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index,
+                                   flash_code_bank, 0x28);
+            }
             code_index++;
             block_flags_saved = 0;
         }
@@ -1328,19 +1335,29 @@ static void sa_run_b2(void)
     // =====================================================================
     // Sector compaction: reclaim wasted space from max-size allocations.
     //
-    // Both passes used max-size allocations (258 bytes) to guarantee
-    // identical sector-skip decisions.  Now that pass 2 is complete,
-    // we scan each sector's block headers to find the actual end of the
-    // last block and adjust sector_free_offset accordingly.  This lets
-    // the dynamic path (run_6502) pack new blocks tightly in the
-    // leftover space.
+    // Both passes used max-size allocations (250 bytes of code space) to
+    // guarantee identical sector-skip decisions.  Now that pass 2 is
+    // complete, we scan each sector's block headers to find the actual
+    // end of the last block and adjust sector_free_offset accordingly.
+    // This lets the dynamic path (run_6502) pack new blocks tightly in
+    // the leftover space.
+    //
+    // CRITICAL: The walk must advance by the same max-size stride used
+    // during allocation, NOT by actual code_len.  Consecutive blocks are
+    // spaced (max-alloc + alignment) bytes apart; the gap between them
+    // is erased ($FF).  Advancing by actual code_len would land in the
+    // gap, read code_len=$FF, and stop — leaving sector_free_offset
+    // pointing into the middle of valid statically compiled blocks.
+    // The dynamic compiler would then write over them without erasing,
+    // producing AND-corrupted garbage (flash can only clear bits).
     //
     // Block header format: byte +4 = code_len (code + epilogue total).
-    // Walking: start at offset 0, align to find header_start, read code_len,
-    // advance by BLOCK_HEADER_SIZE + code_len, repeat.
     // =====================================================================
     {
         extern uint16_t sector_free_offset[];
+        // Max-size code allocation used by sa_compile_one_block:
+        uint16_t sa_max_alloc = CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE;
+
         for (uint8_t s = 0; s < FLASH_CACHE_SECTORS; s++)
         {
             if (sector_free_offset[s] == 0)
@@ -1353,7 +1370,7 @@ static void sa_run_b2(void)
             uint16_t last_end = 0;
             while (offset < FLASH_ERASE_SECTOR_SIZE)
             {
-                // Align to find next block's code_start
+                // Align to find next block's code_start (same formula as flash_sector_alloc)
                 uint16_t code_start = (offset + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT_MASK)
                                     & ~BLOCK_ALIGNMENT_MASK;
                 uint16_t header_start = code_start - BLOCK_HEADER_SIZE;
@@ -1366,7 +1383,10 @@ static void sa_run_b2(void)
                     break;  // no more blocks (erased or empty)
 
                 last_end = code_start + code_len;
-                offset = last_end;
+                // Advance by max-size allocation stride (matching flash_sector_alloc)
+                // so the next iteration lands at the correct next block, not in
+                // the erased gap between max-size slots.
+                offset = code_start + sa_max_alloc;
             }
 
             if (last_end > 0 && last_end < sector_free_offset[s])

@@ -126,7 +126,12 @@ void nes_register_write(uint16_t address, uint8_t value)
 			break;
 		case 7: // $2007 PPUDATA
 		{
-			ppu_queue[ppu_queue_index + 0] = PPUADDR_soft[0];
+			// Mask PPU address hi to 6 bits: lnList format uses bit 6 (lfHor)
+			// and bit 7 (lfVer) as command flags.  Raw PPU addresses >= $4000
+			// (mirrors, or auto-incremented past $3FFF) would be misinterpreted
+			// as bulk-write commands, desynchronising the VRU stream and
+			// causing the NMI handler to loop forever.
+			ppu_queue[ppu_queue_index + 0] = PPUADDR_soft[0] & 0x3F;
 			ppu_queue[ppu_queue_index + 1] = PPUADDR_soft[1];
 			ppu_queue[ppu_queue_index + 2] = value;
 			ppu_queue_index += 3;
@@ -134,13 +139,13 @@ void nes_register_write(uint16_t address, uint8_t value)
 			if (PPUCTRL_soft & 0x4)	// inc by 32
 			{
 				if ((PPUADDR_soft[1] & 0xE0) == 0xE0)
-					PPUADDR_soft[0]++;
+					PPUADDR_soft[0] = (PPUADDR_soft[0] + 1) & 0x3F;
 				PPUADDR_soft[1] += 32;
 			}
 			else	// inc by 1
 			{
 				if (++PPUADDR_soft[1] == 0)
-					PPUADDR_soft[0]++;
+					PPUADDR_soft[0] = (PPUADDR_soft[0] + 1) & 0x3F;
 			}
 
 			if (ppu_queue_index >= 96)
@@ -235,9 +240,11 @@ int main(void)
 		// NMI-driven frame timing (same approach as exidy.c)
 #ifndef TRACK_TICKS
 		{
+			static uint8_t nmi_stuck_count = 0;
 			uint8_t cur_nmi = *(volatile uint8_t*)0x26;
 			if (cur_nmi != last_nmi_frame)
 			{
+				nmi_stuck_count = 0;
 				if (!nmi_active)
 				{
 					// Guest main loop — safe to render and fire NMI
@@ -255,6 +262,33 @@ int main(void)
 				}
 				// Always absorb counter changes to prevent re-triggering
 				last_nmi_frame = *(volatile uint8_t*)0x26;
+			}
+			else if (++nmi_stuck_count >= 3)
+			{
+				// Stuck-frame watchdog: lazynes only increments nmiCounter
+				// when lnSync is pending.  If the guest is in a hardware-
+				// polling loop (BIT $2002 / BVC for sprite-0-hit, etc.),
+				// the batch dispatch loop exhausts without calling lnSync,
+				// leaving nmiCounter frozen.  Force a render_video() call
+				// — its lnSync re-arms lazynes so nmiCounter advances on
+				// the next VBlank, breaking the deadlock.
+				nmi_stuck_count = 0;
+				render_video();
+				cur_nmi = *(volatile uint8_t*)0x26;
+				if (cur_nmi != last_nmi_frame)
+				{
+					if (!nmi_active)
+					{
+						nes_gamepad_refresh();
+						if (PPUCTRL_soft & 0x80)
+						{
+							nmi_sp_guard = sp;
+							nmi6502();
+							nmi_active = 1;
+						}
+					}
+					last_nmi_frame = cur_nmi;
+				}
 			}
 		}
 #else
@@ -353,6 +387,7 @@ void write6502(uint16_t address, uint8_t value)
 		return;
 	}
 }
+
 
 
 // ******************************************************************************************

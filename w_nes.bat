@@ -82,7 +82,7 @@ if %errorlevel% neq 0 (
 )
 
 rem --- Compile C files and link with pre-assembled object ---
-vc +mapper30 -+ -c99 -O2 -DPLATFORM_NES -D%GAME_DEFINE% mapper30.c nes.c fake6502.c dynamos.c frontend/cpu_6502.c platform/platform_nes.c backend/emit_6502.c core/optimizer_v2_simple.c core/static_analysis.c core/metrics.c dynamos-asm-nes.o -llazynes -o %OUTPUT%
+vc +mapper30 -+ -c99 -O2 -DPLATFORM_NES -D%GAME_DEFINE% mapper30.c nes.c fake6502.c dynamos.c frontend/cpu_6502.c platform/platform_nes.c backend/emit_6502.c backend/ir.c backend/ir_opt.c backend/ir_lower.c core/optimizer_v2_simple.c core/static_analysis.c core/metrics.c dynamos-asm-nes.o -llazynes -o %OUTPUT%
 if %errorlevel% neq 0 (
     echo BUILD FAILED
     exit /b %errorlevel%

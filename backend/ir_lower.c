@@ -1,0 +1,368 @@
+/**
+ * ir_lower.c - IR to native 6502 byte lowering
+ *
+ * Walks the optimized ir_nodes[] array, skips IR_DEAD nodes, and emits
+ * concrete 6502 opcodes + operands into an output buffer (cache_code[]).
+ * Resolves intra-block labels for branch fixups.
+ *
+ * Lives in bank 2 (compile-time only).
+ */
+
+#pragma section bank1
+
+#include <stdint.h>
+#include "ir.h"
+#include "../dynamos.h"   /* template externs, ROM array sizes */
+
+/* ===================================================================
+ * IR opcode → native 6502 opcode mapping table
+ *
+ * For IR ops that map 1:1 to a real 6502 instruction, this table
+ * gives the native opcode byte.  0 = needs special handling.
+ * =================================================================== */
+#pragma section rodata1
+static const uint8_t ir_to_native[] = {
+    /*  0x00 */ 0x00, /* unused */
+    /*  IR_LDA_IMM  0x01 */ 0xA9,
+    /*  IR_LDA_ZP   0x02 */ 0xA5,
+    /*  IR_LDA_ABS  0x03 */ 0xAD,
+    /*  IR_LDX_IMM  0x04 */ 0xA2,
+    /*  IR_LDX_ZP   0x05 */ 0xA6,
+    /*  IR_LDX_ABS  0x06 */ 0xAE,
+    /*  IR_LDY_IMM  0x07 */ 0xA0,
+    /*  IR_LDY_ZP   0x08 */ 0xA4,
+    /*  IR_LDY_ABS  0x09 */ 0xAC,
+    /*  IR_STA_ZP   0x0A */ 0x85,
+    /*  IR_STA_ABS  0x0B */ 0x8D,
+    /*  IR_STX_ZP   0x0C */ 0x86,
+    /*  IR_STX_ABS  0x0D */ 0x8E,
+    /*  IR_STY_ZP   0x0E */ 0x84,
+    /*  IR_STY_ABS  0x0F */ 0x8C,
+
+    /*  IR_JMP_ABS  0x10 */ 0x4C,
+    /*  IR_JSR      0x11 */ 0x20,
+    /*  IR_RTS      0x12 */ 0x60,
+    /*  IR_PHP      0x13 */ 0x08,
+    /*  IR_PLP      0x14 */ 0x28,
+    /*  IR_PHA      0x15 */ 0x48,
+    /*  IR_PLA      0x16 */ 0x68,
+    /*  IR_NOP      0x17 */ 0xEA,
+    /*  IR_CLC      0x18 */ 0x18,
+    /*  IR_SEC      0x19 */ 0x38,
+    /*  IR_CLD      0x1A */ 0xD8,
+    /*  IR_SED      0x1B */ 0xF8,
+    /*  IR_CLI      0x1C */ 0x58,
+    /*  IR_SEI      0x1D */ 0x78,
+    /*  IR_CLV      0x1E */ 0xB8,
+    /*  IR_BRK      0x1F */ 0x00,
+
+    /*  IR_BPL      0x20 */ 0x10,
+    /*  IR_BMI      0x21 */ 0x30,
+    /*  IR_BVC      0x22 */ 0x50,
+    /*  IR_BVS      0x23 */ 0x70,
+    /*  IR_BCC      0x24 */ 0x90,
+    /*  IR_BCS      0x25 */ 0xB0,
+    /*  IR_BNE      0x26 */ 0xD0,
+    /*  IR_BEQ      0x27 */ 0xF0,
+
+    /*  IR_TAX      0x28 */ 0xAA,
+    /*  IR_TAY      0x29 */ 0xA8,
+    /*  IR_TXA      0x2A */ 0x8A,
+    /*  IR_TYA      0x2B */ 0x98,
+    /*  IR_TSX      0x2C */ 0xBA,
+    /*  IR_TXS      0x2D */ 0x9A,
+    /*  IR_INX      0x2E */ 0xE8,
+    /*  IR_INY      0x2F */ 0xC8,
+    /*  IR_DEX      0x30 */ 0xCA,
+    /*  IR_DEY      0x31 */ 0x88,
+
+    /*  IR_ADC_IMM  0x32 */ 0x69,
+    /*  IR_SBC_IMM  0x33 */ 0xE9,
+    /*  IR_AND_IMM  0x34 */ 0x29,
+    /*  IR_ORA_IMM  0x35 */ 0x09,
+    /*  IR_EOR_IMM  0x36 */ 0x49,
+    /*  IR_CMP_IMM  0x37 */ 0xC9,
+    /*  IR_CPX_IMM  0x38 */ 0xE0,
+    /*  IR_CPY_IMM  0x39 */ 0xC0,
+
+    /*  IR_ADC_ZP   0x3A */ 0x65,
+    /*  IR_SBC_ZP   0x3B */ 0xE5,
+    /*  IR_AND_ZP   0x3C */ 0x25,
+    /*  IR_ORA_ZP   0x3D */ 0x05,
+    /*  IR_EOR_ZP   0x3E */ 0x45,
+    /*  IR_CMP_ZP   0x3F */ 0xC5,
+    /*  IR_CPX_ZP   0x40 */ 0xE4,
+    /*  IR_CPY_ZP   0x41 */ 0xC4,
+
+    /*  IR_ADC_ABS  0x42 */ 0x6D,
+    /*  IR_SBC_ABS  0x43 */ 0xED,
+    /*  IR_AND_ABS  0x44 */ 0x2D,
+    /*  IR_ORA_ABS  0x45 */ 0x0D,
+    /*  IR_EOR_ABS  0x46 */ 0x4D,
+    /*  IR_CMP_ABS  0x47 */ 0xCD,
+    /*  IR_CPX_ABS  0x48 */ 0xEC,
+    /*  IR_CPY_ABS  0x49 */ 0xCC,
+
+    /*  IR_INC_ZP   0x4A */ 0xE6,
+    /*  IR_DEC_ZP   0x4B */ 0xC6,
+    /*  IR_ASL_ZP   0x4C */ 0x06,
+    /*  IR_LSR_ZP   0x4D */ 0x46,
+    /*  IR_ROL_ZP   0x4E */ 0x26,
+    /*  IR_ROR_ZP   0x4F */ 0x66,
+
+    /*  IR_INC_ABS  0x50 */ 0xEE,
+    /*  IR_DEC_ABS  0x51 */ 0xCE,
+    /*  IR_ASL_ABS  0x52 */ 0x0E,
+    /*  IR_LSR_ABS  0x53 */ 0x4E,
+    /*  IR_ROL_ABS  0x54 */ 0x2E,
+    /*  IR_ROR_ABS  0x55 */ 0x6E,
+
+    /*  IR_ASL_A    0x56 */ 0x0A,
+    /*  IR_LSR_A    0x57 */ 0x4A,
+    /*  IR_ROL_A    0x58 */ 0x2A,
+    /*  IR_ROR_A    0x59 */ 0x6A,
+
+    /*  IR_LDA_ABSX 0x5A */ 0xBD,
+    /*  IR_LDA_ABSY 0x5B */ 0xB9,
+    /*  IR_STA_ABSX 0x5C */ 0x9D,
+    /*  IR_STA_ABSY 0x5D */ 0x99,
+    /*  IR_ADC_ABSX 0x5E */ 0x7D,
+    /*  IR_SBC_ABSX 0x5F */ 0xFD,
+    /*  IR_AND_ABSX 0x60 */ 0x3D,
+    /*  IR_ORA_ABSX 0x61 */ 0x1D,
+    /*  IR_EOR_ABSX 0x62 */ 0x5D,
+    /*  IR_CMP_ABSX 0x63 */ 0xDD,
+    /*  IR_ADC_ABSY 0x64 */ 0x79,
+    /*  IR_SBC_ABSY 0x65 */ 0xF9,
+    /*  IR_AND_ABSY 0x66 */ 0x39,
+    /*  IR_ORA_ABSY 0x67 */ 0x19,
+    /*  IR_EOR_ABSY 0x68 */ 0x59,
+    /*  IR_CMP_ABSY 0x69 */ 0xD9,
+    /*  IR_LDX_ABSY 0x6A */ 0xBE,
+    /*  IR_LDY_ABSX 0x6B */ 0xBC,
+    /*  IR_INC_ABSX 0x6C */ 0xFE,
+    /*  IR_DEC_ABSX 0x6D */ 0xDE,
+    /*  IR_ASL_ABSX 0x6E */ 0x1E,
+    /*  IR_LSR_ABSX 0x6F */ 0x5E,
+    /*  IR_ROL_ABSX 0x70 */ 0x3E,
+    /*  IR_ROR_ABSX 0x71 */ 0x7E,
+    /*  IR_BIT_ZP   0x72 */ 0x24,
+    /*  IR_BIT_ABS  0x73 */ 0x2C,
+};
+
+#define IR_TO_NATIVE_COUNT (sizeof(ir_to_native) / sizeof(ir_to_native[0]))
+#pragma section bank1
+
+/* ===================================================================
+ * Template pointer table — resolves IR_TMPL_* IDs to byte arrays
+ * =================================================================== */
+typedef struct {
+    uint8_t *data;   /* pointer to template byte array in ROM/WRAM */
+    uint8_t  size;   /* template size (read from extern const) */
+} tmpl_entry_t;
+
+/* Helper to get template entry — can't use static initializer with
+ * address-of in vbcc, so we build on each call (cheap). */
+static void get_template(uint8_t tmpl_id, uint8_t **out_data, uint8_t *out_size)
+{
+    switch (tmpl_id) {
+        case IR_TMPL_PHA:
+            *out_data = opcode_6502_pha;
+            *out_size = opcode_6502_pha_size;
+            return;
+        case IR_TMPL_PLA:
+            *out_data = opcode_6502_pla;
+            *out_size = opcode_6502_pla_size;
+            return;
+        case IR_TMPL_PHP:
+            *out_data = opcode_6502_php;
+            *out_size = opcode_6502_php_size;
+            return;
+        case IR_TMPL_PLP:
+            *out_data = opcode_6502_plp;
+            *out_size = opcode_6502_plp_size;
+            return;
+        case IR_TMPL_JSR:
+            *out_data = opcode_6502_jsr;
+            *out_size = opcode_6502_jsr_size;
+            return;
+        case IR_TMPL_NJSR:
+            *out_data = opcode_6502_njsr;
+            *out_size = opcode_6502_njsr_size;
+            return;
+        case IR_TMPL_NRTS:
+            *out_data = opcode_6502_nrts;
+            *out_size = opcode_6502_nrts_size;
+            return;
+        case IR_TMPL_INDY_READ:
+            *out_data = addr_6502_indy;
+            *out_size = addr_6502_indy_size;
+            return;
+        case IR_TMPL_STA_INDY:
+            *out_data = sta_indy_template;
+            *out_size = sta_indy_template_size;
+            return;
+        case IR_TMPL_INDX:
+            *out_data = addr_6502_indx;
+            *out_size = addr_6502_indx_size;
+            return;
+        default:
+            *out_data = 0;
+            *out_size = 0;
+            return;
+    }
+}
+
+/* ===================================================================
+ * Determine native byte size of an IR node (for offset calculation)
+ * =================================================================== */
+static uint8_t node_byte_size(const ir_ctx_t *ctx, uint8_t idx)
+{
+    const ir_node_t *n = &ctx->nodes[idx];
+    uint8_t op = n->op;
+
+    if (op == IR_DEAD) return 0;
+    if (op == IR_RAW_BYTE) return 1;
+    if (op == IR_RAW_WORD) return 2;
+
+    if (op == IR_TEMPLATE) {
+        uint8_t *data;
+        uint8_t size;
+        get_template((uint8_t)n->operand, &data, &size);
+        return size;
+    }
+
+    /* Standard instructions: 1-byte implied, 2-byte imm/zp/branch, 3-byte abs */
+    if (op >= 0x01 && op < IR_TO_NATIVE_COUNT) {
+        /* Implied (1-byte) */
+        if ((op >= IR_RTS && op <= IR_BRK) ||     /* 0x12..0x1F */
+            (op >= IR_TAX && op <= IR_DEY) ||      /* 0x28..0x31 */
+            (op >= IR_ASL_A && op <= IR_ROR_A))    /* 0x56..0x59 */
+            return 1;
+        /* Branch (2-byte) */
+        if (op >= IR_BPL && op <= IR_BEQ)
+            return 2;
+        /* Immediate (2-byte) */
+        if (op == IR_LDA_IMM || op == IR_LDX_IMM || op == IR_LDY_IMM ||
+            (op >= IR_ADC_IMM && op <= IR_CPY_IMM))
+            return 2;
+        /* ZP (2-byte) */
+        if (op == IR_LDA_ZP || op == IR_LDX_ZP || op == IR_LDY_ZP ||
+            op == IR_STA_ZP || op == IR_STX_ZP || op == IR_STY_ZP ||
+            (op >= IR_ADC_ZP && op <= IR_CPY_ZP) ||
+            (op >= IR_INC_ZP && op <= IR_ROR_ZP) ||
+            op == IR_BIT_ZP)
+            return 2;
+        /* Everything else: ABS (3-byte) */
+        return 3;
+    }
+
+    /* RAW_OP_ABS: 1 (opcode was emitted as RAW_BYTE) + 2 (addr as RAW_WORD) = handled separately */
+    if (op == IR_RAW_OP_ABS) return 3;
+
+    return 0;
+}
+
+/* ===================================================================
+ * ir_lower — convert optimized IR to native bytes
+ * =================================================================== */
+uint8_t ir_lower(ir_ctx_t *ctx, uint8_t *output_buf, uint8_t max_size)
+{
+    uint8_t pos = 0;  /* output byte position */
+
+    /* --- Pre-pass: compute byte offsets for each node (for branch fixups) --- */
+    uint8_t node_offsets[IR_MAX_NODES];
+    {
+        uint8_t offset = 0;
+        for (uint8_t i = 0; i < ctx->node_count; i++) {
+            node_offsets[i] = offset;
+            offset += node_byte_size(ctx, i);
+        }
+    }
+
+    /* --- Main lowering pass --- */
+    for (uint8_t i = 0; i < ctx->node_count; i++) {
+        ir_node_t *n = &ctx->nodes[i];
+        uint8_t op = n->op;
+
+        if (op == IR_DEAD) continue;
+
+        /* --- Raw byte --- */
+        if (op == IR_RAW_BYTE) {
+            if (pos >= max_size) return 0;
+            output_buf[pos++] = (uint8_t)n->operand;
+            continue;
+        }
+
+        /* --- Raw word (2 bytes, little-endian) --- */
+        if (op == IR_RAW_WORD) {
+            if (pos + 1 >= max_size) return 0;
+            output_buf[pos++] = (uint8_t)(n->operand & 0xFF);
+            output_buf[pos++] = (uint8_t)(n->operand >> 8);
+            continue;
+        }
+
+        /* --- Template blob --- */
+        if (op == IR_TEMPLATE) {
+            uint8_t *tmpl_data;
+            uint8_t tmpl_size;
+            get_template((uint8_t)n->operand, &tmpl_data, &tmpl_size);
+            if (!tmpl_data || (pos + tmpl_size) > max_size) return 0;
+
+            /* Copy template bytes */
+            for (uint8_t t = 0; t < tmpl_size; t++)
+                output_buf[pos + t] = tmpl_data[t];
+
+            /* Apply template patches */
+            for (uint8_t p = 0; p < ctx->tmpl_patch_count; p++) {
+                if (ctx->tmpl_patches[p].tmpl_node_index == i) {
+                    uint8_t off = ctx->tmpl_patches[p].byte_offset;
+                    if (off < tmpl_size)
+                        output_buf[pos + off] = ctx->tmpl_patches[p].value;
+                }
+            }
+
+            pos += tmpl_size;
+            continue;
+        }
+
+        /* --- Branch instructions (need offset fixup) --- */
+        if (op >= IR_BPL && op <= IR_BEQ) {
+            if (pos + 1 >= max_size) return 0;
+            output_buf[pos] = ir_to_native[op];
+
+            /* operand is a raw signed offset for now (pre-computed by caller).
+             * In the future, if operand is a label index, resolve here:
+             *   int16_t target = node_offsets[ctx->label_targets[n->operand]];
+             *   int8_t rel = (int8_t)(target - (node_offsets[i] + 2));
+             */
+            output_buf[pos + 1] = (uint8_t)n->operand;
+            pos += 2;
+            continue;
+        }
+
+        /* --- Standard mapped instructions --- */
+        if (op >= 0x01 && op < IR_TO_NATIVE_COUNT) {
+            uint8_t native_op = ir_to_native[op];
+            uint8_t sz = node_byte_size(ctx, i);
+
+            if (pos + sz > max_size) return 0;
+
+            output_buf[pos] = native_op;
+            if (sz == 2) {
+                output_buf[pos + 1] = (uint8_t)(n->operand & 0xFF);
+            } else if (sz == 3) {
+                output_buf[pos + 1] = (uint8_t)(n->operand & 0xFF);
+                output_buf[pos + 2] = (uint8_t)(n->operand >> 8);
+            }
+            pos += sz;
+            continue;
+        }
+
+        /* Unknown op — skip (shouldn't happen) */
+    }
+
+    return pos;
+}
+
+#pragma section default

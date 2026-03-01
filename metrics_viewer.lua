@@ -24,6 +24,14 @@
 --         +$34  total_frames           u32
 --         +$38  flash_occupancy_pct    u8
 --         +$39  magic 'M' 'E'
+--         +$3C  ir_blocks_processed    u32
+--         +$40  ir_bytes_before        u32
+--         +$44  ir_bytes_after         u32
+--         +$48  ir_nodes_killed        u32
+--         +$4C  ir_pass_redundant_load u16
+--         +$4E  ir_pass_dead_store     u16
+--         +$50  ir_pass_php_plp        u16
+--         +$52  ir_pass_pair_rewrite   u16
 
 local BASE = 0x7E30   -- CPU address (WRAM $6000-$7FFF mapped)
 local MEM  = emu.memType.nesDebug  -- side-effect-free reads
@@ -99,6 +107,26 @@ emu.addEventCallback(function()
   emu.drawString(2, y, string.format("Opt total:%d patched:%d", opt_total, opt_patch), COL_RT, COL_BG); y = y + 9
   emu.drawString(2, y, string.format("Peephole PHP:%d PLP:%d", ph_php, ph_plp), COL_RT, COL_BG); y = y + 9
   emu.drawString(2, y, string.format("DynFrames:%d Tot:%d", dyn_fr, tot_fr), COL_RT, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Flash: %d%%", flash_p), COL_RT, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("Flash: %d%%", flash_p), COL_RT, COL_BG); y = y + 12
+
+  -- IR optimisation metrics
+  local ir_blocks  = r32(0x3C)
+  local ir_before  = r32(0x40)
+  local ir_after   = r32(0x44)
+  local ir_killed  = r32(0x48)
+  local ir_rl      = r16(0x4C)
+  local ir_ds      = r16(0x4E)
+  local ir_pp      = r16(0x50)
+  local ir_pr      = r16(0x52)
+
+  local ir_saved   = ir_before - ir_after
+  local ir_pct     = 0
+  if ir_before > 0 then ir_pct = ir_saved * 100 / ir_before end
+
+  local COL_IR = 0xFF80FF  -- magenta/pink
+  emu.drawString(2, y, "=== IR Optimizer ===", COL_TITLE, COL_BG); y = y + 10
+  emu.drawString(2, y, string.format("Blocks: %d  Killed:%d", ir_blocks, ir_killed), COL_IR, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("Before:%dB After:%dB -%dB (%.1f%%)", ir_before, ir_after, ir_saved, ir_pct), COL_IR, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("RL:%d DS:%d PP:%d PR:%d", ir_rl, ir_ds, ir_pp, ir_pr), COL_IR, COL_BG); y = y + 9
 
 end, emu.eventType.endFrame)

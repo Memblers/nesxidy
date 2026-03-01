@@ -45,8 +45,25 @@
 // V2 optimizer - in-place branch patching (no sector evacuation)
 #define ENABLE_OPTIMIZER_V2
 
+// --- IR optimisation layer ---
+// Buffer JIT output as IR nodes in WRAM, run optimisation passes, then
+// lower to native bytes before writing to flash.  When disabled, the
+// compile path writes raw bytes directly to cache_code[] as before.
+#define ENABLE_IR
+
+// Individual IR optimisation passes (all require ENABLE_IR).
+// Disable any pass independently to isolate regressions.
+#ifdef ENABLE_IR
+#define ENABLE_IR_OPT_REDUNDANT_LOAD   // shadow-track A/X/Y, kill dup loads, const-fold
+#define ENABLE_IR_OPT_DEAD_STORE       // STA/STX/STY zp killed if overwritten before read
+#define ENABLE_IR_OPT_PHP_PLP          // generalised PLP→PHP elision (superset of old peephole)
+#define ENABLE_IR_OPT_PAIR_REWRITE     // 27 pair rewrite rules from peephole_patterns.txt
+#endif
+
 // Peephole PLP/PHP elimination - elide redundant PLP/PHP pairs between
 // consecutive PHA/PLA templates.  Saves 2 bytes + 2 cycles per pair.
+// NOTE: When ENABLE_IR + ENABLE_IR_OPT_PHP_PLP are active, this legacy
+// pass is superseded — the IR pass handles it in a more general way.
 #define ENABLE_PEEPHOLE
 // Sub-option: defer trailing PLP (trim).  Without this, the peephole
 // codepath is compiled but never activates — tests for vbcc miscompilation.

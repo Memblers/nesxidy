@@ -44,6 +44,15 @@ typedef struct {
     uint32_t total_frames;
     uint16_t flash_free_bytes;
     uint8_t  flash_occupancy_percent;
+    /* IR optimisation stats (cumulative across all blocks) */
+    uint32_t ir_blocks_processed;     /* blocks that went through IR pipeline */
+    uint32_t ir_nodes_killed;         /* total IR_DEAD nodes across all passes */
+    uint32_t ir_bytes_before;         /* sum of pre-optimisation code sizes */
+    uint32_t ir_bytes_after;          /* sum of post-optimisation code sizes */
+    uint16_t ir_pass_redundant_load;  /* changes from redundant-load pass */
+    uint16_t ir_pass_dead_store;      /* changes from dead-store pass */
+    uint16_t ir_pass_php_plp;         /* changes from PHP/PLP elision pass */
+    uint16_t ir_pass_pair_rewrite;    /* changes from pair-rewrite pass */
 } runtime_metrics_t;
 
 /* ================================================================
@@ -106,6 +115,24 @@ extern __zpage uint32_t  clockticks6502;
     runtime_metrics.peephole_plp_elided += (plp); \
 } while(0)
 
+/* IR optimisation — called from the IR pipeline in dynamos.c */
+#define metrics_ir_block(before, after) do { \
+    runtime_metrics.ir_blocks_processed++; \
+    runtime_metrics.ir_bytes_before += (before); \
+    runtime_metrics.ir_bytes_after  += (after); \
+} while(0)
+
+#define metrics_ir_pass_results(redundant, dead, php, pair) do { \
+    runtime_metrics.ir_pass_redundant_load += (redundant); \
+    runtime_metrics.ir_pass_dead_store     += (dead); \
+    runtime_metrics.ir_pass_php_plp        += (php); \
+    runtime_metrics.ir_pass_pair_rewrite   += (pair); \
+} while(0)
+
+#define metrics_ir_nodes_killed(n) do { \
+    runtime_metrics.ir_nodes_killed += (n); \
+} while(0)
+
 /* ================================================================
  * WRAM dump functions (banked - call with BANK_RENDER mapped).
  * metrics_dump_sa_b2()      - call once after sa_run.
@@ -138,6 +165,9 @@ void metrics_dump_runtime_b2(void);
 #define metrics_compile_end()             ((void)0)
 #define metrics_optimizer_run(m,p)        ((void)0)
 #define metrics_peephole_remove(p,l)      ((void)0)
+#define metrics_ir_block(b,a)              ((void)0)
+#define metrics_ir_pass_results(r,d,p,pr)  ((void)0)
+#define metrics_ir_nodes_killed(n)         ((void)0)
 static inline void metrics_dump_sa_b2(void) {}
 static inline void metrics_dump_runtime_b2(void) {}
 

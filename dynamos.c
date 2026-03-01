@@ -13,6 +13,9 @@
 #ifdef ENABLE_OPTIMIZER_V2
 #include "core/optimizer_v2_simple.h"
 #endif
+#ifdef ENABLE_IR
+#include "backend/ir.h"
+#endif
 
 #ifdef ENABLE_COMPILE_PPU_EFFECT
 extern uint8_t lnPPUMASK;  // lazynes shadow for $2001
@@ -128,6 +131,9 @@ uint8_t block_has_skip = 0;     // peephole: set when any template in block used
 uint8_t peephole_skipped = 0;   // peephole: set per-instruction when skip=1 was used
 #endif
 uint8_t recompile_instr_start;           // code_index at instruction start (after any deferred PLP flush)
+#ifdef ENABLE_IR
+ir_ctx_t ir_ctx;                         // IR compilation context (~480B WRAM)
+#endif
 #ifdef ENABLE_COMPILE_PPU_EFFECT
 __zpage uint8_t compile_ppu_effect = 0;  // PPU emphasis bits toggled during compile
 __zpage uint8_t compile_ppu_active = 0;  // 1 = PPU effect enabled (SA boot only)
@@ -363,6 +369,7 @@ void run_6502(void)
 	// within a single VBlank period.
 	uint8_t batch_nmi = *(volatile uint8_t*)0x26;
 	uint8_t result;
+	uint8_t batch_count = 0;
 	do {
 	result = dispatch_on_pc();
 #else
@@ -458,11 +465,15 @@ void run_6502(void)
 	// Batch exit conditions — check after each dispatch:
 	// 1. VBlank occurred — must return for NMI processing
 	if (*(volatile uint8_t*)0x26 != batch_nmi) break;
-	// 2. Known idle loop — stop dispatching, let main loop poll VBlank
+	// 2. Iteration limit — prevents infinite batch when lazynes nmiCounter
+	//    is stuck (no pending lnSync).  Guarantees the main loop runs
+	//    periodically so its stuck-frame watchdog can re-arm lazynes.
+	if (++batch_count >= 64) break;
+	// 3. Known idle loop — stop dispatching, let main loop poll VBlank
 #ifdef GAME_IDLE_PC
 	if (pc == GAME_IDLE_PC) break;
 #endif
-	// 3. RTI completed — NMI handler finished, return for state update
+	// 4. RTI completed — NMI handler finished, return for state update
 #ifdef PLATFORM_NES
 	if (nmi_active && sp == nmi_sp_guard) break;
 #endif
@@ -600,10 +611,18 @@ batch_exit:  // case 1 (compile needed) jumps here
 #else
 		// Write this instruction's bytes to flash immediately
 		setup_flash_pc_tables(pc_old);
+#ifdef ENABLE_IR
+		// IR mode: defer flash writes — the optimized buffer will be
+		// bulk-written after the compile loop.  Per-instruction writes
+		// are redundant because the final loop at the bottom writes
+		// the entire cache_code[0][] to flash anyway.
+		(void)instr_len;  // suppress unused warning in IR mode
+#else
 		for (uint8_t i = 0; i < instr_len; i++)
 		{
 			flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index_old + i, flash_code_bank, cache_code[0][code_index_old + i]);
 		}
+#endif
 #endif
 		
 #ifdef ENABLE_PEEPHOLE
@@ -632,11 +651,25 @@ batch_exit:  // case 1 (compile needed) jumps here
 #endif
 		else if (instr_len || pc != pc_old)
 		{
+#ifdef ENABLE_IR
+			// IR mode: only the block entry PC (offset 0) has a valid
+			// native address after optimisation.  Mid-block PCs would
+			// carry stale pre-IR offsets, so leave them unprogrammed
+			// ($FF).  Dispatch will treat them as cache-miss → compile
+			// a new block starting at that PC when it is hit.
+			if (pc_old == entry_pc) {
+				flash_cache_pc_update(recompile_instr_start, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+				opt2_notify_block_compiled(pc_old, flash_code_address + recompile_instr_start + BLOCK_PREFIX_SIZE, flash_code_bank);
+#endif
+			}
+#else
 			flash_cache_pc_update(recompile_instr_start, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
 			// V2: Check if any pending branches/epilogues target this PC
 			opt2_notify_block_compiled(pc_old, flash_code_address + recompile_instr_start + BLOCK_PREFIX_SIZE, flash_code_bank);
 #endif
+#endif  /* ENABLE_IR */
 		}
 		
 	} while (cache_flag[0] & READY_FOR_NEXT);
@@ -667,6 +700,37 @@ batch_exit:  // case 1 (compile needed) jumps here
 			*(volatile uint8_t *)&cache_code[0][code_index] = 0x28;  // PLP
 			code_index++;
 			block_flags_saved = 0;
+		}
+#endif
+
+#ifdef ENABLE_IR
+		// --- IR optimisation pass ---
+		// Record the raw byte buffer into IR nodes, run optimisation
+		// passes, and lower back to native bytes.  The lowered output
+		// overwrites cache_code[0][] (same buffer) with potentially
+		// shorter, optimised code.
+		//
+		// IR code lives in bank 1.  Switch to bank 1, run the pipeline,
+		// then restore.  run_6502() is in the fixed bank ($C000+).
+		{
+			uint8_t ir_saved_bank = mapper_prg_bank;
+			uint8_t ir_bytes_before = code_index;
+			bankswitch_prg(1);
+			ir_init(&ir_ctx);
+			ir_record_from_buffer(&ir_ctx, cache_code[0], code_index);
+			ir_optimize(&ir_ctx);
+			uint8_t lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
+			uint8_t ir_pass_rl = ir_ctx.stat_redundant_load;
+			uint8_t ir_pass_ds = ir_ctx.stat_dead_store;
+			uint8_t ir_pass_pp = ir_ctx.stat_php_plp;
+			uint8_t ir_pass_pr = ir_ctx.stat_pair_rewrite;
+			bankswitch_prg(ir_saved_bank);
+			if (lowered_size) {
+				code_index = lowered_size;
+			}
+			metrics_ir_block(ir_bytes_before, code_index);
+			metrics_ir_pass_results(ir_pass_rl, ir_pass_ds, ir_pass_pp, ir_pass_pr);
+			// If ir_lower returns 0 (error), keep original buffer unchanged
 		}
 #endif
 

@@ -128,6 +128,16 @@ void metrics_dump_runtime_b2(void)
     /* Magic signature */
     p[0x39] = 0x4D;  /* 'M' */
     p[0x3A] = 0x45;  /* 'E' */
+
+    /* IR optimisation stats — starts at +$3C */
+    *(volatile uint32_t *)(p + 0x3C) = runtime_metrics.ir_blocks_processed;
+    *(volatile uint32_t *)(p + 0x40) = runtime_metrics.ir_bytes_before;
+    *(volatile uint32_t *)(p + 0x44) = runtime_metrics.ir_bytes_after;
+    *(volatile uint32_t *)(p + 0x48) = runtime_metrics.ir_nodes_killed;
+    *(volatile uint16_t *)(p + 0x4C) = runtime_metrics.ir_pass_redundant_load;
+    *(volatile uint16_t *)(p + 0x4E) = runtime_metrics.ir_pass_dead_store;
+    *(volatile uint16_t *)(p + 0x50) = runtime_metrics.ir_pass_php_plp;
+    *(volatile uint16_t *)(p + 0x52) = runtime_metrics.ir_pass_pair_rewrite;
 }
 
 #pragma section default

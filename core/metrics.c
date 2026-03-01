@@ -136,8 +136,9 @@ void metrics_dump_runtime_b2(void)
     *(volatile uint32_t *)(p + 0x48) = runtime_metrics.ir_nodes_killed;
     *(volatile uint16_t *)(p + 0x4C) = runtime_metrics.ir_pass_redundant_load;
     *(volatile uint16_t *)(p + 0x4E) = runtime_metrics.ir_pass_dead_store;
-    *(volatile uint16_t *)(p + 0x50) = runtime_metrics.ir_pass_php_plp;
-    *(volatile uint16_t *)(p + 0x52) = runtime_metrics.ir_pass_pair_rewrite;
+    *(volatile uint16_t *)(p + 0x50) = runtime_metrics.ir_pass_dead_load;
+    *(volatile uint16_t *)(p + 0x52) = runtime_metrics.ir_pass_php_plp;
+    *(volatile uint16_t *)(p + 0x54) = runtime_metrics.ir_pass_pair_rewrite;
 }
 
 #pragma section default

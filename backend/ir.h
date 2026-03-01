@@ -271,11 +271,12 @@ typedef struct {
     /* Optimizer state */
     ir_reg_shadow_t regs;
 
-    /* Per-pass change accumulators (set by ir_optimize) */
-    uint8_t stat_redundant_load;
-    uint8_t stat_dead_store;
-    uint8_t stat_php_plp;
-    uint8_t stat_pair_rewrite;
+    /* Per-sub-optimization change counters (incremented in-pass) */
+    uint8_t stat_redundant_load;  /* Pass 1: redundant loads + identity + fold */
+    uint8_t stat_dead_store;      /* Pass 2: dead store + store-back          */
+    uint8_t stat_dead_load;       /* Pass 2b: dead load elimination           */
+    uint8_t stat_php_plp;         /* Pass 3: PLP/PHP pairs removed            */
+    uint8_t stat_pair_rewrite;    /* Pass 4: pair rewrites + CMP #0           */
 } ir_ctx_t;
 
 /* ===================================================================

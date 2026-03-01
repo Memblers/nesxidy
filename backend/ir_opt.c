@@ -958,6 +958,7 @@ uint8_t ir_optimize(ir_ctx_t *ctx)
 
     ctx->stat_redundant_load = 0;
     ctx->stat_dead_store     = 0;
+    ctx->stat_dead_load      = 0;
     ctx->stat_php_plp        = 0;
     ctx->stat_pair_rewrite   = 0;
 
@@ -966,19 +967,24 @@ uint8_t ir_optimize(ir_ctx_t *ctx)
         changes = 0;
 
         c = ir_opt_redundant_load(ctx);
-        ctx->stat_redundant_load += c; changes += c;
+        ctx->stat_redundant_load += c;
+        changes += c;
 
         c = ir_opt_dead_store(ctx);
-        ctx->stat_dead_store += c; changes += c;
+        ctx->stat_dead_store += c;
+        changes += c;
 
         c = ir_opt_dead_load(ctx);
-        ctx->stat_redundant_load += c; changes += c;
+        ctx->stat_dead_load += c;
+        changes += c;
 
         c = ir_opt_php_plp_elision(ctx);
-        ctx->stat_php_plp += c; changes += c;
+        ctx->stat_php_plp += c;
+        changes += c;
 
         c = ir_opt_pair_rewrite(ctx);
-        ctx->stat_pair_rewrite += c; changes += c;
+        ctx->stat_pair_rewrite += c;
+        changes += c;
 
         total_changes += changes;
         iterations++;

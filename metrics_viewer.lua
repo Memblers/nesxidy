@@ -28,10 +28,11 @@
 --         +$40  ir_bytes_before        u32
 --         +$44  ir_bytes_after         u32
 --         +$48  ir_nodes_killed        u32
---         +$4C  ir_pass_redundant_load u16
---         +$4E  ir_pass_dead_store     u16
---         +$50  ir_pass_php_plp        u16
---         +$52  ir_pass_pair_rewrite   u16
+--         +$4C  ir_pass_redundant_load u16  (Pass 1: RL+identity+fold)
+--         +$4E  ir_pass_dead_store     u16  (Pass 2: dead store+store-back)
+--         +$50  ir_pass_dead_load      u16  (Pass 2b)
+--         +$52  ir_pass_php_plp        u16  (Pass 3)
+--         +$54  ir_pass_pair_rewrite   u16  (Pass 4)
 
 local BASE = 0x7E30   -- CPU address (WRAM $6000-$7FFF mapped)
 local MEM  = emu.memType.nesDebug  -- side-effect-free reads
@@ -116,8 +117,9 @@ emu.addEventCallback(function()
   local ir_killed  = r32(0x48)
   local ir_rl      = r16(0x4C)
   local ir_ds      = r16(0x4E)
-  local ir_pp      = r16(0x50)
-  local ir_pr      = r16(0x52)
+  local ir_dl      = r16(0x50)
+  local ir_pp      = r16(0x52)
+  local ir_pr      = r16(0x54)
 
   local ir_saved   = ir_before - ir_after
   local ir_pct     = 0
@@ -139,9 +141,9 @@ emu.addEventCallback(function()
     emu.drawString(2, y, "No IR blocks yet", COL_IR2, COL_BG); y = y + 9
   end
 
-  local ir_total_changes = ir_rl + ir_ds + ir_pp + ir_pr
+  local ir_total_changes = ir_rl + ir_ds + ir_dl + ir_pp + ir_pr
   emu.drawString(2, y, string.format("Pass hits (%d total):", ir_total_changes), COL_IR, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("  RedundLoad: %d  DeadStore: %d", ir_rl, ir_ds), COL_IR2, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("  PHP/PLP:    %d  PairRwrt: %d", ir_pp, ir_pr), COL_IR2, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("  RedundLoad:%d DeadStore:%d DeadLoad:%d", ir_rl, ir_ds, ir_dl), COL_IR2, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("  PHP/PLP:%d PairRwrt:%d", ir_pp, ir_pr), COL_IR2, COL_BG); y = y + 9
 
 end, emu.eventType.endFrame)

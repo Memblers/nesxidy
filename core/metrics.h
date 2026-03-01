@@ -49,10 +49,11 @@ typedef struct {
     uint32_t ir_nodes_killed;         /* total IR_DEAD nodes across all passes */
     uint32_t ir_bytes_before;         /* sum of pre-optimisation code sizes */
     uint32_t ir_bytes_after;          /* sum of post-optimisation code sizes */
-    uint16_t ir_pass_redundant_load;  /* changes from redundant-load pass */
-    uint16_t ir_pass_dead_store;      /* changes from dead-store pass */
-    uint16_t ir_pass_php_plp;         /* changes from PHP/PLP elision pass */
-    uint16_t ir_pass_pair_rewrite;    /* changes from pair-rewrite pass */
+    uint16_t ir_pass_redundant_load;  /* Pass 1: redundant load+identity+fold */
+    uint16_t ir_pass_dead_store;      /* Pass 2: dead store + store-back      */
+    uint16_t ir_pass_dead_load;       /* Pass 2b: dead load elimination       */
+    uint16_t ir_pass_php_plp;         /* Pass 3: PLP/PHP pairs removed        */
+    uint16_t ir_pass_pair_rewrite;    /* Pass 4: pair rewrites + CMP #0 elim  */
 } runtime_metrics_t;
 
 /* ================================================================
@@ -122,11 +123,12 @@ extern __zpage uint32_t  clockticks6502;
     runtime_metrics.ir_bytes_after  += (after); \
 } while(0)
 
-#define metrics_ir_pass_results(redundant, dead, php, pair) do { \
-    runtime_metrics.ir_pass_redundant_load += (redundant); \
-    runtime_metrics.ir_pass_dead_store     += (dead); \
-    runtime_metrics.ir_pass_php_plp        += (php); \
-    runtime_metrics.ir_pass_pair_rewrite   += (pair); \
+#define metrics_ir_pass_results(rl, ds, dl, pp, pr) do { \
+    runtime_metrics.ir_pass_redundant_load += (rl); \
+    runtime_metrics.ir_pass_dead_store     += (ds); \
+    runtime_metrics.ir_pass_dead_load      += (dl); \
+    runtime_metrics.ir_pass_php_plp        += (pp); \
+    runtime_metrics.ir_pass_pair_rewrite   += (pr); \
 } while(0)
 
 #define metrics_ir_nodes_killed(n) do { \
@@ -166,7 +168,7 @@ void metrics_dump_runtime_b2(void);
 #define metrics_optimizer_run(m,p)        ((void)0)
 #define metrics_peephole_remove(p,l)      ((void)0)
 #define metrics_ir_block(b,a)              ((void)0)
-#define metrics_ir_pass_results(r,d,p,pr)  ((void)0)
+#define metrics_ir_pass_results(rl,ds,dl,pp,pr)  ((void)0)
 #define metrics_ir_nodes_killed(n)         ((void)0)
 static inline void metrics_dump_sa_b2(void) {}
 static inline void metrics_dump_runtime_b2(void) {}

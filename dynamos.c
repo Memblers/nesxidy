@@ -720,16 +720,25 @@ batch_exit:  // case 1 (compile needed) jumps here
 			ir_record_from_buffer(&ir_ctx, cache_code[0], code_index);
 			ir_optimize(&ir_ctx);
 			uint8_t lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
+			/* Capture per-pass counters while bank 1 is mapped */
 			uint8_t ir_pass_rl = ir_ctx.stat_redundant_load;
 			uint8_t ir_pass_ds = ir_ctx.stat_dead_store;
+			uint8_t ir_pass_dl = ir_ctx.stat_dead_load;
 			uint8_t ir_pass_pp = ir_ctx.stat_php_plp;
 			uint8_t ir_pass_pr = ir_ctx.stat_pair_rewrite;
+			/* Count dead (killed) nodes */
+			uint8_t ir_dead_cnt = 0;
+			{ uint8_t k; for (k = 0; k < ir_ctx.node_count; k++) {
+				if (ir_ctx.nodes[k].op == 0xFF) ir_dead_cnt++;
+			} }
 			bankswitch_prg(ir_saved_bank);
 			if (lowered_size) {
 				code_index = lowered_size;
 			}
 			metrics_ir_block(ir_bytes_before, code_index);
-			metrics_ir_pass_results(ir_pass_rl, ir_pass_ds, ir_pass_pp, ir_pass_pr);
+			metrics_ir_nodes_killed(ir_dead_cnt);
+			metrics_ir_pass_results(ir_pass_rl, ir_pass_ds, ir_pass_dl,
+			                        ir_pass_pp, ir_pass_pr);
 			// If ir_lower returns 0 (error), keep original buffer unchanged
 		}
 #endif

@@ -2614,6 +2614,11 @@ static uint8_t recompile_opcode_b2()
 					dp->target_pc = (uint16_t)buf[p + 7]
 					              | ((uint16_t)buf[p + 11] << 8);
 					dp->is_branch = 1;
+					/* Tell optimizer whether this branch reads carry.
+					 * BCC=$90 BCS=$B0 read carry; all others don't. */
+					{ uint8_t bop = buf[p - 2];
+					  ir_ctx.carry_live_at_exit = (bop == 0x90 || bop == 0xB0) ? 1 : 0;
+					}
 				} else {
 					/* 9-byte JMP template — target is where pc was set */
 					dp->target_pc = pc;

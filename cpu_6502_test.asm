@@ -1796,6 +1796,173 @@ T98:    LDA #$AA
         NOP
 T98_ok:
 
+; --- T99: CMP #$00 elimination — LDA zp, CMP #$00, BEQ ---
+; The optimizer should kill the CMP #$00 because LDA already sets N/Z
+; and BEQ only reads Z (not carry).  Behaviour must be identical.
+T99:    LDA #$00
+        STA $0010         ; zp = 0
+        LDA $0010         ; A=0, Z=1 (set by LDA)
+        CMP #$00          ; redundant: Z already 1; optimizer should kill this
+        BEQ T99_z         ; should be taken (Z=1)
+        LDA #$99
+        STA $0020
+        JMP End
+T99_z:  LDA #$42          ; non-zero
+        STA $0010
+        LDA $0010         ; A=$42, Z=0
+        CMP #$00          ; redundant: Z already 0
+        BNE T99_nz        ; should be taken (Z=0)
+        LDA #$99
+        STA $0020
+        JMP End
+T99_nz:
+
+; --- T9A: CMP #$00 elimination — LDA #imm, CMP #$00, BMI/BPL ---
+; Tests that N flag is also preserved correctly after CMP #$00 removal.
+T9A:    LDA #$80          ; A=$80, N=1
+        CMP #$00          ; redundant: N already 1
+        BMI T9A_neg       ; should be taken (N=1)
+        LDA #$9A
+        STA $0020
+        JMP End
+T9A_neg:
+        LDA #$7F          ; A=$7F, N=0
+        CMP #$00          ; redundant: N already 0
+        BPL T9A_pos       ; should be taken (N=0)
+        LDA #$9A
+        STA $0020
+        JMP End
+T9A_pos:
+
+; --- T9B: CMP #$00 NOT eliminated when carry matters ---
+; After CMP #$00, C=1 unconditionally (A >= 0 is always true).
+; A preceding LDA does NOT set C.  If optimizer incorrectly kills
+; the CMP, the carry from a prior CLC will survive → BCS fails.
+T9B:    CLC               ; C=0
+        LDA #$05          ; A=5 (does not change C; C still 0)
+        CMP #$00          ; sets C=1 (5 >= 0); optimizer must NOT kill this
+        BCS T9B_ok        ; should be taken (C=1 from CMP)
+        LDA #$9B
+        STA $0020
+        JMP End
+T9B_ok:
+
+; --- T9C: CMP #$00 elimination with AND — AND sets N/Z ---
+T9C:    LDA #$FF
+        AND #$00          ; A=0, Z=1, N=0
+        CMP #$00          ; redundant: Z=1 already
+        BEQ T9C_ok        ; should be taken
+        LDA #$9C
+        STA $0020
+        JMP End
+T9C_ok:
+
+; --- T9D: CMP #$00 elimination with ORA ---
+T9D:    LDA #$00
+        ORA #$80          ; A=$80, N=1, Z=0
+        CMP #$00          ; redundant: N=1, Z=0 already
+        BMI T9D_ok        ; should be taken (N=1)
+        LDA #$9D
+        STA $0020
+        JMP End
+T9D_ok:
+
+; --- T9E: CMP #$00 elimination with EOR ---
+T9E:    LDA #$FF
+        EOR #$FF          ; A=0, Z=1, N=0
+        CMP #$00          ; redundant: Z=1 already
+        BEQ T9E_ok        ; should be taken
+        LDA #$9E
+        STA $0020
+        JMP End
+T9E_ok:
+
+; --- T9F: CPX #$00 elimination — LDX sets N/Z ---
+T9F:    LDX #$00          ; X=0, Z=1
+        CPX #$00          ; redundant
+        BEQ T9F_ok        ; should be taken
+        LDA #$9F
+        STA $0020
+        JMP End
+T9F_ok:
+
+; --- TA0: PHP/PLP elision — consecutive stores with flag check ---
+; Multiple STA instructions in a row produce PLP/PHP pairs between
+; them in the recompiler.  The optimizer should elide these without
+; breaking flag state.  We set carry, do several stores (which the
+; recompiler wraps in PHP/PLP), then check carry survived.
+TA0:    SEC               ; C=1
+        LDA #$11
+        STA $0010         ; store 1 — recompiler emits PHP at end
+        STA $0011         ; store 2 — PLP at start, PHP at end (PLP/PHP pair between)
+        STA $0012         ; store 3 — another PLP/PHP pair
+        BCS TA0_c1        ; carry should still be 1
+        LDA #$A0
+        STA $0020
+        JMP End
+TA0_c1: LDA $0010
+        CMP #$11
+        BEQ TA0_v1
+        LDA #$A0
+        STA $0020
+        JMP End
+TA0_v1: LDA $0012
+        CMP #$11
+        BEQ TA0_ok
+        LDA #$A0
+        STA $0020
+        JMP End
+TA0_ok:
+
+; --- TA1: PHP/PLP elision — stores between ALU ops ---
+; LDA #imm, STA zp, STA zp, AND #imm, BEQ
+; The PLP/PHP pairs between stores should be elided, and flags from
+; AND must survive to the BEQ.
+TA1:    LDA #$FF
+        STA $0010         ; PHP at end
+        STA $0011         ; PLP/PHP pair between this and prev
+        AND #$00          ; A=0, Z=1
+        BEQ TA1_ok        ; should be taken
+        LDA #$A1
+        STA $0020
+        JMP End
+TA1_ok:
+
+; --- TA2: PHP/PLP elision — LDX/STX/LDY/STY sequence ---
+; Register transfers and stores generate PHP/PLP pairs.
+TA2:    LDX #$42
+        STX $0010         ; PHP at end
+        LDY #$37          ; PLP at start, PHP at end
+        STY $0011         ; PLP/PHP pair
+        LDA $0010
+        CMP #$42
+        BEQ TA2_x
+        LDA #$A2
+        STA $0020
+        JMP End
+TA2_x:  LDA $0011
+        CMP #$37
+        BEQ TA2_ok
+        LDA #$A2
+        STA $0020
+        JMP End
+TA2_ok:
+
+; --- TA3: PHP/PLP elision — flag preservation across long chain ---
+; 5 consecutive stores then a branch on the flags from before.
+; The N flag from LDA #$80 must survive through all the PLP/PHP pairs.
+TA3:    LDA #$80          ; N=1
+        STA $0010
+        STA $0011
+        STA $0012
+        STA $0013
+        STA $0014
+        BMI TA3_ok        ; N=1 should survive all the store pairs
+        LDA #$A3
+        STA $0020
+        JMP End
+TA3_ok:
+
 ; --- End of IR tests ---
 
 T_DONE:

@@ -282,6 +282,7 @@ typedef struct {
     uint8_t   enabled;        /* 1 = recording IR, 0 = bypass (old path) */
     uint8_t   block_has_jsr;  /* JSR/NJSR seen in this block */
     uint8_t   estimated_size; /* running estimate of lowered byte count */
+    uint8_t   carry_live_at_exit; /* 1 = block's branch reads carry (BCC/BCS) */
 
     /* Optimizer state */
     ir_reg_shadow_t regs;
@@ -311,6 +312,7 @@ typedef struct {
     (ctx)->enabled = 1; \
     (ctx)->block_has_jsr = 0; \
     (ctx)->estimated_size = 0; \
+    (ctx)->carry_live_at_exit = 1; /* conservative until branch recorded */ \
     (ctx)->regs.a_known = 0; \
     (ctx)->regs.x_known = 0; \
     (ctx)->regs.y_known = 0; \

@@ -187,6 +187,27 @@ static uint8_t reads_flags(uint8_t op)
     return 0;
 }
 
+/* Helper: does this instruction READ the carry flag specifically?
+ * (ADC/SBC use carry-in, ROL/ROR rotate through carry,
+ *  BCC/BCS branch on carry.) */
+static uint8_t reads_carry(uint8_t op)
+{
+    switch (op) {
+        case IR_ADC_IMM: case IR_SBC_IMM:
+        case IR_ADC_ZP:  case IR_SBC_ZP:
+        case IR_ADC_ABS: case IR_SBC_ABS:
+        case IR_ADC_ABSX: case IR_SBC_ABSX:
+        case IR_ADC_ABSY: case IR_SBC_ABSY:
+        case IR_ROL_A: case IR_ROR_A:
+        case IR_ROL_ZP: case IR_ROR_ZP:
+        case IR_ROL_ABS: case IR_ROR_ABS:
+        case IR_ROL_ABSX: case IR_ROR_ABSX:
+        case IR_BCC: case IR_BCS:
+            return 1;
+    }
+    return 0;
+}
+
 /* Helper: is this a branch node? */
 static uint8_t is_branch(uint8_t op)
 {
@@ -364,9 +385,13 @@ uint8_t ir_opt_redundant_load(ir_ctx_t *ctx)
         else if (writes_a(n->op))  { r->a_known = 0; }
 
         if (n->op == IR_LDX_IMM) { r->x_val = (uint8_t)n->operand; r->x_known = 1; }
+        else if (n->op == IR_INX && r->x_known) { r->x_val = (uint8_t)(r->x_val + 1); }
+        else if (n->op == IR_DEX && r->x_known) { r->x_val = (uint8_t)(r->x_val - 1); }
         else if (writes_x(n->op))  { r->x_known = 0; }
 
         if (n->op == IR_LDY_IMM) { r->y_val = (uint8_t)n->operand; r->y_known = 1; }
+        else if (n->op == IR_INY && r->y_known) { r->y_val = (uint8_t)(r->y_val + 1); }
+        else if (n->op == IR_DEY && r->y_known) { r->y_val = (uint8_t)(r->y_val - 1); }
         else if (writes_y(n->op))  { r->y_known = 0; }
 
         /* Opaque nodes and branches invalidate register shadow (conservative) */
@@ -899,10 +924,12 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
             uint8_t c_needed = 0;
             for (uint8_t k = j + 1; k < ctx->node_count; k++) {
                 if (ctx->nodes[k].op == IR_DEAD) continue;
-                if (reads_flags(ctx->nodes[k].op)) { c_needed = 1; break; }
+                if (reads_carry(ctx->nodes[k].op)) { c_needed = 1; break; }
                 if (writes_flags(ctx->nodes[k].op)) break;
-                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op))
-                    { c_needed = 1; break; }
+                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op)) {
+                    c_needed = ctx->carry_live_at_exit;
+                    break;
+                }
             }
             if (!c_needed) {
                 ir_kill(ctx, j);
@@ -915,10 +942,12 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
             uint8_t c_needed = 0;
             for (uint8_t k = j + 1; k < ctx->node_count; k++) {
                 if (ctx->nodes[k].op == IR_DEAD) continue;
-                if (reads_flags(ctx->nodes[k].op)) { c_needed = 1; break; }
+                if (reads_carry(ctx->nodes[k].op)) { c_needed = 1; break; }
                 if (writes_flags(ctx->nodes[k].op)) break;
-                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op))
-                    { c_needed = 1; break; }
+                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op)) {
+                    c_needed = ctx->carry_live_at_exit;
+                    break;
+                }
             }
             if (!c_needed) {
                 ir_kill(ctx, j);
@@ -931,10 +960,12 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
             uint8_t c_needed = 0;
             for (uint8_t k = j + 1; k < ctx->node_count; k++) {
                 if (ctx->nodes[k].op == IR_DEAD) continue;
-                if (reads_flags(ctx->nodes[k].op)) { c_needed = 1; break; }
+                if (reads_carry(ctx->nodes[k].op)) { c_needed = 1; break; }
                 if (writes_flags(ctx->nodes[k].op)) break;
-                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op))
-                    { c_needed = 1; break; }
+                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op)) {
+                    c_needed = ctx->carry_live_at_exit;
+                    break;
+                }
             }
             if (!c_needed) {
                 ir_kill(ctx, j);

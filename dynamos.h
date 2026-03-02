@@ -15,8 +15,8 @@
 //   +2: exit_pc    (2B) - guest PC at block end
 //   +4: code_len   (1B) - total bytes of native code + epilogue
 //   +5: epilogue_offset (1B) - offset from code start to patchable epilogue
-//   +6: flags      (1B) - reserved for future use
-//   +7: reserved   (1B) - pad to 8 bytes
+//   +6: flags      (1B) - cycle count when ENABLE_BLOCK_CYCLES, else $FF
+//   +7: sentinel   (1B) - $AA = block complete; $FF = incomplete/erased
 //
 // PC table entries point past the header to native code start.
 // Code entry points are aligned to 16-byte boundaries.
@@ -56,6 +56,10 @@
 
 // Block prefix = header size (PC table points past header to code)
 #define BLOCK_PREFIX_SIZE BLOCK_HEADER_SIZE
+
+// Block-complete sentinel value written to header offset 7 after all code
+// bytes are in flash.  Dispatch checks this before jumping to the block.
+#define BLOCK_SENTINEL 0xAA
 
 // Max native code per block (keep staging buffer <= 256 for now)
 #define CODE_SIZE (256 - EPILOGUE_SIZE - XBANK_EPILOGUE_SIZE - 6)

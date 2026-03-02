@@ -120,6 +120,7 @@
 //#define GAME_TARG
 //#define GAME_TARG_TEST_ROM
 //#define GAME_SPECTAR
+//#define GAME_CPU_6502_TEST
 #endif
 
 // --- Static analysis pass ---
@@ -182,6 +183,10 @@
 #endif
 #ifdef GAME_SPECTAR
 #define ROM_ADDR_MIN  0x1000
+#define ROM_ADDR_MAX  0x3FFF
+#endif
+#ifdef GAME_CPU_6502_TEST
+#define ROM_ADDR_MIN  0x2800
 #define ROM_ADDR_MAX  0x3FFF
 #endif
 

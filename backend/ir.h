@@ -225,10 +225,21 @@ typedef struct {
  * IR context — holds the node buffer and state for one block
  * =================================================================== */
 
-#define IR_MAX_NODES     96    /* 96 × 4 = 384 bytes */
+#define IR_MAX_NODES     128    /* 96 × 4 = 384 bytes */
 #define IR_MAX_LABELS    16    /* intra-block branch target labels */
 #define IR_MAX_EXT       64    /* operand extension sidecar bytes */
 #define IR_MAX_TMPL_PATCHES 8  /* template patch entries */
+#define IR_MAX_DEFERRED_PATCHES 4  /* Phase B: deferred pending-patch entries */
+
+/* Phase B: deferred pending-patch for patchable branch/JMP templates.
+ * During IR compilation, templates with JMP $FFFF can't call
+ * opt2_record_pending_branch_safe because code_index will shift
+ * after IR lowering.  We defer the info and resolve post-lowering. */
+typedef struct {
+    uint16_t target_pc;   /* branch/JMP target PC */
+    uint8_t  is_branch;   /* 1 = 21-byte branch tmpl, 0 = 9-byte JMP tmpl */
+    uint8_t  pad;
+} ir_deferred_patch_t;
 
 /* Template patch: records a (offset, value) pair for template byte patching */
 typedef struct {
@@ -263,6 +274,10 @@ typedef struct {
     ir_tmpl_patch_t tmpl_patches[IR_MAX_TMPL_PATCHES];
     uint8_t   tmpl_patch_count;
 
+    /* Phase B: deferred pending patches for patchable templates */
+    ir_deferred_patch_t deferred_patches[IR_MAX_DEFERRED_PATCHES];
+    uint8_t   deferred_patch_count;
+
     /* Bookkeeping */
     uint8_t   enabled;        /* 1 = recording IR, 0 = bypass (old path) */
     uint8_t   block_has_jsr;  /* JSR/NJSR seen in this block */
@@ -280,6 +295,57 @@ typedef struct {
 } ir_ctx_t;
 
 /* ===================================================================
+ * Bank-safe macros — callable from ANY bank (pure WRAM writes)
+ *
+ * These replace function calls to bank1 code when emitting IR from
+ * bank2 (recompile_opcode_b2).  All state lives in WRAM.
+ * =================================================================== */
+
+/* Reset IR context for a new block (replaces ir_init from bank1) */
+#define IR_INIT(ctx) do { \
+    (ctx)->node_count = 0; \
+    (ctx)->label_count = 0; \
+    (ctx)->ext_used = 0; \
+    (ctx)->tmpl_patch_count = 0; \
+    (ctx)->deferred_patch_count = 0; \
+    (ctx)->enabled = 1; \
+    (ctx)->block_has_jsr = 0; \
+    (ctx)->estimated_size = 0; \
+    (ctx)->regs.a_known = 0; \
+    (ctx)->regs.x_known = 0; \
+    (ctx)->regs.y_known = 0; \
+    (ctx)->regs.flags_saved = 0; \
+    (ctx)->stat_redundant_load = 0; \
+    (ctx)->stat_dead_store = 0; \
+    (ctx)->stat_dead_load = 0; \
+    (ctx)->stat_php_plp = 0; \
+    (ctx)->stat_pair_rewrite = 0; \
+} while(0)
+
+/* Append one IR node (replaces ir_emit from bank1).
+ * Silently drops if buffer full — matches ir_emit() semantics. */
+#define IR_EMIT(ctx, _op, _flags, _operand) do { \
+    if ((ctx)->node_count < IR_MAX_NODES) { \
+        ir_node_t *_n = &(ctx)->nodes[(ctx)->node_count]; \
+        _n->op = (_op); \
+        _n->flags = (_flags); \
+        _n->operand = (uint16_t)(_operand); \
+        (ctx)->node_count++; \
+    } \
+} while(0)
+
+/* Record a template patch entry */
+#define IR_TMPL_PATCH(ctx, _node_idx, _byte_off, _val) do { \
+    if ((ctx)->tmpl_patch_count < IR_MAX_TMPL_PATCHES) { \
+        ir_tmpl_patch_t *_p = &(ctx)->tmpl_patches[(ctx)->tmpl_patch_count]; \
+        _p->tmpl_node_index = (_node_idx); \
+        _p->byte_offset = (_byte_off); \
+        _p->value = (_val); \
+        (ctx)->tmpl_patch_count++; \
+    } \
+} while(0)
+
+/* ===================================================================
  * IR API — recording
  * =================================================================== */
 
@@ -289,11 +355,11 @@ void ir_init(ir_ctx_t *ctx);
 /* Emit a single IR node (returns 0 on overflow) */
 uint8_t ir_emit(ir_ctx_t *ctx, uint8_t op, uint8_t flags, uint16_t operand);
 
-/* Convenience emitters for common patterns */
+/* Convenience emitters */
 uint8_t ir_emit_byte(ir_ctx_t *ctx, uint8_t native_opcode);
-uint8_t ir_emit_imm(ir_ctx_t *ctx, uint8_t ir_op, uint8_t value);
-uint8_t ir_emit_zp(ir_ctx_t *ctx, uint8_t ir_op, uint8_t addr);
-uint8_t ir_emit_abs(ir_ctx_t *ctx, uint8_t ir_op, uint16_t addr);
+
+/* Phase A removed ir_emit_imm/ir_emit_zp/ir_emit_abs — replaced by
+ * ir_op_flags[] table lookup inside ir_record_from_buffer. */
 
 /* Emit a raw native opcode + abs operand (for opcodes not yet in the IR enum) */
 uint8_t ir_emit_raw_op_abs(ir_ctx_t *ctx, uint8_t native_opcode, uint16_t addr);
@@ -340,15 +406,19 @@ uint8_t ir_lower(ir_ctx_t *ctx, uint8_t *output_buf, uint8_t max_size);
  * Faster than ir_lower but approximate. */
 uint8_t ir_estimate_size(const ir_ctx_t *ctx);
 
+/* Phase B: resolve deferred pending patches post-IR-lowering.
+ * Scans the lowered code buffer for JMP $FFFF patterns and records
+ * the correct post-lowering flash addresses.  Call while bank 1 is mapped,
+ * after ir_lower() has updated cache_code[0][] and code_index. */
+void ir_resolve_deferred_patches(void);
+
 /* ===================================================================
  * IR API — buffer recording (see ir.c)
  * =================================================================== */
 
 /* Scan a raw 6502 byte buffer and populate IR nodes.
- * This is the post-hoc recording path: recompile_opcode_b2 emits raw bytes
- * to cache_code[], then this function replays them into the IR for
- * optimization.  Each recognized instruction becomes an IR node; unknown
- * byte sequences are recorded as IR_RAW_BYTE nodes (passthrough).
+ * Phase A: now uses a flat ir_op_flags[] table for annotation instead of
+ * the old convenience-emitter switch statements (~220 bytes saved in bank 1).
  * Returns the number of IR nodes recorded. */
 uint8_t ir_record_from_buffer(ir_ctx_t *ctx, const uint8_t *buf, uint8_t len);
 

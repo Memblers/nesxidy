@@ -365,4 +365,58 @@ uint8_t ir_lower(ir_ctx_t *ctx, uint8_t *output_buf, uint8_t max_size)
     return pos;
 }
 
+/* ===================================================================
+ * ir_resolve_deferred_patches — Phase B post-lowering patch resolution
+ *
+ * After ir_lower() rewrites cache_code[0][], patchable templates
+ * (21-byte branch, 9-byte JMP) may have shifted position.  This
+ * function scans the lowered buffer for JMP $FFFF ($4C $FF $FF)
+ * patterns, matches them 1:1 (in order) with the deferred_patches[]
+ * table, and records the correct flash addresses via
+ * opt2_record_pending_branch_safe.
+ *
+ * Must be called while bank 1 is mapped (lives in bank1 code).
+ * Accesses WRAM globals directly to avoid argument-passing overhead
+ * in the fixed bank (which has zero headroom).
+ * =================================================================== */
+void ir_resolve_deferred_patches(void)
+{
+    extern ir_ctx_t ir_ctx;
+    extern uint8_t cache_code[][CACHE_CODE_BUF_SIZE];
+    extern __zpage uint8_t code_index;
+    extern uint16_t flash_code_address;
+    extern uint8_t flash_code_bank;
+    extern void opt2_record_pending_branch_safe(
+        uint16_t, uint16_t, uint8_t, uint16_t, uint8_t);
+
+    if (ir_ctx.deferred_patch_count == 0)
+        return;
+
+    uint8_t dp_idx = 0;
+    uint8_t len = code_index;
+    uint8_t *buf = cache_code[0];
+
+    for (uint8_t p = 0; (uint8_t)(p + 2) < len && dp_idx < ir_ctx.deferred_patch_count; p++) {
+        if (buf[p] == 0x4C && buf[p + 1] == 0xFF && buf[p + 2] == 0xFF) {
+            uint16_t jmp_op_addr = flash_code_address + BLOCK_PREFIX_SIZE + p + 1;
+            if (ir_ctx.deferred_patches[dp_idx].is_branch) {
+                /* 21-byte branch template: branch offset byte at JMP - 1 */
+                uint16_t br_off_addr = flash_code_address + BLOCK_PREFIX_SIZE + p - 1;
+                opt2_record_pending_branch_safe(
+                    br_off_addr, jmp_op_addr,
+                    flash_code_bank,
+                    ir_ctx.deferred_patches[dp_idx].target_pc, 0);
+            } else {
+                /* 9-byte JMP template: BCC offset byte at JMP - 2 */
+                uint16_t bcc_op_addr = flash_code_address + BLOCK_PREFIX_SIZE + p - 2;
+                opt2_record_pending_branch_safe(
+                    bcc_op_addr, jmp_op_addr,
+                    flash_code_bank,
+                    ir_ctx.deferred_patches[dp_idx].target_pc, 0);
+            }
+            dp_idx++;
+        }
+    }
+}
+
 #pragma section default

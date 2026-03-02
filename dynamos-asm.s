@@ -35,6 +35,11 @@ _ROM_OFFSET = $1000
 _ROM_NAME = _rom_spectar
 	endif
 
+	if (GAME_NUMBER == 4)
+_ROM_OFFSET = $2800
+_ROM_NAME = _rom_cpu6502test
+	endif
+
 	if (GAME_NUMBER == 10)
 _ROM_OFFSET = $C000
 _ROM_NAME = _rom_nes_prg
@@ -47,6 +52,7 @@ _ROM_NAME = _rom_nes_prg
 
 RECOMPILED	=	$80
 INTERPRETED	=	$40
+BLOCK_SENTINEL	=	$AA
 
 ; --- Bank assignments: MUST match bank_map.h ---
 BANK_PC			=	19
@@ -339,6 +345,16 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	bne .no_cycles
 	inc _clockticks6502+2
 .no_cycles:
+
+	; NOTE: Block-complete sentinel ($AA at header+7 = dispatch_addr-1)
+	; is written by the C compile path but NOT checked here.  An asm
+	; guard was attempted (LDY #1 / LDA (addr_lo),Y / CMP #$AA / BNE
+	; not_recompiled) but adding an in-range BNE to the same label as
+	; the earlier relaxed BEQ/BMI caused vasm -opt-branch to produce
+	; inconsistent JMP targets, breaking ALL dispatches.  The deferred
+	; PC table update (writing the table entry only after code is in
+	; flash) is the primary crash fix; the sentinel write is kept as
+	; forensic metadata for offline flash dumps.
 
 	lda _status
 	;ora #$04	; REMOVED: was hiding IRQ flag during JIT, but this

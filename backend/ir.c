@@ -198,95 +198,7 @@ uint8_t ir_emit_byte(ir_ctx_t *ctx, uint8_t native_opcode)
 }
 
 /* -------------------------------------------------------------------
- * Convenience: emit an IR node with 8-bit immediate operand
- * ------------------------------------------------------------------- */
-uint8_t ir_emit_imm(ir_ctx_t *ctx, uint8_t ir_op, uint8_t value)
-{
-    uint8_t flags = 0;
-    /* Auto-set flags for common immediates */
-    switch (ir_op) {
-        case IR_LDA_IMM: flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-        case IR_LDX_IMM: flags = IR_F_WRITES_X | IR_F_WRITES_FLAGS; break;
-        case IR_LDY_IMM: flags = IR_F_WRITES_Y | IR_F_WRITES_FLAGS; break;
-        case IR_ADC_IMM: case IR_SBC_IMM:
-            flags = IR_F_READS_A | IR_F_READS_FLAGS | IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-        case IR_AND_IMM: case IR_ORA_IMM: case IR_EOR_IMM:
-            flags = IR_F_READS_A | IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-        case IR_CMP_IMM: flags = IR_F_READS_A | IR_F_WRITES_FLAGS; break;
-        case IR_CPX_IMM: flags = IR_F_READS_X | IR_F_WRITES_FLAGS; break;
-        case IR_CPY_IMM: flags = IR_F_READS_Y | IR_F_WRITES_FLAGS; break;
-    }
-    return ir_emit(ctx, ir_op, flags, (uint16_t)value);
-}
-
-/* -------------------------------------------------------------------
- * Convenience: emit an IR node with 8-bit ZP address operand
- * ------------------------------------------------------------------- */
-uint8_t ir_emit_zp(ir_ctx_t *ctx, uint8_t ir_op, uint8_t addr)
-{
-    uint8_t flags = 0;
-    switch (ir_op) {
-        case IR_LDA_ZP: flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-        case IR_LDX_ZP: flags = IR_F_WRITES_X | IR_F_WRITES_FLAGS; break;
-        case IR_LDY_ZP: flags = IR_F_WRITES_Y | IR_F_WRITES_FLAGS; break;
-        case IR_STA_ZP: flags = IR_F_READS_A; break;
-        case IR_STX_ZP: flags = IR_F_READS_X; break;
-        case IR_STY_ZP: flags = IR_F_READS_Y; break;
-        case IR_INC_ZP: case IR_DEC_ZP:
-        case IR_ASL_ZP: case IR_LSR_ZP:
-        case IR_ROL_ZP: case IR_ROR_ZP:
-            flags = IR_F_WRITES_FLAGS; break;
-    }
-    return ir_emit(ctx, ir_op, flags, (uint16_t)addr);
-}
-
-/* -------------------------------------------------------------------
- * Convenience: emit an IR node with 16-bit ABS address operand
- * ------------------------------------------------------------------- */
-uint8_t ir_emit_abs(ir_ctx_t *ctx, uint8_t ir_op, uint16_t addr)
-{
-    uint8_t flags = 0;
-    switch (ir_op) {
-        case IR_LDA_ABS: case IR_LDA_ABSX: case IR_LDA_ABSY:
-            flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-        case IR_LDX_ABS: case IR_LDX_ABSY:
-            flags = IR_F_WRITES_X | IR_F_WRITES_FLAGS; break;
-        case IR_LDY_ABS: case IR_LDY_ABSX:
-            flags = IR_F_WRITES_Y | IR_F_WRITES_FLAGS; break;
-        case IR_STA_ABS: case IR_STA_ABSX: case IR_STA_ABSY:
-            flags = IR_F_READS_A; break;
-        case IR_STX_ABS: flags = IR_F_READS_X; break;
-        case IR_STY_ABS: flags = IR_F_READS_Y; break;
-        case IR_JMP_ABS: break;
-        case IR_JSR:     break;
-        case IR_ADC_ABS: case IR_SBC_ABS: case IR_ADC_ABSX: case IR_SBC_ABSX:
-        case IR_ADC_ABSY: case IR_SBC_ABSY:
-            flags = IR_F_READS_A | IR_F_READS_FLAGS | IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-        case IR_AND_ABS: case IR_ORA_ABS: case IR_EOR_ABS:
-        case IR_AND_ABSX: case IR_ORA_ABSX: case IR_EOR_ABSX:
-        case IR_AND_ABSY: case IR_ORA_ABSY: case IR_EOR_ABSY:
-            flags = IR_F_READS_A | IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-        case IR_CMP_ABS: case IR_CMP_ABSX: case IR_CMP_ABSY:
-            flags = IR_F_READS_A | IR_F_WRITES_FLAGS; break;
-        case IR_CPX_ABS: flags = IR_F_READS_X | IR_F_WRITES_FLAGS; break;
-        case IR_CPY_ABS: flags = IR_F_READS_Y | IR_F_WRITES_FLAGS; break;
-        case IR_INC_ABS: case IR_DEC_ABS:
-        case IR_ASL_ABS: case IR_LSR_ABS:
-        case IR_ROL_ABS: case IR_ROR_ABS:
-        case IR_INC_ABSX: case IR_DEC_ABSX:
-        case IR_ASL_ABSX: case IR_LSR_ABSX:
-        case IR_ROL_ABSX: case IR_ROR_ABSX:
-            flags = IR_F_WRITES_FLAGS; break;
-        case IR_BIT_ABS: flags = IR_F_READS_A | IR_F_WRITES_FLAGS; break;
-    }
-    return ir_emit(ctx, ir_op, flags, addr);
-}
-
-/* -------------------------------------------------------------------
  * ir_emit_raw_op_abs — raw 6502 opcode + 16-bit operand
- * Pack native opcode into operand[15:8], low addr byte into operand[7:0]
- * Actually we just use IR_RAW_BYTE for the opcode, then IR_RAW_WORD for addr.
- * Simpler: three raw bytes.
  * ------------------------------------------------------------------- */
 uint8_t ir_emit_raw_op_abs(ir_ctx_t *ctx, uint8_t native_opcode, uint16_t addr)
 {
@@ -351,24 +263,137 @@ uint8_t ir_emit_raw_block(ir_ctx_t *ctx, const uint8_t *data, uint8_t len)
  * ------------------------------------------------------------------- */
 uint8_t ir_estimate_size(const ir_ctx_t *ctx)
 {
-    /* For now, return the running estimate maintained during recording.
-     * This is approximate — templates and raw blocks may differ. */
     return ctx->estimated_size;
 }
 
-/* -------------------------------------------------------------------
- * Native 6502 opcode → IR opcode reverse mapping.
- * Maps the 256 possible 6502 opcodes to their IR equivalents.
- * 0 = no mapping (emit as IR_RAW_BYTE passthrough).
- *
- * This table also encodes the instruction size (1, 2, or 3 bytes)
- * so we know how many bytes to consume from the input buffer.
- * Packed as: high nibble = byte count (1/2/3), low byte = IR opcode.
- * We use a separate size lookup to keep it simple.
- * ------------------------------------------------------------------- */
+/* ===================================================================
+ * Phase A: flat flags table replaces the old ir_emit_imm / ir_emit_zp /
+ * ir_emit_abs convenience emitters (three big switch statements, ~270 B).
+ * ir_record_from_buffer now uses a single table lookup.
+ * =================================================================== */
 
-/* Instruction size by native 6502 opcode (1/2/3 bytes, 0=unknown) */
+/* IR opcode → register-side-effect flags.  Indexed 0x00..0x73. */
 #pragma section rodata1
+static const uint8_t ir_op_flags[116] = {
+/*  0x00 unused          */ 0x00,
+/*  0x01 IR_LDA_IMM      */ 0x90,
+/*  0x02 IR_LDA_ZP       */ 0x90,
+/*  0x03 IR_LDA_ABS      */ 0x90,
+/*  0x04 IR_LDX_IMM      */ 0xA0,
+/*  0x05 IR_LDX_ZP       */ 0xA0,
+/*  0x06 IR_LDX_ABS      */ 0xA0,
+/*  0x07 IR_LDY_IMM      */ 0xC0,
+/*  0x08 IR_LDY_ZP       */ 0xC0,
+/*  0x09 IR_LDY_ABS      */ 0xC0,
+/*  0x0A IR_STA_ZP       */ 0x01,
+/*  0x0B IR_STA_ABS      */ 0x01,
+/*  0x0C IR_STX_ZP       */ 0x02,
+/*  0x0D IR_STX_ABS      */ 0x02,
+/*  0x0E IR_STY_ZP       */ 0x04,
+/*  0x0F IR_STY_ABS      */ 0x04,
+/*  0x10 IR_JMP_ABS      */ 0x00,
+/*  0x11 IR_JSR          */ 0x00,
+/*  0x12 IR_RTS          */ 0x00,
+/*  0x13 IR_PHP          */ 0x08,
+/*  0x14 IR_PLP          */ 0x80,
+/*  0x15 IR_PHA          */ 0x01,
+/*  0x16 IR_PLA          */ 0x90,
+/*  0x17 IR_NOP          */ 0x00,
+/*  0x18 IR_CLC          */ 0x80,
+/*  0x19 IR_SEC          */ 0x80,
+/*  0x1A IR_CLD          */ 0x80,
+/*  0x1B IR_SED          */ 0x80,
+/*  0x1C IR_CLI          */ 0x80,
+/*  0x1D IR_SEI          */ 0x80,
+/*  0x1E IR_CLV          */ 0x80,
+/*  0x1F IR_BRK          */ 0x00,
+/*  0x20 IR_BPL          */ 0x08,
+/*  0x21 IR_BMI          */ 0x08,
+/*  0x22 IR_BVC          */ 0x08,
+/*  0x23 IR_BVS          */ 0x08,
+/*  0x24 IR_BCC          */ 0x08,
+/*  0x25 IR_BCS          */ 0x08,
+/*  0x26 IR_BNE          */ 0x08,
+/*  0x27 IR_BEQ          */ 0x08,
+/*  0x28 IR_TAX          */ 0xA1,
+/*  0x29 IR_TAY          */ 0xC1,
+/*  0x2A IR_TXA          */ 0x92,
+/*  0x2B IR_TYA          */ 0x94,
+/*  0x2C IR_TSX          */ 0xA0,
+/*  0x2D IR_TXS          */ 0x02,
+/*  0x2E IR_INX          */ 0xA2,
+/*  0x2F IR_DEX          */ 0xA2,
+/*  0x30 IR_INY          */ 0xC4,
+/*  0x31 IR_DEY          */ 0xC4,
+/*  0x32 IR_ADC_IMM      */ 0x99,
+/*  0x33 IR_SBC_IMM      */ 0x99,
+/*  0x34 IR_AND_IMM      */ 0x91,
+/*  0x35 IR_ORA_IMM      */ 0x91,
+/*  0x36 IR_EOR_IMM      */ 0x91,
+/*  0x37 IR_CMP_IMM      */ 0x81,
+/*  0x38 IR_CPX_IMM      */ 0x82,
+/*  0x39 IR_CPY_IMM      */ 0x84,
+/*  0x3A IR_ADC_ZP       */ 0x99,
+/*  0x3B IR_SBC_ZP       */ 0x99,
+/*  0x3C IR_AND_ZP       */ 0x91,
+/*  0x3D IR_ORA_ZP       */ 0x91,
+/*  0x3E IR_EOR_ZP       */ 0x91,
+/*  0x3F IR_CMP_ZP       */ 0x81,
+/*  0x40 IR_CPX_ZP       */ 0x82,
+/*  0x41 IR_CPY_ZP       */ 0x84,
+/*  0x42 IR_ADC_ABS      */ 0x99,
+/*  0x43 IR_SBC_ABS      */ 0x99,
+/*  0x44 IR_AND_ABS      */ 0x91,
+/*  0x45 IR_ORA_ABS      */ 0x91,
+/*  0x46 IR_EOR_ABS      */ 0x91,
+/*  0x47 IR_CMP_ABS      */ 0x81,
+/*  0x48 IR_CPX_ABS      */ 0x82,
+/*  0x49 IR_CPY_ABS      */ 0x84,
+/*  0x4A IR_INC_ZP       */ 0x80,
+/*  0x4B IR_DEC_ZP       */ 0x80,
+/*  0x4C IR_ASL_ZP       */ 0x80,
+/*  0x4D IR_LSR_ZP       */ 0x80,
+/*  0x4E IR_ROL_ZP       */ 0x80,
+/*  0x4F IR_ROR_ZP       */ 0x80,
+/*  0x50 IR_INC_ABS      */ 0x80,
+/*  0x51 IR_DEC_ABS      */ 0x80,
+/*  0x52 IR_ASL_ABS      */ 0x80,
+/*  0x53 IR_LSR_ABS      */ 0x80,
+/*  0x54 IR_ROL_ABS      */ 0x80,
+/*  0x55 IR_ROR_ABS      */ 0x80,
+/*  0x56 IR_ASL_A        */ 0x91,
+/*  0x57 IR_LSR_A        */ 0x91,
+/*  0x58 IR_ROL_A        */ 0x91,
+/*  0x59 IR_ROR_A        */ 0x91,
+/*  0x5A IR_LDA_ABSX     */ 0x90,
+/*  0x5B IR_LDA_ABSY     */ 0x90,
+/*  0x5C IR_STA_ABSX     */ 0x01,
+/*  0x5D IR_STA_ABSY     */ 0x01,
+/*  0x5E IR_ADC_ABSX     */ 0x99,
+/*  0x5F IR_SBC_ABSX     */ 0x99,
+/*  0x60 IR_AND_ABSX     */ 0x91,
+/*  0x61 IR_ORA_ABSX     */ 0x91,
+/*  0x62 IR_EOR_ABSX     */ 0x91,
+/*  0x63 IR_CMP_ABSX     */ 0x81,
+/*  0x64 IR_ADC_ABSY     */ 0x99,
+/*  0x65 IR_SBC_ABSY     */ 0x99,
+/*  0x66 IR_AND_ABSY     */ 0x91,
+/*  0x67 IR_ORA_ABSY     */ 0x91,
+/*  0x68 IR_EOR_ABSY     */ 0x91,
+/*  0x69 IR_CMP_ABSY     */ 0x81,
+/*  0x6A IR_LDX_ABSY     */ 0xA0,
+/*  0x6B IR_LDY_ABSX     */ 0xC0,
+/*  0x6C IR_INC_ABSX     */ 0x80,
+/*  0x6D IR_DEC_ABSX     */ 0x80,
+/*  0x6E IR_ASL_ABSX     */ 0x80,
+/*  0x6F IR_LSR_ABSX     */ 0x80,
+/*  0x70 IR_ROL_ABSX     */ 0x80,
+/*  0x71 IR_ROR_ABSX     */ 0x80,
+/*  0x72 IR_BIT_ZP       */ 0x81,
+/*  0x73 IR_BIT_ABS      */ 0x81,
+};
+
+/* Instruction size by native 6502 opcode (1/2/3 bytes, 0 = unknown) */
 static const uint8_t native_instr_size[256] = {
 /*        0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F */
 /* 0 */   1, 2, 0, 0, 0, 2, 2, 0, 1, 2, 1, 0, 0, 3, 3, 0,
@@ -430,12 +455,9 @@ static const uint8_t native_to_ir[256] = {
 /* -------------------------------------------------------------------
  * ir_record_from_buffer — scan raw 6502 bytes, populate IR nodes.
  *
- * Walks the byte buffer left-to-right, decoding each native 6502
- * instruction and emitting the corresponding IR node.  Unrecognised
- * opcodes or sequences are passed through as IR_RAW_BYTE nodes so
- * the output is always a faithful representation of the input.
- *
- * Returns the number of IR nodes recorded.
+ * Phase A: uses a flat ir_op_flags[] table for flag annotation instead
+ * of the old ir_emit_imm/ir_emit_zp/ir_emit_abs switch cascades.
+ * Also fixes BIT_ZP/ADC_ZP/SBC_ZP/etc. flags that were previously 0.
  * ------------------------------------------------------------------- */
 uint8_t ir_record_from_buffer(ir_ctx_t *ctx, const uint8_t *buf, uint8_t len)
 {
@@ -447,76 +469,28 @@ uint8_t ir_record_from_buffer(ir_ctx_t *ctx, const uint8_t *buf, uint8_t len)
         uint8_t sz = native_instr_size[opcode];
         uint8_t ir_op = native_to_ir[opcode];
 
-        /* Check we have enough bytes for the full instruction */
         if (sz == 0 || (pos + sz) > len) {
-            /* Unknown opcode or truncated — emit as raw byte(s) */
             ir_emit(ctx, IR_RAW_BYTE, 0, (uint16_t)opcode);
             pos++;
             continue;
         }
-
         if (ir_op == 0) {
-            /* No IR mapping — emit as raw bytes */
-            for (uint8_t i = 0; i < sz; i++)
+            uint8_t i;
+            for (i = 0; i < sz; i++)
                 ir_emit(ctx, IR_RAW_BYTE, 0, (uint16_t)buf[pos + i]);
             pos += sz;
             continue;
         }
 
-        /* Construct the operand from instruction bytes */
         uint16_t operand = 0;
-        if (sz == 2) {
+        if (sz == 2)
             operand = (uint16_t)buf[pos + 1];
-        } else if (sz == 3) {
+        else if (sz == 3)
             operand = (uint16_t)buf[pos + 1] | ((uint16_t)buf[pos + 2] << 8);
-        }
 
-        /* Use the convenience emitter for flag annotation */
-        if (sz == 1) {
-            /* Implied: emit with appropriate flags */
-            uint8_t flags = 0;
-            switch (ir_op) {
-                case IR_TAX: flags = IR_F_READS_A | IR_F_WRITES_X | IR_F_WRITES_FLAGS; break;
-                case IR_TAY: flags = IR_F_READS_A | IR_F_WRITES_Y | IR_F_WRITES_FLAGS; break;
-                case IR_TXA: flags = IR_F_READS_X | IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-                case IR_TYA: flags = IR_F_READS_Y | IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-                case IR_TSX: flags = IR_F_WRITES_X | IR_F_WRITES_FLAGS; break;
-                case IR_TXS: flags = IR_F_READS_X; break;
-                case IR_INX: case IR_DEX: flags = IR_F_READS_X | IR_F_WRITES_X | IR_F_WRITES_FLAGS; break;
-                case IR_INY: case IR_DEY: flags = IR_F_READS_Y | IR_F_WRITES_Y | IR_F_WRITES_FLAGS; break;
-                case IR_PHA: flags = IR_F_READS_A; break;
-                case IR_PLA: flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-                case IR_PHP: flags = IR_F_READS_FLAGS; break;
-                case IR_PLP: flags = IR_F_WRITES_FLAGS; break;
-                case IR_CLC: case IR_SEC: case IR_CLD: case IR_SED:
-                case IR_CLI: case IR_SEI: case IR_CLV:
-                    flags = IR_F_WRITES_FLAGS; break;
-                case IR_ASL_A: case IR_LSR_A: case IR_ROL_A: case IR_ROR_A:
-                    flags = IR_F_READS_A | IR_F_WRITES_A | IR_F_WRITES_FLAGS; break;
-                case IR_RTS: case IR_BRK: case IR_NOP: break;
-            }
-            ir_emit(ctx, ir_op, flags, 0);
-        } else if (sz == 2 && ir_op >= IR_BPL && ir_op <= IR_BEQ) {
-            /* Branch: operand is the raw signed offset */
-            ir_emit(ctx, ir_op, IR_F_READS_FLAGS, operand);
-        } else if (sz == 2) {
-            /* IMM or ZP: use convenience emitters for flag annotation */
-            /* Check if it's an immediate or ZP based on IR_op range */
-            if ((ir_op >= IR_LDA_IMM && ir_op <= IR_LDY_IMM) ||
-                (ir_op >= IR_ADC_IMM && ir_op <= IR_CPY_IMM)) {
-                ir_emit_imm(ctx, ir_op, (uint8_t)operand);
-            } else {
-                ir_emit_zp(ctx, ir_op, (uint8_t)operand);
-            }
-        } else {
-            /* ABS (3-byte) */
-            ir_emit_abs(ctx, ir_op, operand);
-        }
-
+        ir_emit(ctx, ir_op, ir_op_flags[ir_op], operand);
         pos += sz;
     }
 
     return ctx->node_count - start_count;
 }
-
-#pragma section default

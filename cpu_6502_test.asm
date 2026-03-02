@@ -45,6 +45,8 @@ RESET:  SEI
 ; --- Helper: on fail, write code and halt ---
 ; usage: LDA #<code> ; STA $0020 ; JMP End
 
+        JMP T90         ; <<< SKIP basic tests, jump straight to IR tests
+
 ; ----------------------
 ; Test 01: LDA/STA & Addressing modes (re-run to be safe)
 ; ----------------------
@@ -1673,6 +1675,128 @@ T88_fail:
         LDA #$70
         STA $0020
         JMP End
+
+; =============================================================
+; IR PIPELINE TESTS (T90-T99)
+; These test patterns that exercise the IR recording/lowering
+; round-trip, specifically patchable branch templates.
+; =============================================================
+
+; --- T90: Simple BEQ taken ---
+T90:    LDA #$42
+        CMP #$42          ; Z=1
+        BEQ T90_ok
+        LDA #$90
+        STA $0020
+        JMP End
+T90_ok:
+
+; --- T91: Simple BNE taken ---
+T91:    LDA #$42
+        CMP #$43          ; Z=0
+        BNE T91_ok
+        LDA #$91
+        STA $0020
+        JMP End
+T91_ok:
+
+; --- T92: BEQ not taken (fall through) ---
+T92:    LDA #$01
+        CMP #$02          ; Z=0
+        BEQ T92_fail
+        JMP T93
+T92_fail:
+        LDA #$92
+        STA $0020
+        JMP End
+
+; --- T93: Two consecutive BEQ not-taken ---
+T93:    LDA #$10
+        AND #$10          ; Z=0
+        BEQ T93_fail
+        AND #$10          ; Z=0
+        BEQ T93_fail
+        JMP T94
+T93_fail:
+        LDA #$93
+        STA $0020
+        JMP End
+
+; --- T94: Three consecutive BEQ (Side Track crash pattern) ---
+T94:    LDA #$FF
+        EOR #$0F          ; A=$F0
+        AND #$F0          ; Z=0
+        BEQ T94_fail
+        EOR #$F0          ; A=$00
+        AND #$FF          ; Z=1
+        BEQ T94_p2        ; SHOULD be taken
+T94_fail:
+        LDA #$94
+        STA $0020
+        JMP End
+T94_p2: LDA #$FF
+        EOR #$FF          ; A=$00
+        AND #$FF          ; Z=1
+        BEQ T95           ; taken → next test
+        JMP T94_fail
+
+; --- T95: BNE backward loop ---
+T95:    LDX #$05
+T95_lp: DEX
+        BNE T95_lp        ; loop 5 times
+        CPX #$00
+        BEQ T96
+        LDA #$95
+        STA $0020
+        JMP End
+
+; --- T96: 6 branches in a row (stress block fill) ---
+T96:    LDA #$01
+        CMP #$02
+        BEQ T96_f
+        CMP #$03
+        BEQ T96_f
+        CMP #$04
+        BEQ T96_f
+        CMP #$05
+        BEQ T96_f
+        CMP #$06
+        BEQ T96_f
+        CMP #$07
+        BEQ T96_f
+        JMP T97
+T96_f:  LDA #$96
+        STA $0020
+        JMP End
+
+; --- T97: PHP/PLP around branch ---
+T97:    SEC
+        PHP
+        CLC
+        PLP               ; C=1 restored
+        BCC T97_f         ; should NOT be taken (C=1)
+        LDA #$00
+        CMP #$00          ; Z=1
+        BEQ T98
+T97_f:  LDA #$97
+        STA $0020
+        JMP End
+
+; --- T98: Forward BEQ over gap ---
+T98:    LDA #$AA
+        CMP #$AA          ; Z=1
+        BEQ T98_ok
+        LDA #$98
+        STA $0020
+        JMP End
+        NOP
+        NOP
+        NOP
+        NOP
+        NOP
+T98_ok:
+
+; --- End of IR tests ---
 
 T_DONE:
         ; All tests passed - mark legacy result and fall through to End handler

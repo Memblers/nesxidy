@@ -131,6 +131,7 @@ uint8_t block_has_skip = 0;     // peephole: set when any template in block used
 uint8_t peephole_skipped = 0;   // peephole: set per-instruction when skip=1 was used
 #endif
 uint8_t recompile_instr_start;           // code_index at instruction start (after any deferred PLP flush)
+
 #ifdef ENABLE_IR
 ir_ctx_t ir_ctx;                         // IR compilation context (~480B WRAM)
 #endif
@@ -704,29 +705,58 @@ batch_exit:  // case 1 (compile needed) jumps here
 		// NOTE: volatile pointer cast on cache_code write prevents vbcc DCE.
 		// code_index uses plain ++ so compiler tracks the new value.
 		if (block_flags_saved) {
+#ifdef ENABLE_IR
+			// Under IR, add the deferred PLP as an IR node so it's
+			// included in the lowered output.  Emitting it directly to
+			// cache_code creates a byte the IR doesn't know about,
+			// causing lowered_size < code_index and epilogue overlap.
+			IR_EMIT(&ir_ctx, IR_PLP, 0x80, 0);
+#else
 			*(volatile uint8_t *)&cache_code[0][code_index] = 0x28;  // PLP
 			code_index++;
+#endif
 			block_flags_saved = 0;
 		}
 #endif
 
 #ifdef ENABLE_IR
 		// --- IR optimisation pass ---
-		// Record the raw byte buffer into IR nodes, run optimisation
-		// passes, and lower back to native bytes.  The lowered output
-		// overwrites cache_code[0][] (same buffer) with potentially
-		// shorter, optimised code.
+		// IR nodes were already recorded per-instruction by the bank2
+		// wrapper (ir_record_native_b2).  We only need to run the
+		// optimiser and lower back to native bytes here.
 		//
-		// IR code lives in bank 1.  Switch to bank 1, run the pipeline,
-		// then restore.  run_6502() is in the fixed bank ($C000+).
+		// IR optimise + lower live in bank 1.  Switch, run, restore.
 		{
 			uint8_t ir_saved_bank = mapper_prg_bank;
 			uint8_t ir_bytes_before = code_index;
 			bankswitch_prg(1);
-			ir_init(&ir_ctx);
-			ir_record_from_buffer(&ir_ctx, cache_code[0], code_index);
+			uint8_t lowered_size;
+			if (!ir_ctx.enabled) {
+				/* IR was disabled mid-block (node overflow) — skip
+				 * lowering.  cache_code[0] already has correct bytes. */
+				lowered_size = 0;
+			} else {
 			ir_optimize(&ir_ctx);
-			uint8_t lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
+			lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
+			}
+			/* Update code_index to lowered size before resolving patches,
+			 * so ir_resolve_deferred_patches scans the correct range. */
+			if (lowered_size) {
+				code_index = lowered_size;
+				/* Safety: pad gap between lowered output and pre-IR end
+				 * with NOP bytes.  21-byte patchable templates have an
+				 * internal BEQ at +0 with offset 19 targeting +21.
+				 * If the optimizer removed bytes, the epilogue (appended
+				 * at code_index) could overlap a template's +21 position,
+				 * skipping the epilogue's PHP and corrupting the stack.
+				 * NOP padding keeps +21 within valid code. */
+				while (code_index < ir_bytes_before) {
+					cache_code[0][code_index++] = 0xEA;  /* NOP */
+				}
+			}
+			/* Phase B: resolve deferred branch/JMP pending patches with
+			 * correct post-lowering flash addresses (while bank1 mapped). */
+			ir_resolve_deferred_patches();
 			/* Capture per-pass counters while bank 1 is mapped */
 			uint8_t ir_pass_rl = ir_ctx.stat_redundant_load;
 			uint8_t ir_pass_ds = ir_ctx.stat_dead_store;
@@ -739,15 +769,13 @@ batch_exit:  // case 1 (compile needed) jumps here
 				if (ir_ctx.nodes[k].op == 0xFF) ir_dead_cnt++;
 			} }
 			bankswitch_prg(ir_saved_bank);
-			if (lowered_size) {
-				code_index = lowered_size;
-			}
 			metrics_ir_block(ir_bytes_before, code_index);
 			metrics_ir_nodes_killed(ir_dead_cnt);
 			metrics_ir_pass_results(ir_pass_rl, ir_pass_ds, ir_pass_dl,
 			                        ir_pass_pp, ir_pass_pr);
 			// If ir_lower returns 0 (error), keep original buffer unchanged
 		}
+
 #endif
 
 		// --- Build epilogue into cache_code buffer, then write header + all code to flash ---
@@ -844,7 +872,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 		//  - Stale PC table entries pointing to erased/reused flash
 		//  - Partial flash writes (power loss, programming failure)
 		//  - Any future bugs that create premature table entries
-		flash_byte_program(flash_code_address + 7, flash_code_bank, 0xAA);
+		flash_byte_program(flash_code_address + 7, flash_code_bank, BLOCK_SENTINEL);
 
 #ifdef ENABLE_IR
 		// --- Deferred IR entry-PC table update ---
@@ -1463,9 +1491,255 @@ uint8_t emit_template(uint8_t *tmpl, uint8_t sz)
 	cache_flag[cache_index] &= ~READY_FOR_NEXT;
 	return cache_flag[cache_index];
 }
+
+/* ==========================================================================
+ * IR Phase A: lookup tables and per-instruction IR recorder (bank 2).
+ *
+ * These replicate the native_to_ir / native_instr_size tables that
+ * previously lived in bank 1 (rodata1) so we can emit IR nodes from
+ * bank 2 without cross-bank calls.  ir_record_native_b2() is a lean
+ * version of the old ir_record_from_buffer(): it walks a short byte
+ * buffer (one instruction) and emits the corresponding IR node(s).
+ * ========================================================================== */
+#ifdef ENABLE_IR
+
+#pragma section rodata2
+
+/* Native 6502 opcode → IR opcode (0 = no mapping, emit as raw bytes) */
+static const uint8_t native_to_ir_b2[256] = {
+/*        0          1          2          3          4          5          6          7  */
+/* 0 */   IR_BRK,    0,         0,         0,         0,         IR_ORA_ZP, IR_ASL_ZP, 0,
+/* 0 */   IR_PHP,    IR_ORA_IMM,IR_ASL_A,  0,         0,         IR_ORA_ABS,IR_ASL_ABS,0,
+/* 1 */   IR_BPL,    0,         0,         0,         0,         0,         0,         0,
+/* 1 */   IR_CLC,    IR_ORA_ABSY,0,        0,         0,         IR_ORA_ABSX,IR_ASL_ABSX,0,
+/* 2 */   IR_JSR,    0,         0,         0,         IR_BIT_ZP, IR_AND_ZP, IR_ROL_ZP, 0,
+/* 2 */   IR_PLP,    IR_AND_IMM,IR_ROL_A,  0,         IR_BIT_ABS,IR_AND_ABS,IR_ROL_ABS,0,
+/* 3 */   IR_BMI,    0,         0,         0,         0,         0,         0,         0,
+/* 3 */   IR_SEC,    IR_AND_ABSY,0,        0,         0,         IR_AND_ABSX,IR_ROL_ABSX,0,
+/* 4 */   0,         0,         0,         0,         0,         IR_EOR_ZP, IR_LSR_ZP, 0,
+/* 4 */   IR_PHA,    IR_EOR_IMM,IR_LSR_A,  0,         IR_JMP_ABS,IR_EOR_ABS,IR_LSR_ABS,0,
+/* 5 */   IR_BVC,    0,         0,         0,         0,         0,         0,         0,
+/* 5 */   IR_CLI,    IR_EOR_ABSY,0,        0,         0,         IR_EOR_ABSX,IR_LSR_ABSX,0,
+/* 6 */   IR_RTS,    0,         0,         0,         0,         IR_ADC_ZP, IR_ROR_ZP, 0,
+/* 6 */   IR_PLA,    IR_ADC_IMM,IR_ROR_A,  0,         0,         IR_ADC_ABS,IR_ROR_ABS,0,
+/* 7 */   IR_BVS,    0,         0,         0,         0,         0,         0,         0,
+/* 7 */   IR_SEI,    IR_ADC_ABSY,0,        0,         0,         IR_ADC_ABSX,IR_ROR_ABSX,0,
+/* 8 */   0,         0,         0,         0,         IR_STY_ZP, IR_STA_ZP, IR_STX_ZP, 0,
+/* 8 */   IR_DEY,    0,         IR_TXA,    0,         IR_STY_ABS,IR_STA_ABS,IR_STX_ABS,0,
+/* 9 */   IR_BCC,    0,         0,         0,         0,         0,         0,         0,
+/* 9 */   IR_TYA,    IR_STA_ABSY,IR_TXS,   0,         0,         IR_STA_ABSX,0,        0,
+/* A */   IR_LDY_IMM,0,         IR_LDX_IMM,0,         IR_LDY_ZP, IR_LDA_ZP, IR_LDX_ZP, 0,
+/* A */   IR_TAY,    IR_LDA_IMM,IR_TAX,    0,         IR_LDY_ABS,IR_LDA_ABS,IR_LDX_ABS,0,
+/* B */   IR_BCS,    0,         0,         0,         IR_LDY_ABSX,0,         0,         0,
+/* B */   IR_CLV,    IR_LDA_ABSY,IR_TSX,   0,         IR_LDY_ABSX,IR_LDA_ABSX,IR_LDX_ABSY,0,
+/* C */   IR_CPY_IMM,0,         0,         0,         IR_CPY_ZP, IR_CMP_ZP, IR_DEC_ZP, 0,
+/* C */   IR_INY,    IR_CMP_IMM,IR_DEX,    0,         IR_CPY_ABS,IR_CMP_ABS,IR_DEC_ABS,0,
+/* D */   IR_BNE,    0,         0,         0,         0,         0,         0,         0,
+/* D */   IR_CLD,    IR_CMP_ABSY,0,        0,         0,         IR_CMP_ABSX,IR_DEC_ABSX,0,
+/* E */   IR_CPX_IMM,0,         0,         0,         IR_CPX_ZP, IR_SBC_ZP, IR_INC_ZP, 0,
+/* E */   IR_INX,    IR_SBC_IMM,IR_NOP,    0,         IR_CPX_ABS,IR_SBC_ABS,IR_INC_ABS,0,
+/* F */   IR_BEQ,    0,         0,         0,         0,         0,         0,         0,
+/* F */   IR_SED,    IR_SBC_ABSY,0,        0,         0,         IR_SBC_ABSX,IR_INC_ABSX,0,
+};
+
+/* Instruction size by native 6502 opcode (1/2/3 bytes, 0 = unknown) */
+static const uint8_t native_instr_size_b2[256] = {
+/*        0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F */
+/* 0 */   1, 2, 0, 0, 0, 2, 2, 0, 1, 2, 1, 0, 0, 3, 3, 0,
+/* 1 */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* 2 */   3, 2, 0, 0, 2, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* 3 */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* 4 */   1, 2, 0, 0, 0, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* 5 */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* 6 */   1, 2, 0, 0, 0, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* 7 */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* 8 */   0, 2, 0, 0, 2, 2, 2, 0, 1, 0, 1, 0, 3, 3, 3, 0,
+/* 9 */   2, 2, 0, 0, 2, 2, 2, 0, 1, 3, 1, 0, 0, 3, 0, 0,
+/* A */   2, 2, 2, 0, 2, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* B */   2, 2, 0, 0, 2, 2, 2, 0, 1, 3, 1, 0, 3, 3, 3, 0,
+/* C */   2, 2, 0, 0, 2, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* D */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* E */   2, 2, 0, 0, 2, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* F */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+};
+
+/* IR opcode → register-side-effect flags (indexed 0x00..0x73).
+ * Matches the annotation logic in ir_emit_imm/ir_emit_zp/ir_emit_abs
+ * but as a flat table — callable from any bank without code. */
+static const uint8_t ir_op_flags_b2[116] = {
+/*  0x00 unused          */ 0x00,
+/*  0x01 IR_LDA_IMM      */ 0x90,  /*  W:A,F           */
+/*  0x02 IR_LDA_ZP       */ 0x90,
+/*  0x03 IR_LDA_ABS      */ 0x90,
+/*  0x04 IR_LDX_IMM      */ 0xA0,  /*  W:X,F           */
+/*  0x05 IR_LDX_ZP       */ 0xA0,
+/*  0x06 IR_LDX_ABS      */ 0xA0,
+/*  0x07 IR_LDY_IMM      */ 0xC0,  /*  W:Y,F           */
+/*  0x08 IR_LDY_ZP       */ 0xC0,
+/*  0x09 IR_LDY_ABS      */ 0xC0,
+/*  0x0A IR_STA_ZP       */ 0x01,  /*  R:A             */
+/*  0x0B IR_STA_ABS      */ 0x01,
+/*  0x0C IR_STX_ZP       */ 0x02,  /*  R:X             */
+/*  0x0D IR_STX_ABS      */ 0x02,
+/*  0x0E IR_STY_ZP       */ 0x04,  /*  R:Y             */
+/*  0x0F IR_STY_ABS      */ 0x04,
+/*  0x10 IR_JMP_ABS      */ 0x00,
+/*  0x11 IR_JSR          */ 0x00,
+/*  0x12 IR_RTS          */ 0x00,
+/*  0x13 IR_PHP          */ 0x08,  /*  R:F             */
+/*  0x14 IR_PLP          */ 0x80,  /*  W:F             */
+/*  0x15 IR_PHA          */ 0x01,  /*  R:A             */
+/*  0x16 IR_PLA          */ 0x90,  /*  W:A,F           */
+/*  0x17 IR_NOP          */ 0x00,
+/*  0x18 IR_CLC          */ 0x80,  /*  W:F             */
+/*  0x19 IR_SEC          */ 0x80,
+/*  0x1A IR_CLD          */ 0x80,
+/*  0x1B IR_SED          */ 0x80,
+/*  0x1C IR_CLI          */ 0x80,
+/*  0x1D IR_SEI          */ 0x80,
+/*  0x1E IR_CLV          */ 0x80,
+/*  0x1F IR_BRK          */ 0x00,
+/*  0x20 IR_BPL          */ 0x08,  /*  R:F             */
+/*  0x21 IR_BMI          */ 0x08,
+/*  0x22 IR_BVC          */ 0x08,
+/*  0x23 IR_BVS          */ 0x08,
+/*  0x24 IR_BCC          */ 0x08,
+/*  0x25 IR_BCS          */ 0x08,
+/*  0x26 IR_BNE          */ 0x08,
+/*  0x27 IR_BEQ          */ 0x08,
+/*  0x28 IR_TAX          */ 0xA1,  /*  R:A W:X,F       */
+/*  0x29 IR_TAY          */ 0xC1,  /*  R:A W:Y,F       */
+/*  0x2A IR_TXA          */ 0x92,  /*  R:X W:A,F       */
+/*  0x2B IR_TYA          */ 0x94,  /*  R:Y W:A,F       */
+/*  0x2C IR_TSX          */ 0xA0,  /*  W:X,F           */
+/*  0x2D IR_TXS          */ 0x02,  /*  R:X             */
+/*  0x2E IR_INX          */ 0xA2,  /*  R:X W:X,F       */
+/*  0x2F IR_DEX          */ 0xA2,
+/*  0x30 IR_INY          */ 0xC4,  /*  R:Y W:Y,F       */
+/*  0x31 IR_DEY          */ 0xC4,
+/*  0x32 IR_ADC_IMM      */ 0x99,  /*  R:A,F W:A,F     */
+/*  0x33 IR_SBC_IMM      */ 0x99,
+/*  0x34 IR_AND_IMM      */ 0x91,  /*  R:A W:A,F       */
+/*  0x35 IR_ORA_IMM      */ 0x91,
+/*  0x36 IR_EOR_IMM      */ 0x91,
+/*  0x37 IR_CMP_IMM      */ 0x81,  /*  R:A W:F         */
+/*  0x38 IR_CPX_IMM      */ 0x82,  /*  R:X W:F         */
+/*  0x39 IR_CPY_IMM      */ 0x84,  /*  R:Y W:F         */
+/*  0x3A IR_ADC_ZP       */ 0x99,
+/*  0x3B IR_SBC_ZP       */ 0x99,
+/*  0x3C IR_AND_ZP       */ 0x91,
+/*  0x3D IR_ORA_ZP       */ 0x91,
+/*  0x3E IR_EOR_ZP       */ 0x91,
+/*  0x3F IR_CMP_ZP       */ 0x81,
+/*  0x40 IR_CPX_ZP       */ 0x82,
+/*  0x41 IR_CPY_ZP       */ 0x84,
+/*  0x42 IR_ADC_ABS      */ 0x99,
+/*  0x43 IR_SBC_ABS      */ 0x99,
+/*  0x44 IR_AND_ABS      */ 0x91,
+/*  0x45 IR_ORA_ABS      */ 0x91,
+/*  0x46 IR_EOR_ABS      */ 0x91,
+/*  0x47 IR_CMP_ABS      */ 0x81,
+/*  0x48 IR_CPX_ABS      */ 0x82,
+/*  0x49 IR_CPY_ABS      */ 0x84,
+/*  0x4A IR_INC_ZP       */ 0x80,  /*  W:F             */
+/*  0x4B IR_DEC_ZP       */ 0x80,
+/*  0x4C IR_ASL_ZP       */ 0x80,
+/*  0x4D IR_LSR_ZP       */ 0x80,
+/*  0x4E IR_ROL_ZP       */ 0x80,
+/*  0x4F IR_ROR_ZP       */ 0x80,
+/*  0x50 IR_INC_ABS      */ 0x80,
+/*  0x51 IR_DEC_ABS      */ 0x80,
+/*  0x52 IR_ASL_ABS      */ 0x80,
+/*  0x53 IR_LSR_ABS      */ 0x80,
+/*  0x54 IR_ROL_ABS      */ 0x80,
+/*  0x55 IR_ROR_ABS      */ 0x80,
+/*  0x56 IR_ASL_A        */ 0x91,  /*  R:A W:A,F       */
+/*  0x57 IR_LSR_A        */ 0x91,
+/*  0x58 IR_ROL_A        */ 0x91,
+/*  0x59 IR_ROR_A        */ 0x91,
+/*  0x5A IR_LDA_ABSX     */ 0x90,
+/*  0x5B IR_LDA_ABSY     */ 0x90,
+/*  0x5C IR_STA_ABSX     */ 0x01,
+/*  0x5D IR_STA_ABSY     */ 0x01,
+/*  0x5E IR_ADC_ABSX     */ 0x99,
+/*  0x5F IR_SBC_ABSX     */ 0x99,
+/*  0x60 IR_AND_ABSX     */ 0x91,
+/*  0x61 IR_ORA_ABSX     */ 0x91,
+/*  0x62 IR_EOR_ABSX     */ 0x91,
+/*  0x63 IR_CMP_ABSX     */ 0x81,
+/*  0x64 IR_ADC_ABSY     */ 0x99,
+/*  0x65 IR_SBC_ABSY     */ 0x99,
+/*  0x66 IR_AND_ABSY     */ 0x91,
+/*  0x67 IR_ORA_ABSY     */ 0x91,
+/*  0x68 IR_EOR_ABSY     */ 0x91,
+/*  0x69 IR_CMP_ABSY     */ 0x81,
+/*  0x6A IR_LDX_ABSY     */ 0xA0,
+/*  0x6B IR_LDY_ABSX     */ 0xC0,
+/*  0x6C IR_INC_ABSX     */ 0x80,
+/*  0x6D IR_DEC_ABSX     */ 0x80,
+/*  0x6E IR_ASL_ABSX     */ 0x80,
+/*  0x6F IR_LSR_ABSX     */ 0x80,
+/*  0x70 IR_ROL_ABSX     */ 0x80,
+/*  0x71 IR_ROR_ABSX     */ 0x80,
+/*  0x72 IR_BIT_ZP       */ 0x81,  /*  R:A W:F  (fix)  */
+/*  0x73 IR_BIT_ABS      */ 0x81,
+};
+
 #pragma section bank2
 
-static uint8_t recompile_opcode_b2()
+/* -------------------------------------------------------------------
+ * ir_record_native_b2 — scan a short byte buffer produced by one
+ * instruction handler and emit the corresponding IR nodes.
+ * Lean version of the old bank-1 ir_record_from_buffer(), using
+ * rodata2 tables instead of bank-1 tables.
+ * ------------------------------------------------------------------- */
+static void ir_record_native_b2(const uint8_t *buf, uint8_t len)
+{
+	uint8_t pos = 0;
+	while (pos < len) {
+		/* Guard: if node buffer is nearly full, disable IR for this
+		 * block rather than silently dropping nodes (which causes
+		 * ir_lower to produce fewer bytes → NOP padding corruption). */
+		if (ir_ctx.node_count + 3 > IR_MAX_NODES) {
+			ir_ctx.enabled = 0;
+			return;
+		}
+		uint8_t opcode = buf[pos];
+		uint8_t sz     = native_instr_size_b2[opcode];
+		uint8_t ir_op  = native_to_ir_b2[opcode];
+
+		/* Unknown opcode or truncated instruction → raw byte(s) */
+		if (sz == 0 || (uint8_t)(pos + sz) > len) {
+			IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)opcode);
+			pos++;
+			continue;
+		}
+		if (ir_op == 0) {
+			/* No IR mapping → emit as raw bytes */
+			uint8_t i;
+			for (i = 0; i < sz; i++)
+				IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)buf[pos + i]);
+			pos += sz;
+			continue;
+		}
+
+		/* Construct operand from instruction bytes */
+		uint16_t operand = 0;
+		if (sz == 2)
+			operand = (uint16_t)buf[pos + 1];
+		else if (sz == 3)
+			operand = (uint16_t)buf[pos + 1] | ((uint16_t)buf[pos + 2] << 8);
+
+		IR_EMIT(&ir_ctx, ir_op, ir_op_flags_b2[ir_op], operand);
+		pos += sz;
+	}
+}
+
+#endif /* ENABLE_IR */
+
+#pragma section bank2
+
+static uint8_t recompile_opcode_b2_inner()
 {
 	// WRAM helper for cross-bank reads (safe from bank2)
 	extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
@@ -1524,6 +1798,7 @@ static uint8_t recompile_opcode_b2()
 			op_buffer_1 = read6502(pc+1);
 			
 			int8_t branch_offset = (int8_t) op_buffer_1;
+
 			if (branch_offset >= 0)
 			{
 				// Forward branch
@@ -1533,6 +1808,11 @@ static uint8_t recompile_opcode_b2()
 				branch_forward++;
 
 				// --- Static pass 2: all native addresses known, emit direct ---
+				// Under IR, skip direct branches — their offsets are
+				// computed from pre-IR code_index and become stale after
+				// optimization removes bytes.  Fall through to the
+				// 21-byte patchable template (IR_RAW_BYTE, immune).
+#ifndef ENABLE_IR
 				if (sa_compile_pass == 2)
 				{
 					uint8_t emit_len = try_direct_branch(target_pc, op_buffer_0, code_ptr);
@@ -1546,6 +1826,7 @@ static uint8_t recompile_opcode_b2()
 					}
 					// Not resolved — fall through to patchable template
 				}
+#endif
 
 				// --- Dynamic / pass-1: 21-byte patchable template ---
 				{
@@ -1601,12 +1882,16 @@ static uint8_t recompile_opcode_b2()
 				code_ptr[code_index+20] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
 
 				// Record pending patch
+#ifndef ENABLE_IR
 				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
 				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
 				opt2_record_pending_branch_safe(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
 
 				setup_flash_address(pc, flash_cache_index);
 				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+#endif
+				// (Under IR, deferred patches are recorded by the bank2 wrapper
+				// and resolved post-lowering by ir_resolve_deferred_patches.)
 
 				pc += 2;
 				code_index += 21;
@@ -1718,6 +2003,7 @@ static uint8_t recompile_opcode_b2()
 				// - Branch offset at +3 (patch $03 -> $00)
 				// - JMP operand at +5 (patch $FFFF -> native)
 				// Use saved addresses from when pattern was emitted
+#ifndef ENABLE_IR
 				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
 				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
 				// Call via fixed-bank trampoline (safe from bank2)
@@ -1727,6 +2013,7 @@ static uint8_t recompile_opcode_b2()
 				// (required when OPT_BLOCK_METADATA is 0)
 				setup_flash_address(pc, flash_cache_index);
 				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+#endif
 				
 				pc += 2;
 				code_index += 21;
@@ -1748,13 +2035,20 @@ static uint8_t recompile_opcode_b2()
 				//
 				// INTRA-BLOCK BACKWARD BRANCH: if the target is within
 				// this block, emit a native 2-byte branch (fixed-bank helper).
+				// Under IR, skip — offset becomes stale after optimisation.
+#ifndef ENABLE_IR
 				if (try_intra_block_branch(target_pc, op_buffer_0))
 					return cache_flag[cache_index];
+#endif
 				
 				// INTER-BLOCK BACKWARD BRANCH: target is compiled in a
 				// different block.  Same-bank: try 2-byte native branch
 				// first, then 5-byte Bxx_inv+JMP.
 				// Cross-bank: fall through to interpret.
+				// Under IR, skip all direct-offset paths — offsets are
+				// pre-IR and become stale.  Fall through to interpret,
+				// then fall through to the patchable template path.
+#ifndef ENABLE_IR
 				if ((target_flag & 0x1F) == flash_code_bank &&
 				    (code_index + 2 + EPILOGUE_SIZE + 6) < CODE_SIZE &&
 				    lookup_native_addr_safe(target_pc))
@@ -1789,10 +2083,12 @@ static uint8_t recompile_opcode_b2()
 						return cache_flag[cache_index];
 					}
 				}
+#endif
 				// Cross-bank or no space — interpret
 				enable_interpret();
 			}  // end else (target is compiled)
 			}  // end else (backward branch)
+			break;  // Phase B: prevent fallthrough to case opJMP
 		}
 		
 		case opJMP:
@@ -1837,9 +2133,13 @@ static uint8_t recompile_opcode_b2()
 				// +8: PLP (slow path: restore flags before epilogue)
 				code_ptr[code_index+8] = 0x28;
 				
+#ifndef ENABLE_IR
 				uint16_t bcc_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 3;
 				uint16_t jmp_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 6;
 				opt2_record_pending_branch_safe(bcc_operand_addr, jmp_operand_addr, flash_code_bank, target_pc, 0);
+#endif
+				// (Under IR, deferred patches are recorded by the bank2 wrapper
+				// and resolved post-lowering by ir_resolve_deferred_patches.)
 				
 				pc = target_pc;
 				code_index += 9;
@@ -2251,6 +2551,83 @@ static uint8_t recompile_opcode_b2()
 	}
 	cache_flag[cache_index] |= READY_FOR_NEXT;
 	return cache_flag[cache_index];
+}
+
+/* -------------------------------------------------------------------
+ * recompile_opcode_b2 — bank2 wrapper around _inner().
+ * Handles per-instruction IR recording so the post-loop IR block
+ * only needs to run optimise + lower (no replay from buffer).
+ *
+ * Phase B: patchable templates (21-byte branch, 9-byte JMP) contain
+ * internal relative offsets and JMP $FFFF placeholders.  These are
+ * recorded as IR_RAW_BYTE nodes so the optimizer cannot touch them.
+ * Deferred-patch info is extracted from the emitted bytes and stored
+ * in ir_ctx.deferred_patches[] for post-lowering resolution.
+ * ------------------------------------------------------------------- */
+static uint8_t recompile_opcode_b2()
+{
+#ifdef ENABLE_IR
+	uint8_t ci_before = code_index;
+	if (ci_before == 0) {
+		IR_INIT(&ir_ctx);
+	}
+#endif
+	uint8_t result = recompile_opcode_b2_inner();
+#ifdef ENABLE_IR
+	if (code_index > ci_before) {
+		uint8_t *buf = cache_code[cache_index] + ci_before;
+		uint8_t delta = (uint8_t)(code_index - ci_before);
+
+		/* Scan emitted bytes for patchable JMP $FFFF */
+		uint8_t patchable_jmp_pos = 0xFF; /* 0xFF = not found */
+		{
+			uint8_t j;
+			for (j = 0; (uint8_t)(j + 2) < delta; j++) {
+				if (buf[j] == 0x4C && buf[j+1] == 0xFF && buf[j+2] == 0xFF) {
+					patchable_jmp_pos = j;
+					break;
+				}
+			}
+		}
+
+		if (patchable_jmp_pos != 0xFF) {
+			/* Patchable template — record all bytes as IR_RAW_BYTE
+			 * to prevent optimizer from touching internal offsets.
+			 * Guard: if the node buffer can't hold all bytes, disable
+			 * IR for this block.  Silent drops would produce fewer
+			 * lowered bytes and NOP padding would overwrite template
+			 * data ($EA over dispatch addresses → crash). */
+			if (ir_ctx.node_count + delta > IR_MAX_NODES) {
+				ir_ctx.enabled = 0;  /* skip ir_lower, use raw bytes */
+			} else {
+			uint8_t j;
+			for (j = 0; j < delta; j++)
+				IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)buf[j]);
+
+			/* Extract and store deferred patch info */
+			if (ir_ctx.deferred_patch_count < IR_MAX_DEFERRED_PATCHES) {
+				ir_deferred_patch_t *dp = &ir_ctx.deferred_patches[ir_ctx.deferred_patch_count];
+				uint8_t p = patchable_jmp_pos;
+				/* 21-byte branch template: Bxx $03 immediately before JMP */
+				if (p >= 2 && buf[p - 1] == 0x03 && (buf[p - 2] & 0x1F) == 0x10) {
+					/* target_pc is LDA# at +7 (lo) and +11 (hi) from JMP */
+					dp->target_pc = (uint16_t)buf[p + 7]
+					              | ((uint16_t)buf[p + 11] << 8);
+					dp->is_branch = 1;
+				} else {
+					/* 9-byte JMP template — target is where pc was set */
+					dp->target_pc = pc;
+					dp->is_branch = 0;
+				}
+				ir_ctx.deferred_patch_count++;
+			}
+			}  /* end else (node buffer had room) */
+		} else {
+			ir_record_native_b2(buf, delta);
+		}
+	}
+#endif
+	return result;
 }
 
 #pragma section default

@@ -96,6 +96,11 @@ static uint8_t fps_counter;
 uint8_t nmi_active = 0;
 uint8_t nmi_sp_guard;  // sp value just before nmi6502()
 
+// OAM DMA deferred execution: JIT-compiled STA $4014 writes the source
+// page here instead of hitting the hardware register directly.  The main
+// loop executes the actual DMA during VBlank when timing is correct.
+uint8_t oam_dma_request = 0;
+
 
 // ******************************************************************************************
 // PPU register write handler (NES $2000-$2007)
@@ -236,6 +241,14 @@ int main(void)
 		// Detect guest NMI handler completion: RTI restores sp to pre-NMI value
 		if (nmi_active && sp == nmi_sp_guard)
 			nmi_active = 0;
+
+		// Execute deferred OAM DMA: JIT-compiled STA $4014 set the flag,
+		// now write to the real hardware register during the main loop
+		// where VBlank timing is appropriate.
+		if (oam_dma_request) {
+			IO8(0x4014) = oam_dma_request;
+			oam_dma_request = 0;
+		}
 
 		// NMI-driven frame timing (same approach as exidy.c)
 #ifndef TRACK_TICKS
@@ -381,8 +394,10 @@ void write6502(uint16_t address, uint8_t value)
 
 	if (address < 0x4020)
 	{
-		if (address == 0x4014)
-			return;	// OAM DMA — not implemented yet
+		if (address == 0x4014) {
+			oam_dma_request = value;
+			return;
+		}
 		IO8(address) = value;
 		return;
 	}

@@ -57,6 +57,20 @@ uint16_t translate_address(uint16_t src_addr) {
         // RAM mirror
         return (src_addr & 0x7FF) + (uint16_t)RAM_BASE;
     }
+    else if (src_addr >= 0x4000 && src_addr <= 0x4017) {
+        // APU / I/O registers — compile as native hardware access.
+        // $4000-$4013 = APU sound regs, $4015 = APU status,
+        // $4016-$4017 = controller ports / frame counter.
+        // These are real NES hardware addresses — JIT code can
+        // STA/LDA them directly with zero interpretation overhead.
+        if (src_addr == 0x4014) {
+            // OAM DMA trigger — redirect to a RAM flag so the
+            // main loop can execute it at the correct VBlank timing.
+            extern uint8_t oam_dma_request;
+            return (uint16_t)&oam_dma_request;
+        }
+        return src_addr;  // native hardware address
+    }
     else if (src_addr >= 0x8000) {
         // PRG-ROM — offset into ROM_NAME using NROM mirror mask
         uint16_t nes_addr = (src_addr & 0x3FFF) + (uint16_t)ROM_NAME;
@@ -64,7 +78,7 @@ uint16_t translate_address(uint16_t src_addr) {
             return 0;  // conflicts with flash cache — interpret
         return nes_addr;
     }
-    return 0;  // I/O or PPU — must interpret
+    return 0;  // PPU ($2000-$3FFF) or unmapped — must interpret
 #else
     // Exidy memory map
     uint8_t msb = src_addr >> 8;
@@ -725,24 +739,30 @@ batch_exit:  // case 1 (compile needed) jumps here
 		// wrapper (ir_record_native_b2).  We only need to run the
 		// optimiser and lower back to native bytes here.
 		//
-		// IR optimise + lower live in bank 1.  Switch, run, restore.
+		// IR optimise lives in bank 0, lower/patches/RMW fusion in bank 1.
 		{
 			uint8_t ir_saved_bank = mapper_prg_bank;
 			uint8_t ir_bytes_before = code_index;
-			bankswitch_prg(1);
+			uint8_t ir_bytes_after_actual = code_index; /* default: no savings */
 			uint8_t lowered_size;
 			if (!ir_ctx.enabled) {
 				/* IR was disabled mid-block (node overflow) — skip
 				 * lowering.  cache_code[0] already has correct bytes. */
 				lowered_size = 0;
+				bankswitch_prg(BANK_EMIT);  /* bank1 needed for patches below */
 			} else {
+			bankswitch_prg(BANK_IR_OPT);
 			ir_optimize(&ir_ctx);
+			bankswitch_prg(BANK_EMIT);
+			/* Pass 5: RMW fusion — runs as post-pass in bank1 */
+			ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
 			lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
 			}
 			/* Update code_index to lowered size before resolving patches,
 			 * so ir_resolve_deferred_patches scans the correct range. */
 			if (lowered_size) {
 				code_index = lowered_size;
+				ir_bytes_after_actual = lowered_size;
 				/* Safety: pad gap between lowered output and pre-IR end
 				 * with NOP bytes.  21-byte patchable templates have an
 				 * internal BEQ at +0 with offset 19 targeting +21.
@@ -762,14 +782,16 @@ batch_exit:  // case 1 (compile needed) jumps here
 			uint8_t ir_pass_ds = ir_ctx.stat_dead_store;
 			uint8_t ir_pass_dl = ir_ctx.stat_dead_load;
 			uint8_t ir_pass_pp = ir_ctx.stat_php_plp;
-			uint8_t ir_pass_pr = ir_ctx.stat_pair_rewrite;
+			uint8_t ir_pass_pr = ir_ctx.stat_pair_rewrite + ir_ctx.stat_rmw_fusion;
+			/* Write RMW fusion count to WRAM for metrics_viewer */
+			*(volatile uint8_t *)(0x7E86) += ir_ctx.stat_rmw_fusion;
 			/* Count dead (killed) nodes */
 			uint8_t ir_dead_cnt = 0;
 			{ uint8_t k; for (k = 0; k < ir_ctx.node_count; k++) {
 				if (ir_ctx.nodes[k].op == 0xFF) ir_dead_cnt++;
 			} }
 			bankswitch_prg(ir_saved_bank);
-			metrics_ir_block(ir_bytes_before, code_index);
+			metrics_ir_block(ir_bytes_before, ir_bytes_after_actual);
 			metrics_ir_nodes_killed(ir_dead_cnt);
 			metrics_ir_pass_results(ir_pass_rl, ir_pass_ds, ir_pass_dl,
 			                        ir_pass_pp, ir_pass_pr);

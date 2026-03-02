@@ -1412,7 +1412,7 @@ _flash_block_flags:
 	reserve	FLASH_CACHE_BLOCKS
 
 ;=======================================================	
-	section "bank4"	; occupies banks 4-18, 15 banks
+	section "bank4"	; occupies banks 4-16, 13 banks (bank 17 = BANK_COMPILE)
 	global _flash_cache_code
 ;-------------------------------------------------------	
 	align 14

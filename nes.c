@@ -466,6 +466,7 @@ void flash_format(void)
 	for (uint8_t bank = 3; bank < 31; bank++)
 	{
 		// Skip repurposed banks
+		if (bank == BANK_COMPILE) continue;
 		if (bank == BANK_NES_PRG_LO) continue;
 		if (bank == BANK_RENDER) continue;
 		if (bank == BANK_NES_CHR) continue;

@@ -796,6 +796,7 @@ static void flash_format_b2(void)
 	{
 		// Skip banks that contain our code/data — erasing them
 		// would destroy the running program and ROM assets.
+		if (bank == BANK_COMPILE)      continue;  // compile-time banked code
 		if (bank == BANK_RENDER)       continue;  // render_video_b2, metrics
 		if (bank == BANK_PLATFORM_ROM) continue;  // ROM incbin data
 		if (bank == BANK_SA_CODE)      continue;  // static analysis code

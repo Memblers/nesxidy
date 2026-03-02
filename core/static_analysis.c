@@ -1191,7 +1191,7 @@ static void sa_run_b2(void)
     // =====================================================================
     // Between passes: erase code sectors + PC table sectors, reset allocator.
     //
-    // Code banks 4-17 (14 banks, 56 sectors): erased so pass 2 can
+    // Code banks 4-16 (13 banks, 52 sectors): erased so pass 2 can
     //   rewrite code with correct branch encodings.
     // PC address banks 19-26 (up to 8 banks): erased because
     //   mid-block code_index values shift when pass 2 uses shorter branches.

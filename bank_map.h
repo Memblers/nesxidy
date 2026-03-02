@@ -20,7 +20,8 @@
  *   Bank  1       Emit helpers / optimizer V2 (BANK_EMIT)
  *   Bank  2       Recompiler / compile-time code (BANK_RECOMPILE)
  *   Bank  3       Metadata: block flags, SA bitmap, cache bits (BANK_META)
- *   Banks 4-17    Code cache (BANK_CACHE_START .. +13)
+ *   Banks 4-16    Code cache (BANK_CACHE_START .. +12)
+ *   Bank 17       Compile-time banked code (BANK_COMPILE)
  *   Bank 18       Entry list for two-pass compile (BANK_ENTRY_LIST)
  *   Banks 19-26   PC jump table (BANK_PCTABLE_START .. +7)
  *   Banks 27-30   PC flag table (BANK_PCFLAGS_START .. +3)
@@ -52,6 +53,7 @@
 #define BANK_RECOMPILE          2       /* Recompiler (recompile_opcode_b2) */
 #define BANK_META               3       /* Block flags, SA bitmap, cache bits */
 #define BANK_CACHE_START        4       /* First code-cache bank */
+#define BANK_COMPILE            17      /* Compile-time banked code (not runtime) */
 #define BANK_ENTRY_LIST         18      /* Two-pass entry list */
 /*
  * BANK_SA_CODE / BANK_INIT_CODE: banked code that doesn't run at dispatch

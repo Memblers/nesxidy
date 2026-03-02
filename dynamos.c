@@ -992,8 +992,17 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 #endif // dead code
 
 //============================================================================================================
+// Compile-time functions — banked in BANK_COMPILE (bank 17).
+// These run only during JIT compilation or init, never at dispatch time.
+// Functions that read cross-bank data use peek_bank_byte() (WRAM helper)
+// instead of bankswitch_prg() to avoid unmapping their own code.
+// flash_byte_program() is safe (lives in WRAM, handles its own bankswitch).
+//============================================================================================================
+#pragma section bank17
 
-uint8_t flash_sector_alloc(uint8_t total_size)
+extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+
+static uint8_t flash_sector_alloc_b17(uint8_t total_size)
 {
 	// total_size = code + epilogue bytes (header added internally)
 	uint16_t need = (uint16_t)total_size + BLOCK_HEADER_SIZE;
@@ -1045,111 +1054,59 @@ uint8_t flash_sector_alloc(uint8_t total_size)
 
 //============================================================================================================
 
-// Reserve a flash block for a target PC.  Allocates the block, marks it
-// as used in flash_block_flags, and records the mapping so the batch
-// compile loop can fulfill it later.
-//
-// IMPORTANT: Does NOT write PC flags.  The scan loop checks the
-// reservation list directly (is_reserved), so PC flags are not needed
-// until sa_compile_one_block actually compiles the target.
-// This avoids the bug where early PC flags caused the scan to skip
-// reserved targets before they were compiled.
-//
-// Returns the 1-based block number (same as flash_cache_select), or 0
-// if the cache is full, reservation table is full, or target is not
-// Reservation system removed — two-pass static compilation (sa_compile_pass)
-// handles forward branches in the static path, and the dynamic path uses
-// 21-byte patchable templates with opt2 post-patching.
-
-// Result globals for lookup_native_addr_safe (and formerly reserve_block_for_pc)
-uint16_t reserve_result_addr;    // native entry address of looked-up block
-uint8_t  reserve_result_bank;    // flash bank of looked-up block
-
-// Fixed-bank helper: look up native address for a compiled PC.
-// Caller (bank2) passes target_pc; on success sets reserve_result_addr
-// and reserve_result_bank, returns 1.  Returns 0 if target not compiled
-// or on failure.  Safe to call from bank2.
-uint8_t lookup_native_addr_safe(uint16_t target_pc)
+static uint8_t lookup_native_addr_safe_b17(uint16_t target_pc)
 {
-	uint8_t saved_bank = mapper_prg_bank;
-
-	// Read flag
+	// Read flag via peek_bank_byte (safe from banked code)
 	uint8_t flag_bank = (target_pc >> 14) + BANK_PC_FLAGS;
-	bankswitch_prg(flag_bank);
-	uint8_t flag = flash_cache_pc_flags[target_pc & FLASH_BANK_MASK];
-	if (flag & RECOMPILED) {
-		bankswitch_prg(saved_bank);
+	uint8_t flag = peek_bank_byte(flag_bank,
+	    (uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
+	if (flag & RECOMPILED)
 		return 0;  // not compiled
-	}
 	reserve_result_bank = flag & 0x1F;
 
-	// Read native address
+	// Read native address via peek_bank_byte
 	uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
 	uint8_t pc_bank = (target_pc >> 13) + BANK_PC;
-	bankswitch_prg(pc_bank);
-	uint16_t na = flash_cache_pc[pa] | ((uint16_t)flash_cache_pc[pa + 1] << 8);
+	uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pa])
+	            | ((uint16_t)peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pa + 1]) << 8);
 	reserve_result_addr = na;
 
-	bankswitch_prg(saved_bank);
 	return 1;
 }
 
-// Fixed-bank helper: look up a block entry point in the two-pass entry list.
-// The entry list (in BANK_ENTRY_LIST) is a sequential table written during
-// pass 1 with 8-byte entries:
-//   byte 0-1: entry_pc (little-endian)
-//   byte 2-3: exit_pc  (little-endian)
-//   byte 4-5: native_addr (= flash_code_address + BLOCK_PREFIX_SIZE)
-//   byte 6:   code_bank
-//   byte 7:   code_len (total bytes: code + epilogue)
-// Only finds block ENTRY PCs (code_index=0).  Returns 1 on hit (sets
-// reserve_result_addr and reserve_result_bank), 0 on miss.
-// Safe to call from bank2.
-uint8_t lookup_entry_list(uint16_t target_pc)
+static uint8_t lookup_entry_list_b17(uint16_t target_pc)
 {
-	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(BANK_ENTRY_LIST);
-
 	uint8_t target_lo = (uint8_t)target_pc;
 	uint8_t target_hi = (uint8_t)(target_pc >> 8);
-	uint8_t *base = (uint8_t *)FLASH_BANK_BASE;
 
 	for (uint16_t i = 0; i < entry_list_offset; i += 8)
 	{
-		if (base[i] == 0xFF && base[i + 1] == 0xFF)
+		uint8_t b0 = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i);
+		uint8_t b1 = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 1);
+		if (b0 == 0xFF && b1 == 0xFF)
 			break;  // end sentinel
-		if (base[i] == target_lo && base[i + 1] == target_hi)
+		if (b0 == target_lo && b1 == target_hi)
 		{
-			reserve_result_addr = base[i + 4] | ((uint16_t)base[i + 5] << 8);
-			reserve_result_bank = base[i + 6];
-			bankswitch_prg(saved_bank);
+			reserve_result_addr = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 4)
+			                    | ((uint16_t)peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 5) << 8);
+			reserve_result_bank = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 6);
 			return 1;
 		}
 	}
 
-	bankswitch_prg(saved_bank);
 	return 0;
 }
 
 //============================================================================================================
 
-void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
+static void flash_cache_pc_update_b17(uint8_t code_address, uint8_t flags)
 {
 	// Code starts at flash_code_address + BLOCK_PREFIX_SIZE (after header)
 	uint16_t native_addr = flash_code_address + code_address + BLOCK_PREFIX_SIZE;
 	
-	// Guard against flash AND corruption: flash can only clear bits (1→0).
-	// If this PC slot was already programmed (flag != $FF), reprogramming
-	// would AND the old and new values, corrupting both the native address
-	// and the bank/flag byte.  This happens when the same emulated PC
-	// appears in two different compiled blocks (e.g. a conditional branch
-	// merges into a shared instruction, or the same PC is first INTERPRETED
-	// then RECOMPILED in a later block).  Skip the update — the existing
-	// entry is still valid.
-	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(pc_jump_flag_bank);
-	uint8_t current_flag = flash_cache_pc_flags[pc_jump_flag_address];
-	bankswitch_prg(saved_bank);
+	// Guard against flash AND corruption: if slot already programmed, skip.
+	uint8_t current_flag = peek_bank_byte(pc_jump_flag_bank,
+	    (uint16_t)&flash_cache_pc_flags[pc_jump_flag_address]);
 	if (current_flag != 0xFF)
 		return;  // slot already programmed — don't AND-corrupt it
 	
@@ -1167,7 +1124,7 @@ void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
 
 //============================================================================================================
 
-void setup_flash_pc_tables(uint16_t emulated_pc)
+static void setup_flash_pc_tables_b17(uint16_t emulated_pc)
 {
 	uint32_t full_address;
 	full_address = (emulated_pc << 1);
@@ -1177,18 +1134,15 @@ void setup_flash_pc_tables(uint16_t emulated_pc)
 	lookup_pc_jump_flag(emulated_pc);
 }
 
-void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
+static void setup_flash_address_b17(uint16_t emulated_pc, uint16_t block_number)
 {
-	// Legacy: block_number is no longer used for flash address computation.
-	// flash_code_bank and flash_code_address are set by flash_sector_alloc().
-	// This function now only sets up PC table pointers.
 	if (block_number) {}  // suppress unused-parameter warning
-	setup_flash_pc_tables(emulated_pc);
+	setup_flash_pc_tables_b17(emulated_pc);
 }
 
 //============================================================================================================
 
-void flash_cache_init_sectors(void)
+static void flash_cache_init_sectors_b17(void)
 {
 	// Zero the free-pointer table
 	for (uint8_t i = 0; i < FLASH_CACHE_SECTORS; i++)
@@ -1199,29 +1153,20 @@ void flash_cache_init_sectors(void)
 //============================================================================================================
 
 #ifdef ENABLE_OPTIMIZER_V2
-// Invert branch conditions for the v2 optimizer pattern
-// BPL(10)->BMI(30), BMI(30)->BPL(10), BVC(50)->BVS(70), BVS(70)->BVC(50)
-// BCC(90)->BCS(B0), BCS(B0)->BCC(90), BNE(D0)->BEQ(F0), BEQ(F0)->BNE(D0)
-static uint8_t invert_branch(uint8_t opcode) {
-    return opcode ^ 0x20;  // XOR with 0x20 inverts branch condition
+static uint8_t invert_branch_b17(uint8_t opcode) {
+    return opcode ^ 0x20;
 }
 #endif
 
 //============================================================================================================
-// Intra-block backward branch helper (fixed bank — callable from bank2).
-// If target_pc is within the current block being compiled and conditions
-// are met, emits a native 2-byte backward branch and updates state.
-// Returns 1 if native branch was emitted, 0 if caller should fall through.
+// Intra-block backward branch helper (bank 17 — callable via trampoline).
 //============================================================================================================
-uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
+static uint8_t try_intra_block_branch_b17(uint16_t target_pc, uint8_t branch_opcode)
 {
 	if (block_has_jsr)
 		return 0;
 	
 #ifdef ENABLE_PEEPHOLE
-	// Peephole safety: if any instruction in this block used skip=1
-	// (leading PHP elided), a backward branch to that code would enter
-	// without the expected PHP on the NES HW stack, corrupting returns.
 	if (block_has_skip)
 		return 0;
 #endif
@@ -1232,33 +1177,106 @@ uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
 	if (target_pc < block_entry || target_pc >= pc)
 		return 0;
 	
-	// Look up the target's code_index from the in-block map.
-	// The map is populated during compilation (indexed by guest-PC offset & 0x3F).
-	// Value 0 = no entry (hash collision or out-of-range), otherwise code_index+1.
 	uint8_t ci_slot = (uint8_t)(target_pc - block_entry) & 0x3F;
 	uint8_t ci_val = block_ci_map[ci_slot];
 	if (ci_val == 0)
-		return 0;  // no entry — can't resolve target's code_index
+		return 0;
 	uint8_t target_code_index = ci_val - 1;
 	
-	// Compute native branch offset
 	int16_t offset16 = (int16_t)target_code_index - (int16_t)(code_index + 2);
 	
 	if (offset16 < -128 || offset16 > 127)
 		return 0;
 	
-	// Emit native backward branch
 	cache_code[cache_index][code_index+0] = branch_opcode;
 	cache_code[cache_index][code_index+1] = (uint8_t)(int8_t)offset16;
 	
-	setup_flash_address(pc, flash_cache_index);
-	flash_cache_pc_update(code_index, RECOMPILED);
+	setup_flash_address_b17(pc, flash_cache_index);
+	flash_cache_pc_update_b17(code_index, RECOMPILED);
 	
 	pc += 2;
 	code_index += 2;
 	cache_branches++;
 	cache_flag[cache_index] |= READY_FOR_NEXT;
 	return 1;
+}
+
+//============================================================================================================
+// Fixed-bank trampolines for BANK_COMPILE functions.
+// Save caller's bank, switch to bank 17, call _b17 impl, restore bank.
+//============================================================================================================
+#pragma section default
+
+uint8_t flash_sector_alloc(uint8_t total_size)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = flash_sector_alloc_b17(total_size);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+
+// Result globals for lookup_native_addr_safe (and formerly reserve_block_for_pc)
+uint16_t reserve_result_addr;    // native entry address of looked-up block
+uint8_t  reserve_result_bank;    // flash bank of looked-up block
+
+uint8_t lookup_native_addr_safe(uint16_t target_pc)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = lookup_native_addr_safe_b17(target_pc);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+
+uint8_t lookup_entry_list(uint16_t target_pc)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = lookup_entry_list_b17(target_pc);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+
+void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	flash_cache_pc_update_b17(code_address, flags);
+	bankswitch_prg(saved_bank);
+}
+
+void setup_flash_pc_tables(uint16_t emulated_pc)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	setup_flash_pc_tables_b17(emulated_pc);
+	bankswitch_prg(saved_bank);
+}
+
+void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	setup_flash_address_b17(emulated_pc, block_number);
+	bankswitch_prg(saved_bank);
+}
+
+void flash_cache_init_sectors(void)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	flash_cache_init_sectors_b17();
+	bankswitch_prg(saved_bank);
+}
+
+uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = try_intra_block_branch_b17(target_pc, branch_opcode);
+	bankswitch_prg(saved_bank);
+	return result;
 }
 
 //============================================================================================================
@@ -1758,6 +1776,10 @@ static void ir_record_native_b2(const uint8_t *buf, uint8_t len)
 #endif /* ENABLE_IR */
 
 #pragma section bank2
+
+static uint8_t invert_branch(uint8_t opcode) {
+	return opcode ^ 0x20;
+}
 
 static uint8_t recompile_opcode_b2_inner()
 {

@@ -743,7 +743,6 @@ batch_exit:  // case 1 (compile needed) jumps here
 		{
 			uint8_t ir_saved_bank = mapper_prg_bank;
 			uint8_t ir_bytes_before = code_index;
-			uint8_t ir_bytes_after_actual = code_index; /* default: no savings */
 			uint8_t lowered_size;
 			if (!ir_ctx.enabled) {
 				/* IR was disabled mid-block (node overflow) — skip
@@ -762,7 +761,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 			 * so ir_resolve_deferred_patches scans the correct range. */
 			if (lowered_size) {
 				code_index = lowered_size;
-				ir_bytes_after_actual = lowered_size;
+				metrics_ir_block(ir_bytes_before, code_index);
 				/* Safety: pad gap between lowered output and pre-IR end
 				 * with NOP bytes.  21-byte patchable templates have an
 				 * internal BEQ at +0 with offset 19 targeting +21.
@@ -791,7 +790,6 @@ batch_exit:  // case 1 (compile needed) jumps here
 				if (ir_ctx.nodes[k].op == 0xFF) ir_dead_cnt++;
 			} }
 			bankswitch_prg(ir_saved_bank);
-			metrics_ir_block(ir_bytes_before, ir_bytes_after_actual);
 			metrics_ir_nodes_killed(ir_dead_cnt);
 			metrics_ir_pass_results(ir_pass_rl, ir_pass_ds, ir_pass_dl,
 			                        ir_pass_pp, ir_pass_pr);

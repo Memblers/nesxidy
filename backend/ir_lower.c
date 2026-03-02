@@ -419,4 +419,128 @@ void ir_resolve_deferred_patches(void)
     }
 }
 
+/* ===================================================================
+ * Pass 5: RMW fusion (post-pass, called from dynamos.c after
+ * ir_optimize completes, before ir_lower)
+ *
+ * Patterns:
+ *   LDA zp/abs, ASL/LSR/ROL/ROR A, STA zp/abs -> shift zp/abs
+ *   LDX zp/abs, INX/DEX, STX zp/abs -> INC/DEC zp/abs
+ *   LDY zp/abs, INY/DEY, STY zp/abs -> INC/DEC zp/abs
+ * =================================================================== */
+
+/* Inline barrier check: branch or opaque pseudo-op */
+#define IS_BARRIER(op) \
+    ((op) == IR_JMP_ABS || (op) == IR_JSR || (op) == IR_RTS || \
+     ((op) >= IR_BPL && (op) <= IR_BEQ) || (op) >= IR_TEMPLATE)
+
+uint8_t ir_opt_rmw_fusion(ir_ctx_t *ctx)
+{
+    uint8_t changes = 0;
+    ir_node_t *nd = ctx->nodes;
+    uint8_t nc = ctx->node_count;
+
+    for (uint8_t i = 0; i < nc; i++) {
+        uint8_t op1 = nd[i].op;
+        if (op1 == IR_DEAD) continue;
+
+        /* Find next two non-dead nodes */
+        uint8_t j, k;
+        for (j = i + 1; j < nc && nd[j].op == IR_DEAD; j++);
+        if (j >= nc) break;
+        for (k = j + 1; k < nc && nd[k].op == IR_DEAD; k++);
+        if (k >= nc) break;
+
+        uint8_t op2 = nd[j].op;
+        uint8_t op3 = nd[k].op;
+        uint16_t addr = nd[i].operand;
+
+        /* --- Shift fusion: LDA zp/abs, shift_A, STA zp/abs ---
+         * Condition: same address, A dead after store. */
+        if ((op1 == IR_LDA_ZP || op1 == IR_LDA_ABS) &&
+            op2 >= IR_ASL_A && op2 <= IR_ROR_A &&
+            op3 == ((op1 == IR_LDA_ZP) ? IR_STA_ZP : IR_STA_ABS) &&
+            nd[k].operand == addr) {
+            /* Check A dead after via flags bitfield */
+            uint8_t a_dead = 1;
+            { uint8_t m; for (m = k + 1; m < nc; m++) {
+                uint8_t fop = nd[m].op;
+                if (fop == IR_DEAD) continue;
+                if (nd[m].flags & IR_F_READS_A) { a_dead = 0; break; }
+                if (nd[m].flags & IR_F_WRITES_A) break;
+                if (IS_BARRIER(fop)) { a_dead = 0; break; }
+            } }
+            if (a_dead) {
+                uint8_t base = (op1 == IR_LDA_ZP) ? IR_ASL_ZP : IR_ASL_ABS;
+                nd[i].op = base + (op2 - IR_ASL_A);
+                nd[i].flags = IR_F_WRITES_FLAGS;
+                if (op2 == IR_ROL_A || op2 == IR_ROR_A)
+                    nd[i].flags |= IR_F_READS_FLAGS;
+                nd[j].op = IR_DEAD; nd[j].flags = 0; nd[j].operand = 0;
+                nd[k].op = IR_DEAD; nd[k].flags = 0; nd[k].operand = 0;
+                changes += 2;
+                continue;
+            }
+        }
+
+        /* --- Inc/Dec fusion via X or Y ---
+         * Merged X and Y patterns to share the rewrite logic. */
+        {
+            uint8_t match = 0, is_zp = 0, inc = 0;
+            uint8_t r_flag = 0, w_flag = 0;
+            uint8_t ld_zp = 0, ld_abs = 0;
+
+            if ((op1 == IR_LDX_ZP || op1 == IR_LDX_ABS) &&
+                (op2 == IR_INX || op2 == IR_DEX)) {
+                is_zp = (op1 == IR_LDX_ZP);
+                if (op3 == (is_zp ? IR_STX_ZP : IR_STX_ABS) &&
+                    nd[k].operand == addr) {
+                    match = 1; inc = (op2 == IR_INX);
+                    r_flag = IR_F_READS_X; w_flag = IR_F_WRITES_X;
+                    ld_zp = IR_LDX_ZP; ld_abs = IR_LDX_ABS;
+                }
+            }
+            if (!match &&
+                (op1 == IR_LDY_ZP || op1 == IR_LDY_ABS) &&
+                (op2 == IR_INY || op2 == IR_DEY)) {
+                is_zp = (op1 == IR_LDY_ZP);
+                if (op3 == (is_zp ? IR_STY_ZP : IR_STY_ABS) &&
+                    nd[k].operand == addr) {
+                    match = 1; inc = (op2 == IR_INY);
+                    r_flag = IR_F_READS_Y; w_flag = IR_F_WRITES_Y;
+                    ld_zp = IR_LDY_ZP; ld_abs = IR_LDY_ABS;
+                }
+            }
+
+            if (match) {
+                uint8_t rmw = inc ? (is_zp ? IR_INC_ZP : IR_INC_ABS)
+                                  : (is_zp ? IR_DEC_ZP : IR_DEC_ABS);
+                /* Check register liveness via flags bitfield */
+                uint8_t reg_live = 0;
+                { uint8_t m; for (m = k + 1; m < nc; m++) {
+                    uint8_t fop = nd[m].op;
+                    if (fop == IR_DEAD) continue;
+                    if (nd[m].flags & r_flag) { reg_live = 1; break; }
+                    if (nd[m].flags & w_flag) break;
+                    if (IS_BARRIER(fop)) { reg_live = 1; break; }
+                } }
+                nd[i].op = rmw;
+                nd[i].flags = IR_F_WRITES_FLAGS;
+                nd[j].op = IR_DEAD; nd[j].flags = 0; nd[j].operand = 0;
+                if (reg_live) {
+                    nd[k].op = is_zp ? ld_zp : ld_abs;
+                    nd[k].flags = w_flag | IR_F_WRITES_FLAGS;
+                    changes++;
+                } else {
+                    nd[k].op = IR_DEAD; nd[k].flags = 0; nd[k].operand = 0;
+                    changes += 2;
+                }
+                continue;
+            }
+        }
+    }
+
+    return changes;
+}
+
 #pragma section default

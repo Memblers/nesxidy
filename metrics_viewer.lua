@@ -33,6 +33,7 @@
 --         +$50  ir_pass_dead_load      u16  (Pass 2b)
 --         +$52  ir_pass_php_plp        u16  (Pass 3)
 --         +$54  ir_pass_pair_rewrite   u16  (Pass 4)
+--         +$56  ir_rmw_fusion          u8   (Pass 5: RMW fusion, written by dynamos.c)
 
 local BASE = 0x7E30   -- CPU address (WRAM $6000-$7FFF mapped)
 local MEM  = emu.memType.nesDebug  -- side-effect-free reads
@@ -54,8 +55,54 @@ local COL_TITLE = 0x00FFFF     -- cyan titles
 local COL_SA    = 0x00FF00     -- bright green
 local COL_RT    = 0xFFFF00     -- yellow
 local COL_WARN  = 0xFF2020     -- bright red
+local COL_FPS_G = 0x00FF00     -- green  (>= 55 fps)
+local COL_FPS_Y = 0xFFFF00     -- yellow (>= 40 fps)
+local COL_FPS_R = 0xFF4040     -- red    (<  40 fps)
+
+-- Emulated-FPS measurement state
+-- Tracks delta of total_frames (WRAM +$34) over wall-clock time.
+-- total_frames is incremented by the emulated program each time it
+-- completes a frame (calls metrics_dump_runtime_b2 from render_video).
+local efps_clock_prev   = os.clock()
+local efps_frames_prev  = 0        -- last sampled total_frames value
+local efps_display      = 0.0      -- displayed emulated FPS
+local efps_ready        = false    -- waiting for first valid sample
+local EFPS_INTERVAL     = 1.0      -- update every ~1 second for stability
 
 emu.addEventCallback(function()
+  -- --- Emulated FPS: delta(total_frames) / delta(wall-clock) ---
+  local now = os.clock()
+  local dt  = now - efps_clock_prev
+
+  -- Read total_frames from metrics WRAM block (only valid after magic)
+  local have_magic = (r8(0x39) == 0x4D and r8(0x3A) == 0x45)
+  local cur_frames = 0
+  if have_magic then cur_frames = r32(0x34) end
+
+  if dt >= EFPS_INTERVAL then
+    if efps_ready and have_magic then
+      local delta = cur_frames - efps_frames_prev
+      if delta >= 0 and dt > 0 then
+        efps_display = delta / dt
+      end
+    end
+    efps_clock_prev  = now
+    efps_frames_prev = cur_frames
+    efps_ready       = have_magic  -- arm for next interval
+  end
+
+  -- Pick colour based on emulated FPS
+  local fps_col = COL_FPS_R
+  if efps_display >= 55 then fps_col = COL_FPS_G
+  elseif efps_display >= 40 then fps_col = COL_FPS_Y end
+
+  -- Always draw emulated FPS even before metrics are ready
+  if efps_ready then
+    emu.drawString(170, 2, string.format("emu %.1f FPS", efps_display), fps_col, COL_BG)
+  else
+    emu.drawString(170, 2, "emu -- FPS", COL_FPS_Y, COL_BG)
+  end
+
   -- Check magic signature
   if r8(0x39) ~= 0x4D or r8(0x3A) ~= 0x45 then
     emu.drawString(2, 2, "Metrics: no data (waiting for frame dump)", COL_WARN, COL_BG)
@@ -120,6 +167,7 @@ emu.addEventCallback(function()
   local ir_dl      = r16(0x50)
   local ir_pp      = r16(0x52)
   local ir_pr      = r16(0x54)
+  local ir_rmw     = r8(0x56)
 
   local ir_saved   = ir_before - ir_after
   local ir_pct     = 0
@@ -141,9 +189,9 @@ emu.addEventCallback(function()
     emu.drawString(2, y, "No IR blocks yet", COL_IR2, COL_BG); y = y + 9
   end
 
-  local ir_total_changes = ir_rl + ir_ds + ir_dl + ir_pp + ir_pr
+  local ir_total_changes = ir_rl + ir_ds + ir_dl + ir_pp + ir_pr + ir_rmw
   emu.drawString(2, y, string.format("Pass hits (%d total):", ir_total_changes), COL_IR, COL_BG); y = y + 9
   emu.drawString(2, y, string.format("  RedundLoad:%d DeadStore:%d DeadLoad:%d", ir_rl, ir_ds, ir_dl), COL_IR2, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("  PHP/PLP:%d PairRwrt:%d", ir_pp, ir_pr), COL_IR2, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("  PHP/PLP:%d PairRwrt:%d RMW:%d", ir_pp, ir_pr, ir_rmw), COL_IR2, COL_BG); y = y + 9
 
 end, emu.eventType.endFrame)

@@ -48,6 +48,7 @@
 /* ---- Core system banks ---- */
 #define BANK_INTERP             0       /* Interpreter, boot data image */
 #define BANK_EMIT               1       /* Emit helpers, optimizer V2 */
+#define BANK_IR_OPT             0       /* IR optimizer (shares bank with interpreter) */
 #define BANK_RECOMPILE          2       /* Recompiler (recompile_opcode_b2) */
 #define BANK_META               3       /* Block flags, SA bitmap, cache bits */
 #define BANK_CACHE_START        4       /* First code-cache bank */

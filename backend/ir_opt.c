@@ -11,7 +11,7 @@
  * Lives in bank 2 (compile-time only, alongside recompile_opcode_b2).
  */
 
-#pragma section bank1
+#pragma section bank0
 
 #include <stdint.h>
 #include "ir.h"
@@ -246,6 +246,51 @@ static uint8_t writes_to_zp(uint8_t op)
     return 0;
 }
 
+/* Helper: does this instruction write to an absolute memory location? */
+static uint8_t writes_to_abs(uint8_t op)
+{
+    switch (op) {
+        case IR_STA_ABS: case IR_STX_ABS: case IR_STY_ABS:
+        case IR_INC_ABS: case IR_DEC_ABS:
+        case IR_ASL_ABS: case IR_LSR_ABS:
+        case IR_ROL_ABS: case IR_ROR_ABS:
+            return 1;
+    }
+    return 0;
+}
+
+/* Helper: does intermediate instruction 'mid' prevent a later
+ * identical copy of 'orig' from being redundant?
+ * Uses the IR node flags bitfield for register/flag checks.
+ * Returns 1 if the forward scan must stop. */
+static uint8_t dup_interferes(ir_node_t *orig, ir_node_t *mid)
+{
+    if (is_branch(mid->op) || is_opaque(mid->op)) return 1;
+
+    /* Register + flag check via bitfield.
+     * orig_touch has a set bit (in write-position 4-7) for every
+     * register orig reads OR writes.  If mid writes any of those
+     * registers, the duplicate is no longer guaranteed equivalent. */
+    uint8_t ot = ((orig->flags & 0x0F) << 4) | (orig->flags & 0xF0);
+    if (ot & mid->flags & 0xF0) return 1;
+
+    /* ZP memory: if orig accesses a ZP addr and mid writes it */
+    if (writes_to_zp(mid->op)) {
+        switch (orig->op) {
+            case IR_STA_ZP: case IR_STX_ZP: case IR_STY_ZP:
+            case IR_LDA_ZP: case IR_LDX_ZP: case IR_LDY_ZP:
+            case IR_AND_ZP: case IR_ORA_ZP:
+            case IR_CMP_ZP: case IR_CPX_ZP: case IR_CPY_ZP:
+            case IR_BIT_ZP:
+                if ((uint8_t)orig->operand == (uint8_t)mid->operand)
+                    return 1;
+                break;
+        }
+    }
+
+    return 0;
+}
+
 /* ===================================================================
  * Pass 1: Redundant load elimination
  * (from opt65.c opti1 / peephole_patterns.txt Phase 1)
@@ -254,129 +299,107 @@ static uint8_t writes_to_zp(uint8_t op)
  * Kill LDA/LDX/LDY #imm if register already holds that value
  * and the instruction's flag side-effects are unused.
  * =================================================================== */
+
+/* Helper: are flags consumed before the next flag-writing node?
+ * Returns 1 if flags are NOT needed (safe to kill). */
+static uint8_t flags_safe(ir_ctx_t *ctx, uint8_t start)
+{
+    uint8_t j;
+    for (j = start; j < ctx->node_count; j++) {
+        if (ctx->nodes[j].op == IR_DEAD) continue;
+        if (reads_flags(ctx->nodes[j].op)) return 0;
+        if (writes_flags(ctx->nodes[j].op)) return 1;
+    }
+    return 1;
+}
+
 uint8_t ir_opt_redundant_load(ir_ctx_t *ctx)
 {
     uint8_t changes = 0;
     ir_reg_shadow_t *r = &ctx->regs;
 
-    /* Reset shadow */
+    /* Reset ALL shadow state — ZP/ABS caches must be cleared because
+     * ir_optimize() calls this pass in a loop; stale cache entries
+     * from a previous iteration would poison the scan. */
     r->a_known = r->x_known = r->y_known = 0;
+    r->zp_known[0] = r->zp_known[1] = r->zp_known[2] = r->zp_known[3] = 0;
+    r->abs_known[0] = r->abs_known[1] = r->abs_known[2] = r->abs_known[3] = 0;
 
     for (uint8_t i = 0; i < ctx->node_count; i++) {
         ir_node_t *n = &ctx->nodes[i];
         if (n->op == IR_DEAD) continue;
 
-        /* --- Check for redundant immediate loads --- */
-        if (n->op == IR_LDA_IMM && r->a_known && r->a_val == (uint8_t)n->operand) {
-            /* A already holds this value.  Safe to kill if the next
-             * non-dead node doesn't read flags set by this load.
-             * Conservative: check if any following node reads flags
-             * before the next flag-writing node. */
-            uint8_t flags_needed = 0;
-            for (uint8_t j = i + 1; j < ctx->node_count; j++) {
-                if (ctx->nodes[j].op == IR_DEAD) continue;
-                if (reads_flags(ctx->nodes[j].op)) { flags_needed = 1; break; }
-                if (writes_flags(ctx->nodes[j].op)) break;
-            }
-            if (!flags_needed) {
-                ir_kill(ctx, i);
-                changes++;
-                continue;
-            }
-        }
-        if (n->op == IR_LDX_IMM && r->x_known && r->x_val == (uint8_t)n->operand) {
-            uint8_t flags_needed = 0;
-            for (uint8_t j = i + 1; j < ctx->node_count; j++) {
-                if (ctx->nodes[j].op == IR_DEAD) continue;
-                if (reads_flags(ctx->nodes[j].op)) { flags_needed = 1; break; }
-                if (writes_flags(ctx->nodes[j].op)) break;
-            }
-            if (!flags_needed) {
-                ir_kill(ctx, i);
-                changes++;
-                continue;
-            }
-        }
-        if (n->op == IR_LDY_IMM && r->y_known && r->y_val == (uint8_t)n->operand) {
-            uint8_t flags_needed = 0;
-            for (uint8_t j = i + 1; j < ctx->node_count; j++) {
-                if (ctx->nodes[j].op == IR_DEAD) continue;
-                if (reads_flags(ctx->nodes[j].op)) { flags_needed = 1; break; }
-                if (writes_flags(ctx->nodes[j].op)) break;
-            }
-            if (!flags_needed) {
-                ir_kill(ctx, i);
-                changes++;
-                continue;
-            }
+        /* --- Redundant immediate loads (A/X/Y) --- */
+        if ((n->op == IR_LDA_IMM && r->a_known && r->a_val == (uint8_t)n->operand) ||
+            (n->op == IR_LDX_IMM && r->x_known && r->x_val == (uint8_t)n->operand) ||
+            (n->op == IR_LDY_IMM && r->y_known && r->y_val == (uint8_t)n->operand)) {
+            if (flags_safe(ctx, i + 1)) { ir_kill(ctx, i); changes++; continue; }
         }
 
-        /* --- Identity-op elimination: AND #$FF, ORA #$00, EOR #$00 ---
-         * These are no-ops for A.  Kill if flags side-effect unused. */
+        /* --- Identity-op elimination: AND #$FF, ORA #$00, EOR #$00 --- */
         if ((n->op == IR_AND_IMM && (uint8_t)n->operand == 0xFF) ||
             (n->op == IR_ORA_IMM && (uint8_t)n->operand == 0x00) ||
             (n->op == IR_EOR_IMM && (uint8_t)n->operand == 0x00)) {
-            uint8_t flags_needed = 0;
-            for (uint8_t j = i + 1; j < ctx->node_count; j++) {
-                if (ctx->nodes[j].op == IR_DEAD) continue;
-                if (reads_flags(ctx->nodes[j].op)) { flags_needed = 1; break; }
-                if (writes_flags(ctx->nodes[j].op)) break;
-            }
-            if (!flags_needed) {
-                ir_kill(ctx, i);
-                changes++;
-                continue;
-            }
+            if (flags_safe(ctx, i + 1)) { ir_kill(ctx, i); changes++; continue; }
         }
 
-        /* --- Zero/full-mask folding ---
-         * AND #$00 always yields 0, ORA #$FF always yields $FF,
-         * regardless of A's current value. Rewrite to LDA #imm. */
-        if (n->op == IR_AND_IMM && (uint8_t)n->operand == 0x00) {
-            n->op = IR_LDA_IMM;
-            n->operand = 0x00;
+        /* --- Zero/full-mask folding: AND #$00→LDA #$00, ORA #$FF→LDA #$FF --- */
+        if ((n->op == IR_AND_IMM && (uint8_t)n->operand == 0x00) ||
+            (n->op == IR_ORA_IMM && (uint8_t)n->operand == 0xFF)) {
+            uint8_t val = (n->op == IR_AND_IMM) ? 0x00 : 0xFF;
+            n->op = IR_LDA_IMM; n->operand = val;
             n->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
-            r->a_val = 0x00; r->a_known = 1;
-            changes++;
-            continue;
-        }
-        if (n->op == IR_ORA_IMM && (uint8_t)n->operand == 0xFF) {
-            n->op = IR_LDA_IMM;
-            n->operand = 0xFF;
-            n->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
-            r->a_val = 0xFF; r->a_known = 1;
-            changes++;
-            continue;
+            r->a_val = val; r->a_known = 1;
+            changes++; continue;
         }
 
         /* --- Constant folding: AND/ORA/EOR #imm with known A --- */
-        if (r->a_known) {
-            if (n->op == IR_AND_IMM) {
-                uint8_t result = r->a_val & (uint8_t)n->operand;
-                n->op = IR_LDA_IMM;
-                n->operand = result;
-                n->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
-                r->a_val = result;
-                changes++;
-                continue;
+        if (r->a_known && (n->op == IR_AND_IMM || n->op == IR_ORA_IMM || n->op == IR_EOR_IMM)) {
+            uint8_t val = r->a_val, imm = (uint8_t)n->operand;
+            if (n->op == IR_AND_IMM) val &= imm;
+            else if (n->op == IR_ORA_IMM) val |= imm;
+            else val ^= imm;
+            n->op = IR_LDA_IMM; n->operand = val;
+            n->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
+            r->a_val = val;
+            changes++; continue;
+        }
+
+        /* --- Redundant store elimination with ZP shadow --- */
+        if (n->op == IR_STA_ZP || n->op == IR_STX_ZP || n->op == IR_STY_ZP) {
+            uint8_t addr = (uint8_t)n->operand;
+            uint8_t reg_known = 0, reg_val = 0;
+            if (n->op == IR_STA_ZP) { reg_known = r->a_known; reg_val = r->a_val; }
+            else if (n->op == IR_STX_ZP) { reg_known = r->x_known; reg_val = r->x_val; }
+            else { reg_known = r->y_known; reg_val = r->y_val; }
+
+            if (reg_known) {
+                uint8_t s;
+                for (s = 0; s < ZP_SHADOW_SIZE; s++) {
+                    if (r->zp_known[s] && r->zp_addr[s] == addr &&
+                        r->zp_val[s] == reg_val) {
+                        ir_kill(ctx, i); changes++; goto next_node;
+                    }
+                }
             }
-            if (n->op == IR_ORA_IMM) {
-                uint8_t result = r->a_val | (uint8_t)n->operand;
-                n->op = IR_LDA_IMM;
-                n->operand = result;
-                n->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
-                r->a_val = result;
-                changes++;
-                continue;
-            }
-            if (n->op == IR_EOR_IMM) {
-                uint8_t result = r->a_val ^ (uint8_t)n->operand;
-                n->op = IR_LDA_IMM;
-                n->operand = result;
-                n->flags = IR_F_WRITES_A | IR_F_WRITES_FLAGS;
-                r->a_val = result;
-                changes++;
-                continue;
+        }
+
+        /* --- Redundant store elimination with ABS shadow --- */
+        if (n->op == IR_STA_ABS || n->op == IR_STX_ABS || n->op == IR_STY_ABS) {
+            uint16_t addr = n->operand;
+            uint8_t reg_known = 0, reg_val = 0;
+            if (n->op == IR_STA_ABS) { reg_known = r->a_known; reg_val = r->a_val; }
+            else if (n->op == IR_STX_ABS) { reg_known = r->x_known; reg_val = r->x_val; }
+            else { reg_known = r->y_known; reg_val = r->y_val; }
+
+            if (reg_known) {
+                uint8_t s;
+                for (s = 0; s < ABS_SHADOW_SIZE; s++) {
+                    if (r->abs_known[s] && r->abs_addr[s] == addr &&
+                        r->abs_val[s] == reg_val) {
+                        ir_kill(ctx, i); changes++; goto next_node;
+                    }
+                }
             }
         }
 
@@ -394,10 +417,109 @@ uint8_t ir_opt_redundant_load(ir_ctx_t *ctx)
         else if (n->op == IR_DEY && r->y_known) { r->y_val = (uint8_t)(r->y_val - 1); }
         else if (writes_y(n->op))  { r->y_known = 0; }
 
-        /* Opaque nodes and branches invalidate register shadow (conservative) */
+        /* --- Update ZP shadow cache --- */
+        /* On STA/STX/STY zp with known register: record in cache.
+         * On LDA/LDX/LDY zp: if cached, set register shadow from it. */
+        if (n->op == IR_STA_ZP || n->op == IR_STX_ZP || n->op == IR_STY_ZP) {
+            uint8_t addr = (uint8_t)n->operand;
+            uint8_t reg_known = 0, reg_val = 0;
+            if (n->op == IR_STA_ZP) { reg_known = r->a_known; reg_val = r->a_val; }
+            else if (n->op == IR_STX_ZP) { reg_known = r->x_known; reg_val = r->x_val; }
+            else { reg_known = r->y_known; reg_val = r->y_val; }
+
+            /* Invalidate any existing entry for this addr */
+            { uint8_t s; for (s = 0; s < ZP_SHADOW_SIZE; s++) {
+                if (r->zp_known[s] && r->zp_addr[s] == addr) { r->zp_known[s] = 0; break; }
+            } }
+            /* Insert if register value is known */
+            if (reg_known) {
+                /* Try to find a free slot first, else evict LRU */
+                uint8_t slot = r->zp_lru;
+                { uint8_t s; for (s = 0; s < ZP_SHADOW_SIZE; s++) {
+                    if (!r->zp_known[s]) { slot = s; break; }
+                } }
+                r->zp_addr[slot] = addr;
+                r->zp_val[slot] = reg_val;
+                r->zp_known[slot] = 1;
+                r->zp_lru = (slot + 1) & (ZP_SHADOW_SIZE - 1);
+            }
+        }
+        else if (n->op == IR_LDA_ZP || n->op == IR_LDX_ZP || n->op == IR_LDY_ZP) {
+            uint8_t addr = (uint8_t)n->operand;
+            /* If this ZP addr is in the cache, set register known */
+            { uint8_t s; for (s = 0; s < ZP_SHADOW_SIZE; s++) {
+                if (r->zp_known[s] && r->zp_addr[s] == addr) {
+                    if (n->op == IR_LDA_ZP) { r->a_val = r->zp_val[s]; r->a_known = 1; }
+                    else if (n->op == IR_LDX_ZP) { r->x_val = r->zp_val[s]; r->x_known = 1; }
+                    else { r->y_val = r->zp_val[s]; r->y_known = 1; }
+                    break;
+                }
+            } }
+        }
+        /* RMW ops on ZP invalidate that cache entry */
+        if (writes_to_zp(n->op) &&
+            n->op != IR_STA_ZP && n->op != IR_STX_ZP && n->op != IR_STY_ZP) {
+            uint8_t addr = (uint8_t)n->operand;
+            { uint8_t s; for (s = 0; s < ZP_SHADOW_SIZE; s++) {
+                if (r->zp_known[s] && r->zp_addr[s] == addr) { r->zp_known[s] = 0; break; }
+            } }
+        }
+
+        /* --- Update ABS shadow cache --- */
+        if (n->op == IR_STA_ABS || n->op == IR_STX_ABS || n->op == IR_STY_ABS) {
+            uint16_t addr = n->operand;
+            uint8_t reg_known = 0, reg_val = 0;
+            if (n->op == IR_STA_ABS) { reg_known = r->a_known; reg_val = r->a_val; }
+            else if (n->op == IR_STX_ABS) { reg_known = r->x_known; reg_val = r->x_val; }
+            else { reg_known = r->y_known; reg_val = r->y_val; }
+
+            /* Invalidate existing entry for this addr */
+            { uint8_t s; for (s = 0; s < ABS_SHADOW_SIZE; s++) {
+                if (r->abs_known[s] && r->abs_addr[s] == addr) { r->abs_known[s] = 0; break; }
+            } }
+            if (reg_known) {
+                uint8_t slot = r->abs_lru;
+                { uint8_t s; for (s = 0; s < ABS_SHADOW_SIZE; s++) {
+                    if (!r->abs_known[s]) { slot = s; break; }
+                } }
+                r->abs_addr[slot] = addr;
+                r->abs_val[slot] = reg_val;
+                r->abs_known[slot] = 1;
+                r->abs_lru = (slot + 1) & (ABS_SHADOW_SIZE - 1);
+            }
+        }
+        else if (n->op == IR_LDA_ABS || n->op == IR_LDX_ABS || n->op == IR_LDY_ABS) {
+            uint16_t addr = n->operand;
+            { uint8_t s; for (s = 0; s < ABS_SHADOW_SIZE; s++) {
+                if (r->abs_known[s] && r->abs_addr[s] == addr) {
+                    if (n->op == IR_LDA_ABS) { r->a_val = r->abs_val[s]; r->a_known = 1; }
+                    else if (n->op == IR_LDX_ABS) { r->x_val = r->abs_val[s]; r->x_known = 1; }
+                    else { r->y_val = r->abs_val[s]; r->y_known = 1; }
+                    break;
+                }
+            } }
+        }
+        /* RMW ops on abs invalidate that cache entry */
+        if (writes_to_abs(n->op) &&
+            n->op != IR_STA_ABS && n->op != IR_STX_ABS && n->op != IR_STY_ABS) {
+            uint16_t addr = n->operand;
+            { uint8_t s; for (s = 0; s < ABS_SHADOW_SIZE; s++) {
+                if (r->abs_known[s] && r->abs_addr[s] == addr) { r->abs_known[s] = 0; break; }
+            } }
+        }
+        /* Indexed stores (ABSX/ABSY) — we can't track the effective
+         * address, so conservatively flush the entire abs cache. */
+        if (n->op == IR_STA_ABSX || n->op == IR_STA_ABSY) {
+            r->abs_known[0] = r->abs_known[1] = r->abs_known[2] = r->abs_known[3] = 0;
+        }
+
+        /* Opaque nodes and branches invalidate all shadow state (conservative) */
         if (is_opaque(n->op) || is_branch(n->op)) {
             r->a_known = r->x_known = r->y_known = 0;
+            r->zp_known[0] = r->zp_known[1] = r->zp_known[2] = r->zp_known[3] = 0;
+            r->abs_known[0] = r->abs_known[1] = r->abs_known[2] = r->abs_known[3] = 0;
         }
+        next_node: ;
     }
 
     return changes;
@@ -614,6 +736,57 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
     for (uint8_t i = 0; i + 1 < ctx->node_count; i++) {
         ir_node_t *a = &ctx->nodes[i];
         if (a->op == IR_DEAD) continue;
+
+        /* --- Non-adjacent duplicate instruction elimination ---
+         * Scan forward from `a` for an identical instruction (same
+         * op + operand).  Kill duplicates unless an intermediate
+         * instruction interferes — modifies a register, flags, or
+         * memory location that `a` reads or writes.  Stores benefit
+         * most: they don't write flags, so the scan passes through
+         * flag-writing ALU ops that don't touch the source register.
+         * RMW/stack/inc-dec ops are excluded (each execution has
+         * a unique side effect). */
+        if (!is_opaque(a->op) && !is_branch(a->op)) {
+            uint8_t dup_eligible = 1;
+            /* Exclude non-idempotent ops: RMW memory, stack,
+             * inc/dec, ADC/SBC/EOR (accumulate), shifts on A,
+             * JSR/RTS, and all indexed modes (incomplete flags). */
+            switch (a->op) {
+                case IR_INC_ZP: case IR_DEC_ZP:
+                case IR_ASL_ZP: case IR_LSR_ZP:
+                case IR_ROL_ZP: case IR_ROR_ZP:
+                case IR_INC_ABS: case IR_DEC_ABS:
+                case IR_ASL_ABS: case IR_LSR_ABS:
+                case IR_ROL_ABS: case IR_ROR_ABS:
+                case IR_PHP: case IR_PLP:
+                case IR_PHA: case IR_PLA:
+                case IR_INX: case IR_DEX:
+                case IR_INY: case IR_DEY:
+                case IR_JSR: case IR_RTS:
+                case IR_ADC_IMM: case IR_SBC_IMM: case IR_EOR_IMM:
+                case IR_ADC_ZP:  case IR_SBC_ZP:  case IR_EOR_ZP:
+                case IR_ADC_ABS: case IR_SBC_ABS: case IR_EOR_ABS:
+                case IR_ASL_A: case IR_LSR_A:
+                case IR_ROL_A: case IR_ROR_A:
+                    dup_eligible = 0;
+                    break;
+            }
+            /* All ABSX/ABSY modes: flag table lacks R:X/R:Y */
+            if (a->op >= IR_LDA_ABSX && a->op <= IR_ROR_ABSX)
+                dup_eligible = 0;
+            if (dup_eligible) {
+                for (uint8_t k = i + 1; k < ctx->node_count; k++) {
+                    ir_node_t *m = &ctx->nodes[k];
+                    if (m->op == IR_DEAD) continue;
+                    if (m->op == a->op && m->operand == a->operand) {
+                        ir_kill(ctx, k);
+                        changes++;
+                        continue;
+                    }
+                    if (dup_interferes(a, m)) break;
+                }
+            }
+        }
 
         /* Find next non-dead node */
         uint8_t j;
@@ -979,6 +1152,88 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
 }
 
 /* ===================================================================
+ * Pass 4b: CLC/SEC sinking — move CLC/SEC closer to carry consumer
+ * (from opt65.c opti2: carry-init sinking)
+ *
+ * The recompiler may emit CLC early, then STA _x / LDX … before
+ * the ADC that actually needs carry.  Sinking CLC to be adjacent
+ * to the ADC enables future pair-rewrite rules and improves code
+ * locality.
+ * =================================================================== */
+
+/* Helper: does this instruction WRITE carry but NOT READ carry?
+ * Used to detect carry clobbers that aren't consumers. */
+static uint8_t writes_carry_no_read(uint8_t op)
+{
+    switch (op) {
+        case IR_CLC: case IR_SEC: case IR_PLP:
+        case IR_CMP_IMM: case IR_CMP_ZP: case IR_CMP_ABS:
+        case IR_CMP_ABSX: case IR_CMP_ABSY:
+        case IR_CPX_IMM: case IR_CPX_ZP: case IR_CPX_ABS:
+        case IR_CPY_IMM: case IR_CPY_ZP: case IR_CPY_ABS:
+        case IR_ASL_A: case IR_LSR_A:
+        case IR_ASL_ZP: case IR_LSR_ZP:
+        case IR_ASL_ABS: case IR_LSR_ABS:
+        case IR_ASL_ABSX: case IR_LSR_ABSX:
+            return 1;
+    }
+    return 0;
+}
+
+uint8_t ir_opt_clc_sec_sink(ir_ctx_t *ctx)
+{
+    uint8_t changes = 0;
+    uint8_t i, k;
+
+    for (i = 0; i + 1 < ctx->node_count; i++) {
+        uint8_t src_op = ctx->nodes[i].op;
+        if (src_op != IR_CLC && src_op != IR_SEC) continue;
+
+        /* Scan forward for the first carry consumer (ADC, SBC, ROL,
+         * ROR, BCC, BCS).  Stop if we hit a carry clobber (CMP, ASL,
+         * LSR, another CLC/SEC, PLP), a branch, or an opaque node.
+         * PHP also reads carry (pushes status) — treat as barrier. */
+        uint8_t consumer = 0;
+        uint8_t found = 0;
+        uint8_t gap = 0;   /* 1 if any non-dead instruction between */
+
+        for (k = i + 1; k < ctx->node_count; k++) {
+            uint8_t kop = ctx->nodes[k].op;
+            if (kop == IR_DEAD) continue;
+            if (reads_carry(kop)) { consumer = k; found = 1; break; }
+            if (writes_carry_no_read(kop) || is_branch(kop) ||
+                is_opaque(kop) || kop == IR_PHP) break;
+            gap = 1;
+        }
+        if (!found || !gap) continue;
+
+        /* Safety: no labels may target nodes in [i, consumer).
+         * Bubble-swapping past a label target would invalidate the
+         * label index, breaking intra-block branches. */
+        uint8_t safe = 1;
+        for (k = 0; k < ctx->label_count; k++) {
+            uint8_t t = ctx->label_targets[k];
+            if (t >= i && t < consumer) { safe = 0; break; }
+        }
+        if (!safe) continue;
+
+        /* Bubble CLC/SEC forward by swapping past each non-dead
+         * intermediate instruction, preserving their relative order. */
+        uint8_t pos = i;
+        for (k = i + 1; k < consumer; k++) {
+            if (ctx->nodes[k].op == IR_DEAD) continue;
+            ir_node_t tmp = ctx->nodes[pos];
+            ctx->nodes[pos] = ctx->nodes[k];
+            ctx->nodes[k] = tmp;
+            pos = k;
+        }
+        changes++;
+    }
+
+    return changes;
+}
+
+/* ===================================================================
  * ir_optimize — run all enabled passes, iterating until stable
  * =================================================================== */
 uint8_t ir_optimize(ir_ctx_t *ctx)
@@ -992,6 +1247,7 @@ uint8_t ir_optimize(ir_ctx_t *ctx)
     ctx->stat_dead_load      = 0;
     ctx->stat_php_plp        = 0;
     ctx->stat_pair_rewrite   = 0;
+    ctx->stat_rmw_fusion     = 0;
 
     do {
         uint8_t c;
@@ -1011,6 +1267,10 @@ uint8_t ir_optimize(ir_ctx_t *ctx)
 
         c = ir_opt_php_plp_elision(ctx);
         ctx->stat_php_plp += c;
+        changes += c;
+
+        c = ir_opt_clc_sec_sink(ctx);
+        ctx->stat_pair_rewrite += c;
         changes += c;
 
         c = ir_opt_pair_rewrite(ctx);

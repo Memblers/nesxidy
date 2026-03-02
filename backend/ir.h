@@ -250,11 +250,22 @@ typedef struct {
 } ir_tmpl_patch_t;
 
 /* Register shadow state for optimizer */
+#define ZP_SHADOW_SIZE  4  /* associative cache entries for ZP tracking */
+#define ABS_SHADOW_SIZE 4  /* associative cache entries for absolute addr tracking */
 typedef struct {
     uint8_t a_val, x_val, y_val;     /* last-known register values */
     uint8_t a_known, x_known, y_known; /* 1 = value is valid */
     uint8_t flags_saved;              /* 1 = PHP was emitted, flags on stack */
-    uint8_t pad;
+    /* ZP memory shadow: small associative cache of known ZP values */
+    uint8_t zp_addr[ZP_SHADOW_SIZE];  /* ZP address for each slot */
+    uint8_t zp_val[ZP_SHADOW_SIZE];   /* known value at that address */
+    uint8_t zp_known[ZP_SHADOW_SIZE]; /* 1 = slot is valid */
+    uint8_t zp_lru;                   /* next slot to evict (round-robin) */
+    /* Absolute address shadow: tracks STA/STX/STY abs, LDA/LDX/LDY abs */
+    uint16_t abs_addr[ABS_SHADOW_SIZE];
+    uint8_t  abs_val[ABS_SHADOW_SIZE];
+    uint8_t  abs_known[ABS_SHADOW_SIZE];
+    uint8_t  abs_lru;
 } ir_reg_shadow_t;
 
 typedef struct {
@@ -293,6 +304,7 @@ typedef struct {
     uint8_t stat_dead_load;       /* Pass 2b: dead load elimination           */
     uint8_t stat_php_plp;         /* Pass 3: PLP/PHP pairs removed            */
     uint8_t stat_pair_rewrite;    /* Pass 4: pair rewrites + CMP #0           */
+    uint8_t stat_rmw_fusion;     /* Pass 5: RMW fusion                       */
 } ir_ctx_t;
 
 /* ===================================================================
@@ -317,11 +329,22 @@ typedef struct {
     (ctx)->regs.x_known = 0; \
     (ctx)->regs.y_known = 0; \
     (ctx)->regs.flags_saved = 0; \
+    (ctx)->regs.zp_known[0] = 0; \
+    (ctx)->regs.zp_known[1] = 0; \
+    (ctx)->regs.zp_known[2] = 0; \
+    (ctx)->regs.zp_known[3] = 0; \
+    (ctx)->regs.zp_lru = 0; \
+    (ctx)->regs.abs_known[0] = 0; \
+    (ctx)->regs.abs_known[1] = 0; \
+    (ctx)->regs.abs_known[2] = 0; \
+    (ctx)->regs.abs_known[3] = 0; \
+    (ctx)->regs.abs_lru = 0; \
     (ctx)->stat_redundant_load = 0; \
     (ctx)->stat_dead_store = 0; \
     (ctx)->stat_dead_load = 0; \
     (ctx)->stat_php_plp = 0; \
     (ctx)->stat_pair_rewrite = 0; \
+    (ctx)->stat_rmw_fusion = 0; \
 } while(0)
 
 /* Append one IR node (replaces ir_emit from bank1).
@@ -394,6 +417,8 @@ uint8_t ir_opt_dead_store(ir_ctx_t *ctx);
 uint8_t ir_opt_dead_load(ir_ctx_t *ctx);
 uint8_t ir_opt_php_plp_elision(ir_ctx_t *ctx);
 uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx);
+uint8_t ir_opt_clc_sec_sink(ir_ctx_t *ctx);
+uint8_t ir_opt_rmw_fusion(ir_ctx_t *ctx);
 
 /* ===================================================================
  * IR API — lowering (see ir_lower.c)

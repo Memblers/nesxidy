@@ -115,11 +115,6 @@ __zpage uint8_t last_nmi_frame = 0;  // Tracks lazyNES NMI frame counter (ZP $26
 __zpage uint8_t audio = 0;
 __zpage uint8_t sprites_converted = 0;
 
-// FPS counter: count render_video calls per 60 NMI ticks (1 second)
-__zpage uint8_t fps_counter = 0;
-__zpage uint8_t fps_display = 0;
-__zpage uint8_t fps_nmi_start = 0;
-
 
 // ******************************************************************************************
 
@@ -318,11 +313,6 @@ int main(void)
 			uint8_t cur_nmi = *(volatile uint8_t*)0x26;
 			if (cur_nmi != last_nmi_frame)
 			{
-				// Count consumed IRQs = completed game frames.
-				// If the previous IRQ was consumed (flag clear), the
-				// game finished one frame of logic since the last NMI.
-				if (!(interrupt_condition & FLAG_EXIDY_IRQ))
-					fps_counter++;
 				interrupt_condition |= FLAG_EXIDY_IRQ;
 #ifdef ENABLE_DEBUG_STATS
 				debug_stats_update();
@@ -342,9 +332,6 @@ int main(void)
 		if (clockticks6502 > frame_time)
 		{
 			frame_time += FRAME_LENGTH;
-			// Count consumed IRQs = completed game frames
-			if (!(interrupt_condition & FLAG_EXIDY_IRQ))
-				fps_counter++;
 			interrupt_condition |= FLAG_EXIDY_IRQ;
 #ifdef ENABLE_DEBUG_STATS
 			debug_stats_update();
@@ -376,7 +363,6 @@ int main(void)
 				// handler and causing 2 renders per 3 frames.
 				if (!(interrupt_condition & FLAG_EXIDY_IRQ) && !(status & FLAG_INTERRUPT))
 				{
-					fps_counter++; // IRQ was consumed = game frame completed
 					interrupt_condition |= FLAG_EXIDY_IRQ;
 					// Sync cycle counter to avoid double-firing when
 					// the next cycle-based frame would also trigger
@@ -593,19 +579,6 @@ static void ln_fire_and_forget(void)
 
 void render_video_b2(void)
 {
-	// --- FPS display: show emulated game frames per second ---
-	// fps_counter is incremented in the main loop each time the game
-	// consumes an IRQ (= completes one frame of game logic).
-	{
-		uint8_t cur_nmi = *(volatile uint8_t*)0x26;
-		uint8_t elapsed = (uint8_t)(cur_nmi - fps_nmi_start);
-		if (elapsed >= 60) {
-			fps_display = fps_counter;
-			fps_counter = 0;
-			fps_nmi_start = cur_nmi;
-		}
-	}
-
 	// Early out: if nothing changed in background/CHR, skip work.
 	if (!screen_ram_updated && !character_ram_updated)
 		return;
@@ -696,21 +669,6 @@ void render_video_b2(void)
 		128
 	};
 	lnAddSpr(spr1_meta, spr1_x, spr1_y);
-
-	// FPS display: two-digit emulated FPS
-	// lnAddSpr subtracts 1 from Y (NES OAM quirk), so Y=1 displays at scanline 0.
-	// Use subtraction loop instead of / and % to avoid 16-bit division
-	// routines (___divint16 + ___divuint16 were 5% of total CPU time).
-	uint8_t fps_tens = 0;
-	uint8_t fps_tmp = fps_display;
-	while (fps_tmp >= 10) { fps_tmp -= 10; fps_tens++; }
-	uint8_t fps_ones = fps_tmp;
-	uint8_t debug_meta[9] = {
-		0, 0, fps_tens + '0', 1,
-		8, 0, fps_ones + '0', 1,
-		128
-	};
-	lnAddSpr(debug_meta, 120, 1);
 
 	// --- Final sync (screen on, non-blocking) ---
 	// Queue OAM + lnList for NMI processing and return immediately.

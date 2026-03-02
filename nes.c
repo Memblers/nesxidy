@@ -87,7 +87,6 @@ extern void flash_sector_erase(uint16_t addr, uint8_t bank);
 extern void flash_cache_init_sectors(void);
 
 __zpage uint8_t last_nmi_frame;  // __zpage: ASM dispatch references it directly
-static uint8_t fps_counter;
 
 // Nested NMI prevention: guest NMI handler runs through the main-loop
 // dispatches and may span several real VBlanks.  Without a guard, each

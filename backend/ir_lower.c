@@ -434,8 +434,155 @@ void ir_resolve_deferred_patches(void)
     ((op) == IR_JMP_ABS || (op) == IR_JSR || (op) == IR_RTS || \
      ((op) >= IR_BPL && (op) <= IR_BEQ) || (op) >= IR_TEMPLATE)
 
+/* ===================================================================
+ * Pass 6: Non-adjacent register substitution
+ * (from opt65.c opti2: STA tmp,...,LDA tmp → TAX,...,TXA)
+ *
+ * When a register is saved to a ZP temp and later reloaded, and a
+ * surrogate register is free between store and load AND dead after
+ * the load, replace the memory round-trip with a transfer pair.
+ * Saves 2 bytes per hit (2×2B ZP ops → 2×1B transfers).
+ *
+ * Runs as a post-pass in bank1 (after iterative loop, before lower).
+ * Uses node flags bitfield directly, no bank0 helpers needed.
+ * =================================================================== */
+
+/* ZP-mode opcode check — any instruction whose operand is a ZP address */
+#define IS_ZP_ACCESS(op) \
+    ((op) == IR_LDA_ZP || (op) == IR_LDX_ZP || (op) == IR_LDY_ZP || \
+     (op) == IR_STA_ZP || (op) == IR_STX_ZP || (op) == IR_STY_ZP || \
+     ((op) >= IR_ADC_ZP && (op) <= IR_CPY_ZP) || \
+     ((op) >= IR_INC_ZP && (op) <= IR_ROR_ZP) || \
+     (op) == IR_BIT_ZP)
+
+/* Pure store (no read of old value) */
+#define IS_ZP_PURE_STORE(op) \
+    ((op) == IR_STA_ZP || (op) == IR_STX_ZP || (op) == IR_STY_ZP)
+
+static uint8_t ir_opt_reg_subst(ir_ctx_t *ctx)
+{
+    uint8_t changes = 0;
+    ir_node_t *nd = ctx->nodes;
+    uint8_t nc = ctx->node_count;
+
+    for (uint8_t i = 0; i < nc; i++) {
+        uint8_t sop = nd[i].op;
+        uint8_t lop;
+
+        if (sop == IR_STA_ZP) lop = IR_LDA_ZP;
+        else if (sop == IR_STX_ZP) lop = IR_LDX_ZP;
+        else if (sop == IR_STY_ZP) lop = IR_LDY_ZP;
+        else continue;
+
+        uint8_t addr = (uint8_t)nd[i].operand;
+
+        /* Forward scan: find matching load, track surrogate freedom.
+         * Uses node flags bitfield for register checks. */
+        uint8_t j, found = 0;
+        uint8_t a_ok = 1, x_ok = 1, y_ok = 1;
+
+        for (j = i + 1; j < nc; j++) {
+            uint8_t op = nd[j].op;
+            if (op == IR_DEAD) continue;
+            if (IS_BARRIER(op)) break;
+            if (op == lop && (uint8_t)nd[j].operand == addr)
+                { found = 1; break; }
+            if (IS_ZP_ACCESS(op) && (uint8_t)nd[j].operand == addr) break;
+            if (nd[j].flags & 0x11) a_ok = 0;  /* touches A */
+            if (nd[j].flags & 0x22) x_ok = 0;  /* touches X */
+            if (nd[j].flags & 0x44) y_ok = 0;  /* touches Y */
+        }
+        if (!found) continue;
+
+        /* Quick gate: any usable surrogate? */
+        if (sop == IR_STA_ZP && !x_ok && !y_ok) continue;
+        if (sop != IR_STA_ZP && !a_ok) continue;
+
+        /* Flags safe: transfer sets N,Z which store doesn't.
+         * Scan from i+1: if flags are read before written, bail. */
+        { uint8_t fsafe = 0;
+          for (uint8_t k = i + 1; k < nc; k++) {
+              if (nd[k].op == IR_DEAD) continue;
+              if (nd[k].flags & IR_F_READS_FLAGS) break;
+              if (nd[k].flags & IR_F_WRITES_FLAGS) { fsafe = 1; break; }
+          }
+          if (!fsafe) continue;
+        }
+
+        /* No labels in (i, j] */
+        { uint8_t ok = 1;
+          for (uint8_t k = 0; k < ctx->label_count; k++)
+              if (ctx->label_targets[k] > i && ctx->label_targets[k] <= j)
+                  { ok = 0; break; }
+          if (!ok) continue;
+        }
+
+        /* Post-load scan: ZP addr must be dead (not read before
+         * overwritten) AND surrogate register must be dead after j. */
+        { uint8_t alive = 0, adone = 0;
+          uint8_t ad = 0, xd = 0, yd = 0; /* 0=unknown, 1=dead, 2=live */
+          for (uint8_t k = j + 1; k < nc; k++) {
+              uint8_t op = nd[k].op;
+              uint8_t fl = nd[k].flags;
+              if (op == IR_DEAD) continue;
+              if (IS_BARRIER(op)) {
+                  if (!adone) alive = 1;
+                  if (!ad) ad = 2; if (!xd) xd = 2; if (!yd) yd = 2;
+                  break;
+              }
+              if (!adone && IS_ZP_ACCESS(op) &&
+                  (uint8_t)nd[k].operand == addr) {
+                  adone = 1;
+                  if (!IS_ZP_PURE_STORE(op)) alive = 1;
+              }
+              if (!ad) { if (fl & 0x01) ad = 2; else if (fl & 0x10) ad = 1; }
+              if (!xd) { if (fl & 0x02) xd = 2; else if (fl & 0x20) xd = 1; }
+              if (!yd) { if (fl & 0x04) yd = 2; else if (fl & 0x40) yd = 1; }
+              if (alive) break;
+          }
+          /* End-of-block fallthrough: conservatively assume live.
+           * Epilogue reads all regs; ZP may be read by later blocks. */
+          if (!adone) alive = 1;
+          if (!ad) ad = 2;
+          if (!xd) xd = 2;
+          if (!yd) yd = 2;
+          if (alive) continue;
+
+          /* Choose surrogate: STA uses X or Y; STX/STY uses A.
+           * 1=written-first(dead), 2=read(live) */
+          uint8_t sv, rv, sf, rf;
+          if (sop == IR_STA_ZP) {
+              if      (x_ok && xd != 2)
+                  { sv = IR_TAX; sf = 0xA1; rv = IR_TXA; rf = 0x92; }
+              else if (y_ok && yd != 2)
+                  { sv = IR_TAY; sf = 0xC1; rv = IR_TYA; rf = 0x94; }
+              else continue;
+          } else if (sop == IR_STX_ZP) {
+              if (ad == 2) continue;
+              sv = IR_TXA; sf = 0x92; rv = IR_TAX; rf = 0xA1;
+          } else {
+              if (ad == 2) continue;
+              sv = IR_TYA; sf = 0x94; rv = IR_TAY; rf = 0xC1;
+          }
+
+          nd[i].op = sv; nd[i].flags = sf; nd[i].operand = 0;
+          nd[j].op = rv; nd[j].flags = rf; nd[j].operand = 0;
+          changes++;
+        }
+    }
+
+    return changes;
+}
+
+/* ===================================================================
+ * Pass 5: RMW fusion (read-modify-write pattern collapsing)
+ * =================================================================== */
+
 uint8_t ir_opt_rmw_fusion(ir_ctx_t *ctx)
 {
+    /* Pass 6: register substitution — runs before RMW patterns */
+    ctx->stat_pair_rewrite += ir_opt_reg_subst(ctx);
+
     uint8_t changes = 0;
     ir_node_t *nd = ctx->nodes;
     uint8_t nc = ctx->node_count;

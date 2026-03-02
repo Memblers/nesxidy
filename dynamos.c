@@ -753,7 +753,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 			bankswitch_prg(BANK_IR_OPT);
 			ir_optimize(&ir_ctx);
 			bankswitch_prg(BANK_EMIT);
-			/* Pass 5: RMW fusion — runs as post-pass in bank1 */
+			/* Pass 5+6: RMW fusion + register substitution in bank1 */
 			ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
 			lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
 			}

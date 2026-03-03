@@ -215,13 +215,16 @@ static uint8_t is_branch(uint8_t op)
 }
 
 /* Helper: is this an opaque / barrier node?
- * Templates, JSR, RTS, JMP, and raw bytes are all opaque — the
- * optimizer cannot reason about their register or ZP side-effects,
- * so every pass must treat them conservatively. */
+ * JSR, RTS, JMP, and raw bytes are all opaque — the optimizer cannot
+ * reason about their register or ZP side-effects, so every pass must
+ * treat them conservatively.
+ *
+ * Templates are NO LONGER opaque: they now have proper register flags
+ * set by ir_get_template_flags(), allowing optimization passes to
+ * understand and penetrate them just like normal instructions. */
 static uint8_t is_opaque(uint8_t op)
 {
     switch (op) {
-        case IR_TEMPLATE:
         case IR_JSR:
         case IR_RTS:
         case IR_JMP_ABS:

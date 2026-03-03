@@ -294,6 +294,7 @@ typedef struct {
     uint8_t   block_has_jsr;  /* JSR/NJSR seen in this block */
     uint8_t   estimated_size; /* running estimate of lowered byte count */
     uint8_t   carry_live_at_exit; /* 1 = block's branch reads carry (BCC/BCS) */
+    uint8_t   regs_written;   /* accumulated W:A|W:X|W:Y bits (0x70 mask) */
 
     /* Optimizer state */
     ir_reg_shadow_t regs;

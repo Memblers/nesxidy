@@ -161,6 +161,9 @@ void ir_init(ir_ctx_t *ctx)
     ctx->block_has_jsr = 0;
     ctx->estimated_size = 0;
 
+    /* Reset register tracking */
+    ctx->regs_written = 0;
+
     /* Reset register shadow */
     ctx->regs.a_known = 0;
     ctx->regs.x_known = 0;
@@ -181,6 +184,9 @@ uint8_t ir_emit(ir_ctx_t *ctx, uint8_t op, uint8_t flags, uint16_t operand)
     n->flags = flags;
     n->operand = operand;
     ctx->node_count++;
+
+    /* Accumulate register-write bits for epilogue trimming */
+    ctx->regs_written |= (flags & 0x70);
 
     /* Update size estimate */
     if (op < IR_NATIVE_SIZE_COUNT)
@@ -209,25 +215,30 @@ uint8_t ir_emit_raw_op_abs(ir_ctx_t *ctx, uint8_t native_opcode, uint16_t addr)
 
 /* -------------------------------------------------------------------
  * ir_get_template_flags — determine IR flags for a template ID
- * Templates that write to registers (A, X, Y) now have known flags
- * instead of always being 0.  This allows optimization passes to
- * understand and penetrate them.
+ *
+ * Templates now carry proper register read/write flags so the
+ * optimizer can penetrate them instead of treating all as opaque.
+ *
+ * Control-flow templates (JSR, NJSR, NRTS, BRANCH, JMP) get 0xFF
+ * which makes them effective barriers for every optimization scan.
  * ------------------------------------------------------------------- */
-static inline uint8_t ir_get_template_flags(uint8_t tmpl_id)
+static uint8_t ir_get_template_flags(uint8_t tmpl_id)
 {
-    /* Only templates that write A get the W:A flag (0x10).
-     * All others don't write registers (PHA, PHP, STA_INDY read A).
-     * Branch/JMP templates don't affect registers. */
     switch (tmpl_id) {
-        case IR_TMPL_PLA:           /* PLA writes A */
-        case IR_TMPL_JSR:           /* JSR writes A */
-        case IR_TMPL_NJSR:          /* NJSR writes A */
-        case IR_TMPL_NRTS:          /* RTS writes A */
-        case IR_TMPL_INDY_READ:     /* INDY read writes A */
-        case IR_TMPL_INDX:          /* INDX writes A */
-            return 0x10;            /* IR_W_A */
-        default:
-            return 0;               /* No register writes */
+        case IR_TMPL_PHA:               return 0x01; /* R:A */
+        case IR_TMPL_PLA:               return 0x90; /* W:A | W:F */
+        case IR_TMPL_PHP:               return 0x08; /* R:F */
+        case IR_TMPL_PLP:               return 0x80; /* W:F */
+        case IR_TMPL_JSR:               return 0xFF; /* clobbers all */
+        case IR_TMPL_NJSR:              return 0xFF; /* clobbers all */
+        case IR_TMPL_NRTS:              return 0xFF; /* clobbers all */
+        case IR_TMPL_INDY_READ:         return 0x94; /* R:Y | W:A | W:F */
+        case IR_TMPL_STA_INDY:          return 0x05; /* R:A | R:Y */
+        case IR_TMPL_NATIVE_STA_INDY:   return 0x05; /* R:A | R:Y */
+        case IR_TMPL_INDX:              return 0x92; /* R:X | W:A | W:F */
+        case IR_TMPL_BRANCH_PATCHABLE:  return 0x08; /* R:F (control flow) */
+        case IR_TMPL_JMP_PATCHABLE:     return 0x00; /* (control flow) */
+        default:                        return 0xFF; /* unknown = barrier */
     }
 }
 
@@ -347,8 +358,8 @@ static const uint8_t ir_op_flags[116] = {
 /*  0x2C IR_TSX          */ 0xA0,
 /*  0x2D IR_TXS          */ 0x02,
 /*  0x2E IR_INX          */ 0xA2,
-/*  0x2F IR_DEX          */ 0xA2,
-/*  0x30 IR_INY          */ 0xC4,
+/*  0x2F IR_INY          */ 0xC4,
+/*  0x30 IR_DEX          */ 0xA2,
 /*  0x31 IR_DEY          */ 0xC4,
 /*  0x32 IR_ADC_IMM      */ 0x99,
 /*  0x33 IR_SBC_IMM      */ 0x99,

@@ -74,6 +74,7 @@ static uint8_t reads_a(uint8_t op)
         case IR_CMP_ABSY:
         case IR_ASL_A: case IR_LSR_A: case IR_ROL_A: case IR_ROR_A:
         case IR_BIT_ZP: case IR_BIT_ABS:
+        case IR_TEMPLATE:  /* conservative: treat templates as touching A */
             return 1;
     }
     return 0;
@@ -108,6 +109,7 @@ static uint8_t reads_x(uint8_t op)
         case IR_INC_ABSX: case IR_DEC_ABSX:
         case IR_ASL_ABSX: case IR_LSR_ABSX:
         case IR_ROL_ABSX: case IR_ROR_ABSX:
+        case IR_TEMPLATE:  /* conservative */
             return 1;
     }
     return 0;
@@ -139,6 +141,7 @@ static uint8_t reads_y(uint8_t op)
         case IR_AND_ABSY: case IR_ORA_ABSY: case IR_EOR_ABSY:
         case IR_CMP_ABSY:
         case IR_LDX_ABSY:
+        case IR_TEMPLATE:  /* conservative */
             return 1;
     }
     return 0;
@@ -203,35 +206,43 @@ static uint8_t reads_carry(uint8_t op)
         case IR_ROL_ABS: case IR_ROR_ABS:
         case IR_ROL_ABSX: case IR_ROR_ABSX:
         case IR_BCC: case IR_BCS:
+        case IR_TEMPLATE:  /* conservative */
             return 1;
     }
     return 0;
 }
 
-/* Helper: is this a branch node? */
-static uint8_t is_branch(uint8_t op)
+/* Helper: does this template write to arbitrary memory?
+ * STA (ZP),Y can write to any address — ZP/ABS shadow caches
+ * must be flushed but register shadow can use the flags. */
+static uint8_t template_writes_memory(ir_node_t *n)
 {
-    return (op >= IR_BPL && op <= IR_BEQ);
+    if (n->op != IR_TEMPLATE) return 0;
+    switch ((uint8_t)n->operand) {
+        case IR_TMPL_STA_INDY:
+        case IR_TMPL_NATIVE_STA_INDY:
+            return 1;
+    }
+    return 0;
 }
 
-/* Helper: is this an opaque / barrier node?
- * JSR, RTS, JMP, and raw bytes are all opaque — the optimizer cannot
- * reason about their register or ZP side-effects, so every pass must
- * treat them conservatively.
- *
- * Templates are NO LONGER opaque: they now have proper register flags
- * set by ir_get_template_flags(), allowing optimization passes to
- * understand and penetrate them just like normal instructions. */
-static uint8_t is_opaque(uint8_t op)
+/* Helper: is this node a full optimization barrier?
+ * Combines is_opaque, is_branch, and control-flow templates. */
+static uint8_t is_barrier(ir_node_t *n)
 {
+    uint8_t op = n->op;
     switch (op) {
-        case IR_JSR:
-        case IR_RTS:
-        case IR_JMP_ABS:
-        case IR_RAW_BYTE:
-        case IR_RAW_WORD:
-        case IR_RAW_OP_ABS:
+        case IR_JSR: case IR_RTS: case IR_JMP_ABS:
+        case IR_RAW_BYTE: case IR_RAW_WORD: case IR_RAW_OP_ABS:
+        case IR_BPL: case IR_BMI: case IR_BVC: case IR_BVS:
+        case IR_BCC: case IR_BCS: case IR_BNE: case IR_BEQ:
             return 1;
+        case IR_TEMPLATE:
+            switch ((uint8_t)n->operand) {
+                case IR_TMPL_JSR: case IR_TMPL_NJSR: case IR_TMPL_NRTS:
+                case IR_TMPL_BRANCH_PATCHABLE: case IR_TMPL_JMP_PATCHABLE:
+                    return 1;
+            }
     }
     return 0;
 }
@@ -268,12 +279,16 @@ static uint8_t writes_to_abs(uint8_t op)
  * Returns 1 if the forward scan must stop. */
 static uint8_t dup_interferes(ir_node_t *orig, ir_node_t *mid)
 {
-    if (is_branch(mid->op) || is_opaque(mid->op)) return 1;
+    if (is_barrier(mid)) return 1;
+
+    /* Memory-writing templates (STA_INDY) could alias any address */
+    if (template_writes_memory(mid)) return 1;
 
     /* Register + flag check via bitfield.
      * orig_touch has a set bit (in write-position 4-7) for every
      * register orig reads OR writes.  If mid writes any of those
-     * registers, the duplicate is no longer guaranteed equivalent. */
+     * registers, the duplicate is no longer guaranteed equivalent.
+     * This works for templates too — their flags encode register effects. */
     uint8_t ot = ((orig->flags & 0x0F) << 4) | (orig->flags & 0xF0);
     if (ot & mid->flags & 0xF0) return 1;
 
@@ -309,9 +324,10 @@ static uint8_t flags_safe(ir_ctx_t *ctx, uint8_t start)
 {
     uint8_t j;
     for (j = start; j < ctx->node_count; j++) {
-        if (ctx->nodes[j].op == IR_DEAD) continue;
-        if (reads_flags(ctx->nodes[j].op)) return 0;
-        if (writes_flags(ctx->nodes[j].op)) return 1;
+        ir_node_t *n = &ctx->nodes[j];
+        if (n->op == IR_DEAD) continue;
+        if (reads_flags(n->op) || (n->op == IR_TEMPLATE && (n->flags & 0x08))) return 0;
+        if (writes_flags(n->op) || (n->op == IR_TEMPLATE && (n->flags & 0x80))) return 1;
     }
     return 1;
 }
@@ -517,8 +533,13 @@ uint8_t ir_opt_redundant_load(ir_ctx_t *ctx)
         }
 
         /* Opaque nodes and branches invalidate all shadow state (conservative) */
-        if (is_opaque(n->op) || is_branch(n->op)) {
+        if (is_barrier(n)) {
             r->a_known = r->x_known = r->y_known = 0;
+            r->zp_known[0] = r->zp_known[1] = r->zp_known[2] = r->zp_known[3] = 0;
+            r->abs_known[0] = r->abs_known[1] = r->abs_known[2] = r->abs_known[3] = 0;
+        }
+        /* Memory-writing templates: flush ZP/ABS caches (could alias) */
+        else if (template_writes_memory(n)) {
             r->zp_known[0] = r->zp_known[1] = r->zp_known[2] = r->zp_known[3] = 0;
             r->abs_known[0] = r->abs_known[1] = r->abs_known[2] = r->abs_known[3] = 0;
         }
@@ -578,13 +599,15 @@ uint8_t ir_opt_dead_store(ir_ctx_t *ctx)
                     break;
                 }
                 /* Register was clobbered */
-                if (store_op == IR_STA_ZP && writes_a(op)) break;
-                if (store_op == IR_STX_ZP && writes_x(op)) break;
-                if (store_op == IR_STY_ZP && writes_y(op)) break;
+                if (store_op == IR_STA_ZP && (writes_a(op) || (op == IR_TEMPLATE && (ctx->nodes[j].flags & 0x10)))) break;
+                if (store_op == IR_STX_ZP && (writes_x(op) || (op == IR_TEMPLATE && (ctx->nodes[j].flags & 0x20)))) break;
+                if (store_op == IR_STY_ZP && (writes_y(op) || (op == IR_TEMPLATE && (ctx->nodes[j].flags & 0x40)))) break;
                 /* ZP address was modified by another instruction */
                 if (writes_to_zp(op) && (uint8_t)ctx->nodes[j].operand == target_addr) break;
-                /* Opaque / branch barrier */
-                if (is_opaque(op) || is_branch(op)) break;
+                /* Memory-writing templates could alias this ZP address */
+                if (template_writes_memory(&ctx->nodes[j])) break;
+                /* Opaque / branch / control-flow template barrier */
+                if (is_barrier(&ctx->nodes[j])) break;
             }
             if (killed) continue;
         }
@@ -595,8 +618,12 @@ uint8_t ir_opt_dead_store(ir_ctx_t *ctx)
             ir_node_t *m = &ctx->nodes[j];
             if (m->op == IR_DEAD) continue;
 
-            /* Opaque or branch — bail (conservative) */
-            if (is_branch(m->op) || is_opaque(m->op))
+            /* Opaque, branch, or control-flow template — bail (conservative) */
+            if (is_barrier(m))
+                break;
+
+            /* Memory-writing templates could alias this ZP address */
+            if (template_writes_memory(m))
                 break;
 
             /* Another store to same ZP address? First store is dead. */
@@ -645,39 +672,39 @@ uint8_t ir_opt_dead_load(ir_ctx_t *ctx)
 
         for (uint8_t j = i + 1; j < ctx->node_count; j++) {
             uint8_t op = ctx->nodes[j].op;
-            uint8_t flags = ctx->nodes[j].flags;
             if (op == IR_DEAD) continue;
 
             /* Barrier — conservatively assume register/flags live */
-            if (is_opaque(op) || is_branch(op)) break;
+            if (is_barrier(&ctx->nodes[j])) break;
 
-            /* --- Register liveness --- */
+            /* --- Register liveness (template-aware via flags) --- */
             if (!reg_dead) {
                 uint8_t rused = 0;
-                if (n->op == IR_LDA_ZP && reads_a(op)) rused = 1;
-                if (n->op == IR_LDX_ZP && reads_x(op)) rused = 1;
-                if (n->op == IR_LDY_ZP && reads_y(op)) rused = 1;
+                uint8_t fl = ctx->nodes[j].flags;
+                if (n->op == IR_LDA_ZP && (reads_a(op) || (op == IR_TEMPLATE && (fl & 0x01)))) rused = 1;
+                if (n->op == IR_LDX_ZP && (reads_x(op) || (op == IR_TEMPLATE && (fl & 0x02)))) rused = 1;
+                if (n->op == IR_LDY_ZP && (reads_y(op) || (op == IR_TEMPLATE && (fl & 0x04)))) rused = 1;
                 if (rused) break;  /* register is live */
 
-                /* Check register writes: for templates, check flags */
                 uint8_t writes_reg = 0;
                 if (n->op == IR_LDA_ZP) {
-                    writes_reg = writes_a(op) || (op == IR_TEMPLATE && (flags & 0x10));
+                    writes_reg = writes_a(op) || (op == IR_TEMPLATE && (fl & 0x10));
                 } else if (n->op == IR_LDX_ZP) {
-                    writes_reg = writes_x(op) || (op == IR_TEMPLATE && (flags & 0x20));
+                    writes_reg = writes_x(op) || (op == IR_TEMPLATE && (fl & 0x20));
                 } else if (n->op == IR_LDY_ZP) {
-                    writes_reg = writes_y(op) || (op == IR_TEMPLATE && (flags & 0x40));
+                    writes_reg = writes_y(op) || (op == IR_TEMPLATE && (fl & 0x40));
                 }
                 if (writes_reg) reg_dead = 1;
             }
 
-            /* --- Flags liveness ---
+            /* --- Flags liveness (template-aware) ---
              * PLP replaces all flags from the stack; it does NOT
              * read the current N/Z values, so treat it as a flag
              * writer only. */
             if (!flags_dead) {
-                if (op != IR_PLP && reads_flags(op)) break;
-                if (writes_flags(op)) flags_dead = 1;
+                uint8_t fl = ctx->nodes[j].flags;
+                if (op != IR_PLP && (reads_flags(op) || (op == IR_TEMPLATE && (fl & 0x08)))) break;
+                if (writes_flags(op) || (op == IR_TEMPLATE && (fl & 0x80))) flags_dead = 1;
             }
 
             if (reg_dead && flags_dead) {
@@ -720,12 +747,17 @@ uint8_t ir_opt_php_plp_elision(ir_ctx_t *ctx)
                 }
 
                 /* If the intervening instruction reads or writes flags,
-                 * the PLP is needed — stop looking */
-                if (reads_flags(ctx->nodes[j].op) || writes_flags(ctx->nodes[j].op))
-                    break;
+                 * the PLP is needed — stop looking.
+                 * Templates: check flags for R:F or W:F. */
+                {
+                    uint8_t fl = ctx->nodes[j].flags;
+                    if (reads_flags(ctx->nodes[j].op) || writes_flags(ctx->nodes[j].op) ||
+                        (ctx->nodes[j].op == IR_TEMPLATE && (fl & 0x88)))
+                        break;
+                }
 
-                /* Opaque or branch — stop */
-                if (is_branch(ctx->nodes[j].op) || is_opaque(ctx->nodes[j].op))
+                /* Opaque, branch, or control-flow template — stop */
+                if (is_barrier(&ctx->nodes[j]))
                     break;
             }
         }
@@ -757,7 +789,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
          * flag-writing ALU ops that don't touch the source register.
          * RMW/stack/inc-dec ops are excluded (each execution has
          * a unique side effect). */
-        if (!is_opaque(a->op) && !is_branch(a->op)) {
+        if (!is_barrier(a)) {
             uint8_t dup_eligible = 1;
             /* Exclude non-idempotent ops: RMW memory, stack,
              * inc/dec, ADC/SBC/EOR (accumulate), shifts on A,
@@ -852,7 +884,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_a(ctx->nodes[k].op)) { a_used = 1; break; }
                 if (writes_a(ctx->nodes[k].op)) break;
-                if (is_branch(ctx->nodes[k].op) || is_opaque(ctx->nodes[k].op))
+                if (is_barrier(&ctx->nodes[k]))
                     { a_used = 1; break; }
             }
             if (!a_used) {
@@ -871,7 +903,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_a(ctx->nodes[k].op)) { a_used = 1; break; }
                 if (writes_a(ctx->nodes[k].op)) break;
-                if (is_branch(ctx->nodes[k].op) || is_opaque(ctx->nodes[k].op))
+                if (is_barrier(&ctx->nodes[k]))
                     { a_used = 1; break; }
             }
             if (!a_used) {
@@ -948,7 +980,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_x(ctx->nodes[k].op)) { x_used = 1; break; }
                 if (writes_x(ctx->nodes[k].op)) break;
-                if (is_branch(ctx->nodes[k].op) || is_opaque(ctx->nodes[k].op))
+                if (is_barrier(&ctx->nodes[k]))
                     { x_used = 1; break; }
             }
             if (!x_used) {
@@ -967,7 +999,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_y(ctx->nodes[k].op)) { y_used = 1; break; }
                 if (writes_y(ctx->nodes[k].op)) break;
-                if (is_branch(ctx->nodes[k].op) || is_opaque(ctx->nodes[k].op))
+                if (is_barrier(&ctx->nodes[k]))
                     { y_used = 1; break; }
             }
             if (!y_used) {
@@ -1026,7 +1058,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_a(ctx->nodes[k].op)) { a_used = 1; break; }
                 if (writes_a(ctx->nodes[k].op)) break;
-                if (is_branch(ctx->nodes[k].op) || is_opaque(ctx->nodes[k].op))
+                if (is_barrier(&ctx->nodes[k]))
                     { a_used = 1; break; }
             }
             if (!a_used) {
@@ -1045,7 +1077,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_a(ctx->nodes[k].op)) { a_used = 1; break; }
                 if (writes_a(ctx->nodes[k].op)) break;
-                if (is_branch(ctx->nodes[k].op) || is_opaque(ctx->nodes[k].op))
+                if (is_barrier(&ctx->nodes[k]))
                     { a_used = 1; break; }
             }
             if (!a_used) {
@@ -1064,7 +1096,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_x(ctx->nodes[k].op)) { x_used = 1; break; }
                 if (writes_x(ctx->nodes[k].op)) break;
-                if (is_branch(ctx->nodes[k].op) || is_opaque(ctx->nodes[k].op))
+                if (is_barrier(&ctx->nodes[k]))
                     { x_used = 1; break; }
             }
             if (!x_used) {
@@ -1083,7 +1115,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_y(ctx->nodes[k].op)) { y_used = 1; break; }
                 if (writes_y(ctx->nodes[k].op)) break;
-                if (is_branch(ctx->nodes[k].op) || is_opaque(ctx->nodes[k].op))
+                if (is_barrier(&ctx->nodes[k]))
                     { y_used = 1; break; }
             }
             if (!y_used) {
@@ -1110,7 +1142,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_carry(ctx->nodes[k].op)) { c_needed = 1; break; }
                 if (writes_flags(ctx->nodes[k].op)) break;
-                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op)) {
+                if (is_barrier(&ctx->nodes[k])) {
                     c_needed = ctx->carry_live_at_exit;
                     break;
                 }
@@ -1128,7 +1160,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_carry(ctx->nodes[k].op)) { c_needed = 1; break; }
                 if (writes_flags(ctx->nodes[k].op)) break;
-                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op)) {
+                if (is_barrier(&ctx->nodes[k])) {
                     c_needed = ctx->carry_live_at_exit;
                     break;
                 }
@@ -1146,7 +1178,7 @@ uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx)
                 if (ctx->nodes[k].op == IR_DEAD) continue;
                 if (reads_carry(ctx->nodes[k].op)) { c_needed = 1; break; }
                 if (writes_flags(ctx->nodes[k].op)) break;
-                if (is_opaque(ctx->nodes[k].op) || is_branch(ctx->nodes[k].op)) {
+                if (is_barrier(&ctx->nodes[k])) {
                     c_needed = ctx->carry_live_at_exit;
                     break;
                 }
@@ -1212,8 +1244,8 @@ uint8_t ir_opt_clc_sec_sink(ir_ctx_t *ctx)
             uint8_t kop = ctx->nodes[k].op;
             if (kop == IR_DEAD) continue;
             if (reads_carry(kop)) { consumer = k; found = 1; break; }
-            if (writes_carry_no_read(kop) || is_branch(kop) ||
-                is_opaque(kop) || kop == IR_PHP) break;
+            if (writes_carry_no_read(kop) || is_barrier(&ctx->nodes[k]) ||
+                kop == IR_PHP) break;
             gap = 1;
         }
         if (!found || !gap) continue;

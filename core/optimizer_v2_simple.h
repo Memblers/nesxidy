@@ -35,6 +35,20 @@ void opt2_sweep_pending_patches(void);
 void opt2_scan_and_patch_epilogues(void);
 #endif
 
+// Exhaustive link resolve: scans ALL sectors, ALL blocks in one pass.
+// Resolves pending branch patches, patchable epilogues, and inline JMP $FFFF
+// patterns.  Expensive (~50-200ms) but eliminates all unnecessary dispatch_on_pc
+// round-trips.  Called automatically when compile phase settles.
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+void opt2_full_link_resolve(void);
+#endif
+
+// Per-frame settling detector tick — call once per vblank from main loop.
+// Tracks unique_blocks; when no new blocks compile for SETTLE_FRAMES frames,
+// automatically fires opt2_full_link_resolve() once.  After settling, runs
+// lighter periodic sweeps to catch any late-compiled blocks.
+void opt2_frame_tick(void);
+
 // Static-compile drain: aggressively resolve as many pending patches
 // and epilogues as possible before execution begins.
 void opt2_drain_static_patches(void);

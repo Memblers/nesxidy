@@ -447,6 +447,12 @@ _native_jsr_trampoline:
 	cmp _last_nmi_frame		; has a new vblank occurred?
 	beq .njsr_no_vblank		; no → skip absorb
 	sta _last_nmi_frame		; absorb vblank: update last_nmi_frame
+	; Hook: optimizer frame tick — the NJSR trampoline absorbs vblanks
+	; so the C main loop never sees them.  Call opt2_frame_tick here so
+	; the settling detector and link resolver still fire.
+	; opt2_frame_tick is in the fixed bank, saves/restores mapper_prg_bank,
+	; and we're in WRAM so bankswitch is safe.  Only fires ~60 times/sec.
+	jsr _opt2_frame_tick
 .njsr_no_vblank:
 	
 	; Block executed. Check if subroutine returned.

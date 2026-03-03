@@ -8,6 +8,9 @@
 #include "bank_map.h"
 #include "mapper30.h"
 #include "core/optimizer.h"
+#ifdef ENABLE_OPTIMIZER_V2
+#include "core/optimizer_v2_simple.h"
+#endif
 #ifdef ENABLE_STATIC_ANALYSIS
 #include "core/static_analysis.h"
 #endif
@@ -317,6 +320,9 @@ int main(void)
 #ifdef ENABLE_DEBUG_STATS
 				debug_stats_update();
 #endif
+#ifdef ENABLE_OPTIMIZER_V2
+				opt2_frame_tick();
+#endif
 #ifdef ENABLE_METRICS
 				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
@@ -335,6 +341,9 @@ int main(void)
 			interrupt_condition |= FLAG_EXIDY_IRQ;
 #ifdef ENABLE_DEBUG_STATS
 			debug_stats_update();
+#endif
+#ifdef ENABLE_OPTIMIZER_V2
+			opt2_frame_tick();
 #endif
 #ifdef ENABLE_METRICS
 			{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }

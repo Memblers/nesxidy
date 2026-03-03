@@ -83,6 +83,7 @@ static uint8_t pending_count = 0;
 uint16_t opt2_stat_total = 0;
 uint16_t opt2_stat_direct = 0;
 uint16_t opt2_stat_pending = 0;
+uint16_t opt2_blocks_compiled = 0;  // incremented by opt2_notify_block_compiled
 
 //============================================================================
 // The following function does NOT bankswitch, so it can live in bank1.
@@ -116,6 +117,7 @@ void opt2_record_pending_branch(uint16_t branch_offset_addr, uint16_t jmp_operan
 
 void opt2_notify_block_compiled(uint16_t block_pc, uint16_t native_addr, uint8_t native_bank) {
     if (block_pc | native_addr | native_bank) {}  // suppress unused-parameter warning
+    if (opt2_blocks_compiled < 0xFFFF) opt2_blocks_compiled++;
 }
 
 // Fixed-bank trampoline: bank2 code can safely call this to reach
@@ -230,7 +232,7 @@ static void opt2_sweep_pending_patches_b2(void) {
 }
 
 #ifdef ENABLE_PATCHABLE_EPILOGUE
-#define EPILOGUE_SCAN_BATCH 32
+#define EPILOGUE_SCAN_BATCH 64
 
 static void opt2_scan_and_patch_epilogues_b2(void) {
     uint8_t remaining = EPILOGUE_SCAN_BATCH;
@@ -335,6 +337,217 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
         opt2_stat_direct++;
     }
 }
+#define EPILOGUE_FULL_SCAN_MAX 255
+
+static void opt2_full_epilogue_scan_b2(void) {
+    // Exhaustive scan: process ALL sectors and ALL blocks in one pass.
+    // Unlike the batched scan (EPILOGUE_SCAN_BATCH=32), this walks every
+    // block in every sector.  Expensive (~50-200ms) but resolves ALL
+    // pending epilogue chains at once.
+    uint8_t patches_applied = 0;
+    
+    for (uint8_t sector = 0; sector < FLASH_CACHE_SECTORS; sector++) {
+        uint16_t free_off = sector_free_offset[sector];
+        if (free_off == 0) continue;  // empty sector
+        
+        uint8_t code_bank = (sector >> 2) + BANK_CODE;
+        uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(sector & 3) << 12);
+        uint16_t offset = SECTOR_FIRST_HEADER;
+        
+        while (offset < free_off) {
+            uint16_t hdr_addr = sector_base + offset;
+            
+            uint8_t code_len = peek_bank_byte(code_bank, hdr_addr + 4);
+            uint8_t epi_off = peek_bank_byte(code_bank, hdr_addr + 5);
+            
+            if (code_len == 0 || code_len == 0xFF) break;  // end of valid blocks
+            
+            // Advance cursor past this block
+            uint16_t cur_end = offset + BLOCK_HEADER_SIZE + code_len;
+            uint16_t next_code = (cur_end + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(uint16_t)(BLOCK_ALIGNMENT - 1);
+            offset = next_code - BLOCK_HEADER_SIZE;
+            
+            if (epi_off == 0xFF || epi_off == 0) continue;
+            
+            uint16_t code_base = hdr_addr + BLOCK_HEADER_SIZE;
+            
+            // Check if fast-path JMP operand is still unpatched ($FFFF)
+            uint8_t jmp_lo = peek_bank_byte(code_bank, code_base + epi_off + 6);
+            uint8_t jmp_hi = peek_bank_byte(code_bank, code_base + epi_off + 7);
+            if (jmp_lo != 0xFF || jmp_hi != 0xFF) continue;  // already patched
+            
+            // Read exit_pc from header
+            uint16_t exit_pc = peek_bank_byte(code_bank, hdr_addr + 2)
+                    | ((uint16_t)peek_bank_byte(code_bank, hdr_addr + 3) << 8);
+            
+            // Check if exit_pc is compiled
+            uint8_t flag = peek_bank_byte(
+                (exit_pc >> 14) + BANK_PC_FLAGS,
+                (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
+            if (flag & RECOMPILED) continue;
+            
+            // Read native address
+            uint16_t pc_addr = (exit_pc << 1) & FLASH_BANK_MASK;
+            uint8_t pc_bank = (exit_pc >> 13) + BANK_PC;
+            uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr])
+                        | (peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr+1]) << 8);
+            
+            // Don't patch self-loops
+            if (na >= code_base && na < code_base + code_len) continue;
+            
+            uint8_t target_bank = flag & 0x1F;
+            
+            if (target_bank == code_bank) {
+                // Same-bank: patch fast-path JMP directly
+                flash_byte_program(code_base + epi_off + 3, code_bank, 0);
+                flash_byte_program(code_base + epi_off + 6, code_bank, na & 0xFF);
+                flash_byte_program(code_base + epi_off + 7, code_bank, (na >> 8) & 0xFF);
+            } else {
+                // Cross-bank: patch to xbank setup code
+                uint16_t setup_addr = code_base + epi_off + 21;
+                flash_byte_program(code_base + epi_off + 3, code_bank, 0);
+                flash_byte_program(code_base + epi_off + 6, code_bank, setup_addr & 0xFF);
+                flash_byte_program(code_base + epi_off + 7, code_bank, (setup_addr >> 8) & 0xFF);
+                flash_byte_program(code_base + epi_off + 25, code_bank, na & 0xFF);
+                flash_byte_program(code_base + epi_off + 30, code_bank, (na >> 8) & 0xFF);
+                flash_byte_program(code_base + epi_off + 35, code_bank, target_bank);
+            }
+            patches_applied++;
+            if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) return;
+        }
+    }
+    opt2_stat_direct += patches_applied;
+}
+
+// Full scan of ALL 21-byte branch patterns across all sectors.
+// Looks for JMP $FFFF ($4C $FF $FF) inside blocks and resolves them
+// against the current PC table — catches branches that were never
+// queued (IR path, queue overflow) or whose queue entry was evicted.
+static void opt2_full_branch_scan_b2(void) {
+    uint8_t patches_applied = 0;
+    
+    for (uint8_t sector = 0; sector < FLASH_CACHE_SECTORS; sector++) {
+        uint16_t free_off = sector_free_offset[sector];
+        if (free_off == 0) continue;
+        
+        uint8_t code_bank = (sector >> 2) + BANK_CODE;
+        uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(sector & 3) << 12);
+        uint16_t offset = SECTOR_FIRST_HEADER;
+        
+        while (offset < free_off) {
+            uint16_t hdr_addr = sector_base + offset;
+            
+            uint8_t code_len = peek_bank_byte(code_bank, hdr_addr + 4);
+            if (code_len == 0 || code_len == 0xFF) break;
+            
+            uint16_t cur_end = offset + BLOCK_HEADER_SIZE + code_len;
+            uint16_t next_code = (cur_end + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(uint16_t)(BLOCK_ALIGNMENT - 1);
+            offset = next_code - BLOCK_HEADER_SIZE;
+            
+            uint16_t code_base = hdr_addr + BLOCK_HEADER_SIZE;
+            
+            // Scan code bytes for JMP $FFFF pattern ($4C $FF $FF).
+            // Two template types to detect:
+            //
+            //  (A) 21-byte branch template:
+            //      [invBxx $13] [Bxx $03] [JMP $FFFF] [STA _a] [PHP] ...
+            //      JMP at template+4 → p-1 is Bxx offset ($03), patch to $00.
+            //      target_pc extracted from LDA #imm at p+7 (lo), p+11 (hi).
+            //
+            //  (B) 9-byte opJMP template:
+            //      [PHP] [CLC] [BCC $04] [PLP] [JMP $FFFF] [PLP]
+            //      JMP at template+5 → p-2 is BCC offset ($04), patch to $00.
+            //      target_pc = exit_pc from block header (same as epilogue's).
+            //
+            for (uint8_t p = 0; (uint8_t)(p + 6) < code_len; p++) {
+                uint8_t b0 = peek_bank_byte(code_bank, code_base + p);
+                if (b0 != 0x4C) continue;
+                uint8_t b1 = peek_bank_byte(code_bank, code_base + p + 1);
+                if (b1 != 0xFF) continue;
+                uint8_t b2 = peek_bank_byte(code_bank, code_base + p + 2);
+                if (b2 != 0xFF) continue;
+                
+                // --- Pattern A: 21-byte branch template ---
+                // Signature: STA _a ($85) at p+3, PHP ($08) at p+5.
+                // Guard: p >= 4 (JMP is at template+4, so branch offset at
+                // p-1 is within the code body, never in the header).
+                if (p >= 4 && (uint8_t)(p + 12) < code_len) {
+                    uint8_t sta = peek_bank_byte(code_bank, code_base + p + 3);
+                    uint8_t php = peek_bank_byte(code_bank, code_base + p + 5);
+                    if (sta == 0x85 && php == 0x08) {
+                        // Read target_pc from embedded LDA #imm at p+7 (lo)
+                        // and p+11 (hi)
+                        uint8_t tpc_lo = peek_bank_byte(code_bank, code_base + p + 7);
+                        uint8_t tpc_hi = peek_bank_byte(code_bank, code_base + p + 11);
+                        uint16_t target_pc = tpc_lo | ((uint16_t)tpc_hi << 8);
+                        
+                        uint8_t flag = peek_bank_byte(
+                            (target_pc >> 14) + BANK_PC_FLAGS,
+                            (uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
+                        
+                        if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
+                            uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
+                            uint8_t pc_bank2 = (target_pc >> 13) + BANK_PC;
+                            uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
+                                        | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
+                            
+                            // Conditional branches can safely self-loop — the
+                            // condition will eventually change and exit the loop.
+                            // Patch: Bxx offset at p-1 → 0, JMP addr at p+1,p+2
+                            flash_byte_program(code_base + p - 1, code_bank, 0);
+                            flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
+                            flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
+                            patches_applied++;
+                        }
+                        p += 20;  // skip past 21-byte template
+                        if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) return;
+                        continue;
+                    }
+                }
+                
+                // --- Pattern B: 9-byte opJMP template ---
+                // Signature: PLP ($28) at p-1, BCC ($90) at p-3.
+                // Guard: p >= 5 (JMP is at template+5, so PHP/CLC/BCC/PLP
+                // all precede it within the code body).
+                if (p >= 5) {
+                    uint8_t plp = peek_bank_byte(code_bank, code_base + p - 1);
+                    uint8_t bcc = peek_bank_byte(code_bank, code_base + p - 3);
+                    if (plp == 0x28 && bcc == 0x90) {
+                        // opJMP target_pc == block exit_pc (stored in header)
+                        uint16_t exit_pc = peek_bank_byte(code_bank, hdr_addr + 2)
+                                | ((uint16_t)peek_bank_byte(code_bank, hdr_addr + 3) << 8);
+                        
+                        uint8_t flag = peek_bank_byte(
+                            (exit_pc >> 14) + BANK_PC_FLAGS,
+                            (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
+                        
+                        if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
+                            uint16_t pa = (exit_pc << 1) & FLASH_BANK_MASK;
+                            uint8_t pc_bank2 = (exit_pc >> 13) + BANK_PC;
+                            uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
+                                        | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
+                            
+                            // opJMP is unconditional (CLC+BCC always taken) —
+                            // must NOT self-loop or we block NMI handling.
+                            if (!(na >= code_base && na < code_base + code_len)) {
+                                // Patch: BCC offset at p-2 → 0, JMP addr at p+1,p+2
+                                flash_byte_program(code_base + p - 2, code_bank, 0);
+                                flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
+                                flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
+                                patches_applied++;
+                            }
+                        }
+                        p += 2;  // skip past 9-byte template remainder
+                        if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) return;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+    opt2_stat_direct += patches_applied;
+}
+
 #endif  // ENABLE_PATCHABLE_EPILOGUE
 
 //============================================================================
@@ -356,9 +569,82 @@ void opt2_scan_and_patch_epilogues(void) {
     opt2_scan_and_patch_epilogues_b2();
     bankswitch_prg(saved_bank);
 }
+
+void opt2_full_link_resolve(void) {
+    uint8_t saved_bank = mapper_prg_bank;
+    // Phase 1: drain ALL pending branch patches (queue-based)
+    bankswitch_prg(2);
+    opt2_sweep_pending_patches_b2();
+    // Phase 2: exhaustive epilogue scan (all sectors, all blocks)
+    opt2_full_epilogue_scan_b2();
+    // Phase 3: exhaustive inline branch scan (JMP $FFFF in code bodies)
+    opt2_full_branch_scan_b2();
+    // Phase 4: sweep again in case branch scan freed queue slots
+    opt2_sweep_pending_patches_b2();
+    bankswitch_prg(saved_bank);
+}
 #endif  // ENABLE_PATCHABLE_EPILOGUE
 
+//============================================================================
+// Settling detector: tracks unique_blocks across frames.
+// When no new blocks are compiled for SETTLE_FRAMES consecutive frames,
+// fires one exhaustive opt2_full_link_resolve() pass.
+//============================================================================
 
+#define SETTLE_FRAMES 8     // frames with no new compiles before full sweep
+#define RESETTLE_COOLDOWN 120 // ~2 sec cooldown after full resolve before re-settle
+
+static uint16_t opt2_prev_unique_blocks = 0;
+static uint8_t opt2_settle_counter = 0;
+static uint8_t opt2_settled = 0;  // 1 = full resolve already fired
+
+void opt2_frame_tick(void) {
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+    
+    if (opt2_settled) {
+        // Cooldown after full resolve prevents thrashing when the cache
+        // is full and blocks are constantly evicted/recompiled.
+        if (opt2_settle_counter < 255) opt2_settle_counter++;
+        
+        // Light periodic sweep every 8 frames
+        if ((opt2_settle_counter & 0x07) == 0) {
+            opt2_sweep_pending_patches();
+            opt2_scan_and_patch_epilogues();
+        }
+        
+        // During cooldown (~2 sec), track blocks but don't un-settle
+        if (opt2_settle_counter < RESETTLE_COOLDOWN) {
+            opt2_prev_unique_blocks = opt2_blocks_compiled;
+            return;
+        }
+        
+        // Past cooldown: un-settle if new blocks appeared
+        if (opt2_blocks_compiled != opt2_prev_unique_blocks) {
+            opt2_prev_unique_blocks = opt2_blocks_compiled;
+            opt2_settled = 0;
+            opt2_settle_counter = 0;
+        }
+        return;
+    }
+    
+    if (opt2_blocks_compiled == opt2_prev_unique_blocks) {
+        // No new blocks this frame
+        if (opt2_settle_counter < SETTLE_FRAMES) {
+            opt2_settle_counter++;
+        }
+        if (opt2_settle_counter >= SETTLE_FRAMES && opt2_blocks_compiled > 0) {
+            // Settled! Fire exhaustive link resolve.
+            opt2_full_link_resolve();
+            opt2_settled = 1;
+            opt2_settle_counter = 0;
+        }
+    } else {
+        // New blocks compiled — reset settling counter
+        opt2_prev_unique_blocks = opt2_blocks_compiled;
+        opt2_settle_counter = 0;
+    }
+#endif
+}
 
 //============================================================================
 // API: Get statistics (for debugging)
@@ -387,8 +673,12 @@ void opt2_reset(void) {
     opt2_stat_total = 0;
     opt2_stat_direct = 0;
     opt2_stat_pending = 0;
+    opt2_blocks_compiled = 0;
     opt2_epilogue_sector = 0;
     opt2_epilogue_offset = SECTOR_FIRST_HEADER;
+    opt2_prev_unique_blocks = 0;
+    opt2_settle_counter = 0;
+    opt2_settled = 0;
 }
 
 //============================================================================

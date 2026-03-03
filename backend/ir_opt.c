@@ -645,6 +645,7 @@ uint8_t ir_opt_dead_load(ir_ctx_t *ctx)
 
         for (uint8_t j = i + 1; j < ctx->node_count; j++) {
             uint8_t op = ctx->nodes[j].op;
+            uint8_t flags = ctx->nodes[j].flags;
             if (op == IR_DEAD) continue;
 
             /* Barrier — conservatively assume register/flags live */
@@ -658,9 +659,16 @@ uint8_t ir_opt_dead_load(ir_ctx_t *ctx)
                 if (n->op == IR_LDY_ZP && reads_y(op)) rused = 1;
                 if (rused) break;  /* register is live */
 
-                if (n->op == IR_LDA_ZP && writes_a(op)) reg_dead = 1;
-                if (n->op == IR_LDX_ZP && writes_x(op)) reg_dead = 1;
-                if (n->op == IR_LDY_ZP && writes_y(op)) reg_dead = 1;
+                /* Check register writes: for templates, check flags */
+                uint8_t writes_reg = 0;
+                if (n->op == IR_LDA_ZP) {
+                    writes_reg = writes_a(op) || (op == IR_TEMPLATE && (flags & 0x10));
+                } else if (n->op == IR_LDX_ZP) {
+                    writes_reg = writes_x(op) || (op == IR_TEMPLATE && (flags & 0x20));
+                } else if (n->op == IR_LDY_ZP) {
+                    writes_reg = writes_y(op) || (op == IR_TEMPLATE && (flags & 0x40));
+                }
+                if (writes_reg) reg_dead = 1;
             }
 
             /* --- Flags liveness ---

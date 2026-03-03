@@ -79,6 +79,23 @@
 #define ENABLE_PATCHABLE_EPILOGUE
 #endif
 
+// $FFF0 patchable templates — use the ROM trampoline at $FFF0 for
+// patchable branch/JMP templates instead of the old 21-byte/9-byte
+// inline patterns.  Saves 4-6 bytes per template and eliminates the
+// branch-byte flash write (2 writes instead of 3).  The trade-off is
+// ~13 extra cycles on the fast path for branches (pre-set _pc overhead)
+// but patching is cheaper (saves ~200 NES cycles per SST39SF040 write).
+// Requires ENABLE_OPTIMIZER_V2 and ENABLE_PATCHABLE_EPILOGUE.
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+#define ENABLE_FFF0_TEMPLATES
+#endif
+
+// FFF0 trampoline addresses (ROM bank 31 fixed bank, always mapped)
+#ifdef ENABLE_FFF0_TEMPLATES
+#define FFF0_DISPATCH       0xFFF0  /* entry: STA _a / PHP / JMP dispatch */
+#define FFF0_DISPATCH_A_SAVED 0xFFF6  /* entry: PHP / JMP dispatch (_a already saved) */
+#endif
+
 // Cache persistence - skip flash_format() at boot if valid cache signature found
 // Reuses previously compiled blocks, eliminating cold-start recompilation cost.
 // Signature includes ROM hash to invalidate when game ROM changes.

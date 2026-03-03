@@ -210,7 +210,9 @@
 #define IR_TMPL_INDX         10  /* addr_6502_indx template */
 #define IR_TMPL_BRANCH_PATCHABLE 11 /* 21-byte patchable branch pattern */
 #define IR_TMPL_JMP_PATCHABLE    12 /* 9-byte patchable JMP pattern */
-#define IR_TMPL_COUNT        13
+#define IR_TMPL_FFF0_BRANCH      13 /* 17-byte $FFF0 patchable branch */
+#define IR_TMPL_FFF0_JMP         14 /* 13-byte $FFF0 patchable JMP */
+#define IR_TMPL_COUNT            15
 
 /* ===================================================================
  * IR node structure — 4 bytes, fixed-size
@@ -232,12 +234,17 @@ typedef struct {
 #define IR_MAX_DEFERRED_PATCHES 4  /* Phase B: deferred pending-patch entries */
 
 /* Phase B: deferred pending-patch for patchable branch/JMP templates.
- * During IR compilation, templates with JMP $FFFF can't call
+ * During IR compilation, templates with JMP $FFFF/$FFF0 can't call
  * opt2_record_pending_branch_safe because code_index will shift
  * after IR lowering.  We defer the info and resolve post-lowering. */
+/* is_branch values: */
+#define DEFERRED_PATCH_JMP_OLD     0  /* old 9-byte JMP template */
+#define DEFERRED_PATCH_BRANCH_OLD  1  /* old 21-byte branch template */
+#define DEFERRED_PATCH_FFF0_BRANCH 2  /* $FFF0 17-byte branch (JMP $FFF0) */
+#define DEFERRED_PATCH_FFF0_JMP    3  /* $FFF0 13-byte JMP (JMP $FFF6) */
 typedef struct {
     uint16_t target_pc;   /* branch/JMP target PC */
-    uint8_t  is_branch;   /* 1 = 21-byte branch tmpl, 0 = 9-byte JMP tmpl */
+    uint8_t  is_branch;   /* DEFERRED_PATCH_* type discriminator */
     uint8_t  pad;
 } ir_deferred_patch_t;
 

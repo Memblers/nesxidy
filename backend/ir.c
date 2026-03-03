@@ -238,6 +238,8 @@ static uint8_t ir_get_template_flags(uint8_t tmpl_id)
         case IR_TMPL_INDX:              return 0x92; /* R:X | W:A | W:F */
         case IR_TMPL_BRANCH_PATCHABLE:  return 0x08; /* R:F (control flow) */
         case IR_TMPL_JMP_PATCHABLE:     return 0x00; /* (control flow) */
+        case IR_TMPL_FFF0_BRANCH:       return 0x09; /* R:A | R:F (saves A, reads flags) */
+        case IR_TMPL_FFF0_JMP:          return 0x01; /* R:A (saves A, control flow) */
         default:                        return 0xFF; /* unknown = barrier */
     }
 }

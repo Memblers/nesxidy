@@ -176,15 +176,37 @@ static void opt2_sweep_pending_patches_b2(void) {
         uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pa])
                     | (peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pa+1]) << 8);
         
+#ifdef ENABLE_FFF0_TEMPLATES
+        // $FFF0 templates use pp_branch_addr == 0 as a sentinel (no branch
+        // byte to patch).  Detect this to use the right validation & patching.
+        uint8_t is_fff0 = (pp_branch_addr[i] == 0);
+#endif
+
         // Don't patch unconditional self-loops (opJMP and epilogue patterns).
         // These use CLC+BCC (always taken), so patching them to jump back into
         // the same block creates a tight infinite native loop that never returns
         // to the dispatcher, blocking NMI/interrupt handling.
         // Conditional branches (21-byte Bxx pattern) are fine — they'll exit
         // the loop when the condition changes.
-        // Discriminator: opJMP has jmp_addr - branch_addr == 3 (PLP between BCC and JMP),
-        //                Bxx has jmp_addr - branch_addr == 2 (JMP right after branch byte).
+#ifdef ENABLE_FFF0_TEMPLATES
+        // $FFF0 JMP templates (is_fff0 && pp_patch_val==0) are unconditional.
+        // $FFF0 branch templates (is_fff0 && pp_patch_val!=0) are conditional
+        // and safe from self-loops (the branch must be taken for the JMP).
+        if (is_fff0) {
+            if (pp_patch_val[i] == 0) {
+                // Unconditional $FFF0 JMP — check for self-loop
+                uint16_t jmp_addr = pp_jmp_addr[i];
+                if (na >= jmp_addr - 250 && na <= jmp_addr + 8) {
+                    i++;
+                    continue;
+                }
+            }
+        } else
+#endif
         {
+            // Old-style templates: discriminate by gap between branch and JMP
+            // Discriminator: opJMP has jmp_addr - branch_addr == 3 (PLP between BCC and JMP),
+            //                Bxx has jmp_addr - branch_addr == 2 (JMP right after branch byte).
             uint16_t gap = pp_jmp_addr[i] - pp_branch_addr[i];
             if (gap == 3) {  // unconditional (opJMP / epilogue pattern)
                 // Check if target is in the same block as the pattern.
@@ -203,7 +225,14 @@ static void opt2_sweep_pending_patches_b2(void) {
         // Validate patch site (peek from code bank)
         uint8_t jmp_lo = peek_bank_byte(pp_bank[i], pp_jmp_addr[i]);
         uint8_t jmp_hi = peek_bank_byte(pp_bank[i], pp_jmp_addr[i]+1);
+#ifdef ENABLE_FFF0_TEMPLATES
+        // $FFF0 templates have JMP $FFF0 (lo=$F0, hi=$FF) as placeholder.
+        // Old templates have JMP $FFFF (lo=$FF, hi=$FF).
+        uint8_t expected_lo = is_fff0 ? (FFF0_DISPATCH & 0xFF) : 0xFF;
+        if (jmp_lo != expected_lo || jmp_hi != 0xFF) {
+#else
         if (jmp_lo != 0xFF || jmp_hi != 0xFF) {
+#endif
             --pending_count;
             pp_branch_addr[i] = pp_branch_addr[pending_count];
             pp_jmp_addr[i] = pp_jmp_addr[pending_count];
@@ -217,9 +246,44 @@ static void opt2_sweep_pending_patches_b2(void) {
         // Patch — flash_byte_program lives in WRAM, handles its own bankswitching.
         // mapper_prg_bank is still 2 (set by trampoline), so flash_byte_program
         // restores to bank 2 when done.
-        flash_byte_program(pp_branch_addr[i], pp_bank[i], pp_patch_val[i]);
-        flash_byte_program(pp_jmp_addr[i], pp_bank[i], na & 0xFF);
-        flash_byte_program(pp_jmp_addr[i]+1, pp_bank[i], (na >> 8) & 0xFF);
+#ifdef ENABLE_FFF0_TEMPLATES
+        if (is_fff0) {
+            // $FFF0 template: only 2 flash writes (JMP lo + JMP hi).
+            // No branch byte to patch — the branch is pre-wired in the template.
+            //
+            // Non-aligned target handling: if na is not 16-byte aligned, we
+            // cannot JMP directly to it from a 16-aligned block (the JMP
+            // operand can only be patched to values reachable by clearing bits
+            // from $FFF0, which means the low nibble can only go to $x0).
+            // Actually — flash can clear ANY bits in $F0 to reach any address,
+            // so alignment is not a constraint for the JMP operand itself.
+            // The constraint is that $FF can become any value (all bits set).
+            // $F0 can only become $x0 where x <= F — i.e., low nibble stuck at 0!
+            //
+            // So if (na & 0x0F) != 0, we need a local trampoline:
+            // Find/use a 16-byte-aligned JMP $FFFF slot in the same block,
+            // patch that to JMP na, and patch our JMP $FFF0 to point to the
+            // trampoline instead.
+            //
+            // For now: if target is not reachable (low nibble != 0), skip
+            // and leave for later.  TODO: implement local trampoline.
+            if ((na & 0x0F) != 0) {
+                // Target not aligned — can't patch JMP $FFF0 directly.
+                // The low byte $F0 can only clear bits, giving $x0 values.
+                // Skip for now; the slow path ($FFF0 dispatch) still works.
+                i++;
+                continue;
+            }
+            flash_byte_program(pp_jmp_addr[i], pp_bank[i], na & 0xFF);
+            flash_byte_program(pp_jmp_addr[i]+1, pp_bank[i], (na >> 8) & 0xFF);
+        } else
+#endif
+        {
+            // Old-style template: 3 flash writes (branch byte + JMP lo + JMP hi)
+            flash_byte_program(pp_branch_addr[i], pp_bank[i], pp_patch_val[i]);
+            flash_byte_program(pp_jmp_addr[i], pp_bank[i], na & 0xFF);
+            flash_byte_program(pp_jmp_addr[i]+1, pp_bank[i], (na >> 8) & 0xFF);
+        }
         opt2_stat_direct++;
         --pending_count;
         pp_branch_addr[i] = pp_branch_addr[pending_count];
@@ -419,135 +483,6 @@ static void opt2_full_epilogue_scan_b2(void) {
     opt2_stat_direct += patches_applied;
 }
 
-// Full scan of ALL 21-byte branch patterns across all sectors.
-// Looks for JMP $FFFF ($4C $FF $FF) inside blocks and resolves them
-// against the current PC table — catches branches that were never
-// queued (IR path, queue overflow) or whose queue entry was evicted.
-static void opt2_full_branch_scan_b2(void) {
-    uint8_t patches_applied = 0;
-    
-    for (uint8_t sector = 0; sector < FLASH_CACHE_SECTORS; sector++) {
-        uint16_t free_off = sector_free_offset[sector];
-        if (free_off == 0) continue;
-        
-        uint8_t code_bank = (sector >> 2) + BANK_CODE;
-        uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(sector & 3) << 12);
-        uint16_t offset = SECTOR_FIRST_HEADER;
-        
-        while (offset < free_off) {
-            uint16_t hdr_addr = sector_base + offset;
-            
-            uint8_t code_len = peek_bank_byte(code_bank, hdr_addr + 4);
-            if (code_len == 0 || code_len == 0xFF) break;
-            
-            uint16_t cur_end = offset + BLOCK_HEADER_SIZE + code_len;
-            uint16_t next_code = (cur_end + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(uint16_t)(BLOCK_ALIGNMENT - 1);
-            offset = next_code - BLOCK_HEADER_SIZE;
-            
-            uint16_t code_base = hdr_addr + BLOCK_HEADER_SIZE;
-            
-            // Scan code bytes for JMP $FFFF pattern ($4C $FF $FF).
-            // Two template types to detect:
-            //
-            //  (A) 21-byte branch template:
-            //      [invBxx $13] [Bxx $03] [JMP $FFFF] [STA _a] [PHP] ...
-            //      JMP at template+4 → p-1 is Bxx offset ($03), patch to $00.
-            //      target_pc extracted from LDA #imm at p+7 (lo), p+11 (hi).
-            //
-            //  (B) 9-byte opJMP template:
-            //      [PHP] [CLC] [BCC $04] [PLP] [JMP $FFFF] [PLP]
-            //      JMP at template+5 → p-2 is BCC offset ($04), patch to $00.
-            //      target_pc = exit_pc from block header (same as epilogue's).
-            //
-            for (uint8_t p = 0; (uint8_t)(p + 6) < code_len; p++) {
-                uint8_t b0 = peek_bank_byte(code_bank, code_base + p);
-                if (b0 != 0x4C) continue;
-                uint8_t b1 = peek_bank_byte(code_bank, code_base + p + 1);
-                if (b1 != 0xFF) continue;
-                uint8_t b2 = peek_bank_byte(code_bank, code_base + p + 2);
-                if (b2 != 0xFF) continue;
-                
-                // --- Pattern A: 21-byte branch template ---
-                // Signature: STA _a ($85) at p+3, PHP ($08) at p+5.
-                // Guard: p >= 4 (JMP is at template+4, so branch offset at
-                // p-1 is within the code body, never in the header).
-                if (p >= 4 && (uint8_t)(p + 12) < code_len) {
-                    uint8_t sta = peek_bank_byte(code_bank, code_base + p + 3);
-                    uint8_t php = peek_bank_byte(code_bank, code_base + p + 5);
-                    if (sta == 0x85 && php == 0x08) {
-                        // Read target_pc from embedded LDA #imm at p+7 (lo)
-                        // and p+11 (hi)
-                        uint8_t tpc_lo = peek_bank_byte(code_bank, code_base + p + 7);
-                        uint8_t tpc_hi = peek_bank_byte(code_bank, code_base + p + 11);
-                        uint16_t target_pc = tpc_lo | ((uint16_t)tpc_hi << 8);
-                        
-                        uint8_t flag = peek_bank_byte(
-                            (target_pc >> 14) + BANK_PC_FLAGS,
-                            (uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
-                        
-                        if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
-                            uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
-                            uint8_t pc_bank2 = (target_pc >> 13) + BANK_PC;
-                            uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
-                                        | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
-                            
-                            // Conditional branches can safely self-loop — the
-                            // condition will eventually change and exit the loop.
-                            // Patch: Bxx offset at p-1 → 0, JMP addr at p+1,p+2
-                            flash_byte_program(code_base + p - 1, code_bank, 0);
-                            flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
-                            flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
-                            patches_applied++;
-                        }
-                        p += 20;  // skip past 21-byte template
-                        if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) return;
-                        continue;
-                    }
-                }
-                
-                // --- Pattern B: 9-byte opJMP template ---
-                // Signature: PLP ($28) at p-1, BCC ($90) at p-3.
-                // Guard: p >= 5 (JMP is at template+5, so PHP/CLC/BCC/PLP
-                // all precede it within the code body).
-                if (p >= 5) {
-                    uint8_t plp = peek_bank_byte(code_bank, code_base + p - 1);
-                    uint8_t bcc = peek_bank_byte(code_bank, code_base + p - 3);
-                    if (plp == 0x28 && bcc == 0x90) {
-                        // opJMP target_pc == block exit_pc (stored in header)
-                        uint16_t exit_pc = peek_bank_byte(code_bank, hdr_addr + 2)
-                                | ((uint16_t)peek_bank_byte(code_bank, hdr_addr + 3) << 8);
-                        
-                        uint8_t flag = peek_bank_byte(
-                            (exit_pc >> 14) + BANK_PC_FLAGS,
-                            (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
-                        
-                        if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
-                            uint16_t pa = (exit_pc << 1) & FLASH_BANK_MASK;
-                            uint8_t pc_bank2 = (exit_pc >> 13) + BANK_PC;
-                            uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
-                                        | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
-                            
-                            // opJMP is unconditional (CLC+BCC always taken) —
-                            // must NOT self-loop or we block NMI handling.
-                            if (!(na >= code_base && na < code_base + code_len)) {
-                                // Patch: BCC offset at p-2 → 0, JMP addr at p+1,p+2
-                                flash_byte_program(code_base + p - 2, code_bank, 0);
-                                flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
-                                flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
-                                patches_applied++;
-                            }
-                        }
-                        p += 2;  // skip past 9-byte template remainder
-                        if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) return;
-                        continue;
-                    }
-                }
-            }
-        }
-    }
-    opt2_stat_direct += patches_applied;
-}
-
 #endif  // ENABLE_PATCHABLE_EPILOGUE
 
 //============================================================================
@@ -570,6 +505,13 @@ void opt2_scan_and_patch_epilogues(void) {
     bankswitch_prg(saved_bank);
 }
 
+// Forward declaration: lives in bank1 (defined below).
+// Note: vbcc warns about section mismatch — the definition's bank1 pragma
+// takes precedence for actual placement, warning is harmless.
+#pragma section bank1
+void opt2_full_branch_scan_b1(void);
+#pragma section default
+
 void opt2_full_link_resolve(void) {
     uint8_t saved_bank = mapper_prg_bank;
     // Phase 1: drain ALL pending branch patches (queue-based)
@@ -578,8 +520,11 @@ void opt2_full_link_resolve(void) {
     // Phase 2: exhaustive epilogue scan (all sectors, all blocks)
     opt2_full_epilogue_scan_b2();
     // Phase 3: exhaustive inline branch scan (JMP $FFFF in code bodies)
-    opt2_full_branch_scan_b2();
+    // Lives in bank1 to reduce bank2 pressure.
+    bankswitch_prg(1);
+    opt2_full_branch_scan_b1();
     // Phase 4: sweep again in case branch scan freed queue slots
+    bankswitch_prg(2);
     opt2_sweep_pending_patches_b2();
     bankswitch_prg(saved_bank);
 }
@@ -661,6 +606,183 @@ void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t 
     *stub = 0;
     *pending = opt2_stat_pending;
 }
+
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+// Full scan of ALL 21-byte branch patterns across all sectors.
+// Looks for JMP $FFFF ($4C $FF $FF) inside blocks and resolves them
+// against the current PC table — catches branches that were never
+// queued (IR path, queue overflow) or whose queue entry was evicted.
+//
+// Moved to bank1 to reduce bank2 code pressure.  Uses only
+// peek_bank_byte (WRAM) and flash_byte_program (WRAM), neither of
+// which calls bankswitch_prg, so this is safe to run from bank1.
+void opt2_full_branch_scan_b1(void) {
+    uint8_t patches_applied = 0;
+    
+    for (uint8_t sector = 0; sector < FLASH_CACHE_SECTORS; sector++) {
+        uint16_t free_off = sector_free_offset[sector];
+        if (free_off == 0) continue;
+        
+        uint8_t code_bank = (sector >> 2) + BANK_CODE;
+        uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(sector & 3) << 12);
+        uint16_t offset = SECTOR_FIRST_HEADER;
+        
+        while (offset < free_off) {
+            uint16_t hdr_addr = sector_base + offset;
+            
+            uint8_t code_len = peek_bank_byte(code_bank, hdr_addr + 4);
+            if (code_len == 0 || code_len == 0xFF) break;
+            
+            uint16_t cur_end = offset + BLOCK_HEADER_SIZE + code_len;
+            uint16_t next_code = (cur_end + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(uint16_t)(BLOCK_ALIGNMENT - 1);
+            offset = next_code - BLOCK_HEADER_SIZE;
+            
+            uint16_t code_base = hdr_addr + BLOCK_HEADER_SIZE;
+            
+            // Scan code bytes for patchable JMP patterns.
+            // Old templates: $4C $FF $FF (JMP $FFFF)
+            // $FFF0 templates: $4C $F0 $FF (JMP $FFF0)
+            //
+            // Old template types:
+            //  (A) 21-byte branch: [invBxx $13] [Bxx $03] [JMP $FFFF] [STA _a] [PHP]
+            //  (B) 9-byte opJMP:   [PHP] [CLC] [BCC $04] [PLP] [JMP $FFFF] [PLP]
+            //
+            // $FFF0 template types:
+            //  (C) 19-byte branch: [STA _a] [PHP] [LDA# lo] [STA _pc] [LDA# hi] [STA _pc+1] [LDA _a] [PLP] [Bxx_inv +3] [JMP $FFF0]
+            //  (D) 17-byte JMP:    [STA _a] [PHP] [LDA# lo] [STA _pc] [LDA# hi] [STA _pc+1] [LDA _a] [PLP] [JMP $FFF0]
+            //
+            for (uint8_t p = 0; (uint8_t)(p + 6) < code_len; p++) {
+                uint8_t b0 = peek_bank_byte(code_bank, code_base + p);
+                if (b0 != 0x4C) continue;
+                uint8_t b2 = peek_bank_byte(code_bank, code_base + p + 2);
+                if (b2 != 0xFF) continue;
+                uint8_t b1 = peek_bank_byte(code_bank, code_base + p + 1);
+
+#ifdef ENABLE_FFF0_TEMPLATES
+                // --- Pattern C/D: $FFF0 templates (JMP $FFF0) ---
+                if (b1 == (FFF0_DISPATCH & 0xFF)) {
+                    // Determine branch vs JMP by checking for Bxx_inv at p-2
+                    uint16_t target_pc;
+                    uint8_t is_branch_tmpl = 0;
+                    if (p >= 2) {
+                        uint8_t maybe_bxx = peek_bank_byte(code_bank, code_base + p - 2);
+                        if ((maybe_bxx & 0x1F) == 0x10) is_branch_tmpl = 1;
+                    }
+                    if (is_branch_tmpl) {
+                        // 19-byte branch: target lo at p-12, hi at p-8
+                        uint8_t tpc_lo = peek_bank_byte(code_bank, code_base + p - 12);
+                        uint8_t tpc_hi = peek_bank_byte(code_bank, code_base + p - 8);
+                        target_pc = tpc_lo | ((uint16_t)tpc_hi << 8);
+                    } else {
+                        // 17-byte JMP: target lo at p-10, hi at p-6
+                        uint8_t tpc_lo = peek_bank_byte(code_bank, code_base + p - 10);
+                        uint8_t tpc_hi = peek_bank_byte(code_bank, code_base + p - 6);
+                        target_pc = tpc_lo | ((uint16_t)tpc_hi << 8);
+                    }
+
+                    uint8_t flag = peek_bank_byte(
+                        (target_pc >> 14) + BANK_PC_FLAGS,
+                        (uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
+
+                    if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
+                        uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
+                        uint8_t pc_bank2 = (target_pc >> 13) + BANK_PC;
+                        uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
+                                    | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
+
+                        // Self-loop guard for unconditional JMP (not branch)
+                        if (!is_branch_tmpl && na >= code_base && na < code_base + code_len) {
+                            p += 2;
+                            continue;
+                        }
+
+                        // Alignment guard: JMP $FFF0 lo byte is $F0, can only
+                        // clear bits → target lo nibble must be 0.
+                        if ((na & 0x0F) != 0) {
+                            p += 2;
+                            continue;
+                        }
+
+                        // Patch: only 2 writes (JMP lo + JMP hi)
+                        flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
+                        flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
+                        patches_applied++;
+                    }
+                    p += 2;
+                    if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) goto done;
+                    continue;
+                }
+#endif  /* ENABLE_FFF0_TEMPLATES */
+
+                if (b1 != 0xFF) continue;  // not $4C $FF $FF either
+                
+                // --- Pattern A: 21-byte branch template ---
+                if (p >= 4 && (uint8_t)(p + 12) < code_len) {
+                    uint8_t sta = peek_bank_byte(code_bank, code_base + p + 3);
+                    uint8_t php = peek_bank_byte(code_bank, code_base + p + 5);
+                    if (sta == 0x85 && php == 0x08) {
+                        uint8_t tpc_lo = peek_bank_byte(code_bank, code_base + p + 7);
+                        uint8_t tpc_hi = peek_bank_byte(code_bank, code_base + p + 11);
+                        uint16_t target_pc = tpc_lo | ((uint16_t)tpc_hi << 8);
+                        
+                        uint8_t flag = peek_bank_byte(
+                            (target_pc >> 14) + BANK_PC_FLAGS,
+                            (uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
+                        
+                        if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
+                            uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
+                            uint8_t pc_bank2 = (target_pc >> 13) + BANK_PC;
+                            uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
+                                        | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
+                            
+                            flash_byte_program(code_base + p - 1, code_bank, 0);
+                            flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
+                            flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
+                            patches_applied++;
+                        }
+                        p += 20;
+                        if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) goto done;
+                        continue;
+                    }
+                }
+                
+                // --- Pattern B: 9-byte opJMP template ---
+                if (p >= 5) {
+                    uint8_t plp = peek_bank_byte(code_bank, code_base + p - 1);
+                    uint8_t bcc = peek_bank_byte(code_bank, code_base + p - 3);
+                    if (plp == 0x28 && bcc == 0x90) {
+                        uint16_t exit_pc = peek_bank_byte(code_bank, hdr_addr + 2)
+                                | ((uint16_t)peek_bank_byte(code_bank, hdr_addr + 3) << 8);
+                        
+                        uint8_t flag = peek_bank_byte(
+                            (exit_pc >> 14) + BANK_PC_FLAGS,
+                            (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
+                        
+                        if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
+                            uint16_t pa = (exit_pc << 1) & FLASH_BANK_MASK;
+                            uint8_t pc_bank2 = (exit_pc >> 13) + BANK_PC;
+                            uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
+                                        | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
+                            
+                            if (!(na >= code_base && na < code_base + code_len)) {
+                                flash_byte_program(code_base + p - 2, code_bank, 0);
+                                flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
+                                flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
+                                patches_applied++;
+                            }
+                        }
+                        p += 2;
+                        if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) goto done;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+done:
+    opt2_stat_direct += patches_applied;
+}
+#endif  /* ENABLE_PATCHABLE_EPILOGUE */
 
 //============================================================================
 // API: Reset — must be in the fixed bank so sa_run() can call it

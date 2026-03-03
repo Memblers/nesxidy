@@ -400,7 +400,8 @@ SECTIONS
   } >b31 AT>out
 
   /* 3. Pad the gap between trampoline and vectors */
-  /* This pads from the end of your trampoline code up to $FFFA */
+  /* Trampoline is 10 bytes, vectors are 6 bytes = 16 total.  No fill needed. */
+  /* If trampoline grows/shrinks, adjust: . = . + (16 - 6 - SIZEOF(trampoline)); */
   fill_vectors: {
       . = . + (16 - 6 - SIZEOF(trampoline));
   } >b31 AT>out

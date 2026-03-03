@@ -451,9 +451,15 @@ void run_6502(void)
 		{
 			cache_hits++;
 #ifdef ENABLE_IDLE_DETECT
-			// JIT block ran successfully — this PC is compiled.
-			// Reset idle state so we never intercept compiled loops.
-			idle_count = 0;
+			// DO NOT reset idle_count here.
+			// The idle loop at case-2 may be interrupted by the guest NMI
+			// handler whose compiled blocks land here (case 0).  Resetting
+			// idle_count wipes the progress toward IDLE_DETECT_THRESHOLD,
+			// so the idle escape never fires when the threshold exceeds the
+			// number of interpret iterations that fit between NMIs (~7).
+			// The case-2 path already resets idle state via the
+			// "else if (pc < idle_prev_pc)" branch when a new anchor is
+			// detected, so the explicit reset here is unnecessary.
 #endif
 #ifdef TRACK_TICKS
 			// JIT blocks already have accurate cycle counts in the header,
@@ -1870,11 +1876,98 @@ static uint8_t recompile_opcode_b2_inner()
 				}
 #endif
 
-				// --- Dynamic / pass-1: 21-byte patchable template ---
+				// --- Dynamic / pass-1: patchable template ---
 				{
 				uint16_t pattern_flash_address = flash_code_address;
 				uint8_t pattern_flash_bank = flash_code_bank;
 				uint8_t pattern_code_index = code_index;
+
+#ifdef ENABLE_FFF0_TEMPLATES
+				// --- $FFF0 patchable branch template (17 bytes) ---
+				// Pre-sets _pc to the taken target so the $FFF0 trampoline
+				// can dispatch without inline epilogue code.  On the fast
+				// path (patched JMP → target), the _pc writes are wasted
+				// but harmless; A is saved and restored so the target block
+				// receives correct guest registers.
+				//
+				// +0:  STA _a          ; 2B  save guest A
+				// +2:  PHP             ; 1B  save guest flags
+				// +3:  LDA #<target    ; 2B
+				// +5:  STA _pc         ; 2B
+				// +7:  LDA #>target    ; 2B
+				// +9:  STA _pc+1       ; 2B
+				// +11: LDA _a          ; 2B  restore guest A
+				// +13: PLP             ; 1B  restore guest flags
+				// +14: Bxx_inv +3      ; 2B  not taken → +19 (continue)
+				// +16: JMP $FFF0       ; 3B  PATCHABLE → dispatch or target
+				// +19: [continue]
+				//
+				// Patching: 2 flash writes (JMP lo + JMP hi).  No branch byte.
+				// If target not aligned by 16, a local JMP trampoline at an
+				// aligned offset is emitted within the block (see sweep).
+
+				if ((code_index + 19 + 14) >= CODE_SIZE)
+				{
+					enable_interpret();
+				}
+				else
+				{
+				// +0: STA _a
+				code_ptr[code_index+0] = 0x85;
+				code_ptr[code_index+1] = (uint8_t)((uint16_t)&a);
+
+				// +2: PHP (save guest flags across LDA/STA)
+				code_ptr[code_index+2] = 0x08;
+
+				// +3: LDA #<target_pc
+				code_ptr[code_index+3] = 0xA9;
+				code_ptr[code_index+4] = target_pc & 0xFF;
+
+				// +5: STA _pc
+				code_ptr[code_index+5] = 0x85;
+				code_ptr[code_index+6] = (uint8_t)((uint16_t)&pc);
+
+				// +7: LDA #>target_pc
+				code_ptr[code_index+7] = 0xA9;
+				code_ptr[code_index+8] = (target_pc >> 8) & 0xFF;
+
+				// +9: STA _pc+1
+				code_ptr[code_index+9] = 0x85;
+				code_ptr[code_index+10] = (uint8_t)(((uint16_t)&pc) + 1);
+
+				// +11: LDA _a (restore guest A)
+				code_ptr[code_index+11] = 0xA5;
+				code_ptr[code_index+12] = (uint8_t)((uint16_t)&a);
+
+				// +13: PLP (restore guest flags)
+				code_ptr[code_index+13] = 0x28;
+
+				// +14: Inverted branch +3 (skip JMP if NOT taken)
+				code_ptr[code_index+14] = invert_branch(op_buffer_0);
+				code_ptr[code_index+15] = 3;
+
+				// +16: JMP $FFF0 (taken: dispatch via trampoline, PATCHABLE)
+				code_ptr[code_index+16] = 0x4C;
+				code_ptr[code_index+17] = FFF0_DISPATCH & 0xFF;
+				code_ptr[code_index+18] = (FFF0_DISPATCH >> 8) & 0xFF;
+
+				// Record pending patch (JMP operand only, no branch byte)
+#ifndef ENABLE_IR
+				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 17;
+				opt2_record_pending_branch_safe(0, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
+
+				setup_flash_address(pc, flash_cache_index);
+				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+#endif
+
+				pc += 2;
+				code_index += 19;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+				}
+#else  /* !ENABLE_FFF0_TEMPLATES */
+				// --- Old 21-byte patchable template ---
 
 				if ((code_index + 21 + 14) >= CODE_SIZE)
 				{
@@ -1932,8 +2025,6 @@ static uint8_t recompile_opcode_b2_inner()
 				setup_flash_address(pc, flash_cache_index);
 				flash_cache_pc_update(pattern_code_index, RECOMPILED);
 #endif
-				// (Under IR, deferred patches are recorded by the bank2 wrapper
-				// and resolved post-lowering by ir_resolve_deferred_patches.)
 
 				pc += 2;
 				code_index += 21;
@@ -1941,6 +2032,7 @@ static uint8_t recompile_opcode_b2_inner()
 				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 				}
+#endif  /* ENABLE_FFF0_TEMPLATES */
 				}  // end fallback block
 #else
 				branch_forward++;
@@ -1967,12 +2059,74 @@ static uint8_t recompile_opcode_b2_inner()
 				// During batch compile, the forward scan already passed
 				// backward addresses; if the target wasn't compiled, it's
 				// not in the bitmap.  Reserving would compile garbage.
-				// Use 21-byte patchable template (runtime patching).
 				{
-				// V2: Three-path branch pattern (21 bytes)
 				uint16_t pattern_flash_address = flash_code_address;
 				uint8_t pattern_flash_bank = flash_code_bank;
 				uint8_t pattern_code_index = code_index;
+
+#ifdef ENABLE_FFF0_TEMPLATES
+				// --- $FFF0 patchable branch template (19 bytes) ---
+				if ((code_index + 19 + 14) >= CODE_SIZE)
+				{
+					enable_interpret();
+				}
+				else
+				{
+				// +0: STA _a
+				code_ptr[code_index+0] = 0x85;
+				code_ptr[code_index+1] = (uint8_t)((uint16_t)&a);
+
+				// +2: PHP (save guest flags across LDA/STA)
+				code_ptr[code_index+2] = 0x08;
+
+				// +3: LDA #<target_pc
+				code_ptr[code_index+3] = 0xA9;
+				code_ptr[code_index+4] = target_pc & 0xFF;
+
+				// +5: STA _pc
+				code_ptr[code_index+5] = 0x85;
+				code_ptr[code_index+6] = (uint8_t)((uint16_t)&pc);
+
+				// +7: LDA #>target_pc
+				code_ptr[code_index+7] = 0xA9;
+				code_ptr[code_index+8] = (target_pc >> 8) & 0xFF;
+
+				// +9: STA _pc+1
+				code_ptr[code_index+9] = 0x85;
+				code_ptr[code_index+10] = (uint8_t)(((uint16_t)&pc) + 1);
+
+				// +11: LDA _a (restore guest A)
+				code_ptr[code_index+11] = 0xA5;
+				code_ptr[code_index+12] = (uint8_t)((uint16_t)&a);
+
+				// +13: PLP (restore guest flags)
+				code_ptr[code_index+13] = 0x28;
+
+				// +14: Inverted branch +3
+				code_ptr[code_index+14] = invert_branch(op_buffer_0);
+				code_ptr[code_index+15] = 3;
+
+				// +16: JMP $FFF0 (PATCHABLE)
+				code_ptr[code_index+16] = 0x4C;
+				code_ptr[code_index+17] = FFF0_DISPATCH & 0xFF;
+				code_ptr[code_index+18] = (FFF0_DISPATCH >> 8) & 0xFF;
+
+#ifndef ENABLE_IR
+				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 17;
+				opt2_record_pending_branch_safe(0, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
+
+				setup_flash_address(pc, flash_cache_index);
+				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+#endif
+
+				pc += 2;
+				code_index += 19;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+				}
+#else  /* !ENABLE_FFF0_TEMPLATES */
+				// Use 21-byte patchable template (runtime patching).
 				
 				// Check space: need 21 bytes + epilogue room
 				if ((code_index + 21 + 14) >= CODE_SIZE)
@@ -1995,10 +2149,6 @@ static uint8_t recompile_opcode_b2_inner()
 				//   +16: STA _pc+1     ; 2B
 				//   +18: JMP dispatch  ; 3B - to dispatcher
 				//   +21: [continues]   ; path 1 - branch not taken
-				//
-				// Path 1: Branch NOT taken - inverted branch jumps over everything
-				// Path 2: Branch taken, target unknown - second branch to slow path
-				// Path 3: Branch taken, target known - patched to fast JMP
 				
 				// +0: Inverted branch $13 (skip 19 bytes to +21)
 				code_ptr[code_index+0] = invert_branch(op_buffer_0);
@@ -2044,7 +2194,6 @@ static uint8_t recompile_opcode_b2_inner()
 				// Record pending patch:
 				// - Branch offset at +3 (patch $03 -> $00)
 				// - JMP operand at +5 (patch $FFFF -> native)
-				// Use saved addresses from when pattern was emitted
 #ifndef ENABLE_IR
 				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
 				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
@@ -2052,7 +2201,6 @@ static uint8_t recompile_opcode_b2_inner()
 				opt2_record_pending_branch_safe(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
 				
 				// Update PC table to point to this pattern
-				// (required when OPT_BLOCK_METADATA is 0)
 				setup_flash_address(pc, flash_cache_index);
 				flash_cache_pc_update(pattern_code_index, RECOMPILED);
 #endif
@@ -2062,7 +2210,8 @@ static uint8_t recompile_opcode_b2_inner()
 				cache_branches++;
 				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
-				}  // end else (enough space for 21-byte pattern)
+				}
+#endif  /* ENABLE_FFF0_TEMPLATES */
 				}  // end fallback block
 #else
 				// Target not compiled - interpret
@@ -2157,7 +2306,76 @@ static uint8_t recompile_opcode_b2_inner()
 				// Cross-bank — fall through to patchable
 			}
 
-			// --- Fallback: 9-byte patchable JMP pattern ---
+			// --- Fallback: patchable JMP pattern ---
+#ifdef ENABLE_FFF0_TEMPLATES
+			// --- $FFF0 patchable JMP template (17 bytes) ---
+			// Self-contained: sets _pc inline, saves/restores A and flags,
+			// JMPs to $FFF0 trampoline (slow) or directly to target (fast,
+			// patched).  PHP/PLP preserve guest flags across the LDA/STA
+			// sequence so both the patched fast-path and the $FFF0 slow-path
+			// deliver correct A, X, Y, and flags to the next block.
+			//
+			// +0:  STA _a          ; 2B  save guest A
+			// +2:  PHP             ; 1B  save guest flags
+			// +3:  LDA #<target    ; 2B
+			// +5:  STA _pc         ; 2B
+			// +7:  LDA #>target    ; 2B
+			// +9:  STA _pc+1       ; 2B
+			// +11: LDA _a          ; 2B  restore guest A
+			// +13: PLP             ; 1B  restore guest flags
+			// +14: JMP $FFF0       ; 3B  slow: dispatch. fast (patched): → target
+			//
+			// Patching: 2 flash writes (JMP lo + JMP hi).
+			if (code_index + 17 < CODE_SIZE) {
+				// +0: STA _a
+				code_ptr[code_index+0] = 0x85;
+				code_ptr[code_index+1] = (uint8_t)((uint16_t)&a);
+
+				// +2: PHP (save guest flags across LDA/STA)
+				code_ptr[code_index+2] = 0x08;
+
+				// +3: LDA #<target_pc
+				code_ptr[code_index+3] = 0xA9;
+				code_ptr[code_index+4] = target_pc & 0xFF;
+
+				// +5: STA _pc
+				code_ptr[code_index+5] = 0x85;
+				code_ptr[code_index+6] = (uint8_t)((uint16_t)&pc);
+
+				// +7: LDA #>target_pc
+				code_ptr[code_index+7] = 0xA9;
+				code_ptr[code_index+8] = (target_pc >> 8) & 0xFF;
+
+				// +9: STA _pc+1
+				code_ptr[code_index+9] = 0x85;
+				code_ptr[code_index+10] = (uint8_t)(((uint16_t)&pc) + 1);
+
+				// +11: LDA _a (restore guest A)
+				code_ptr[code_index+11] = 0xA5;
+				code_ptr[code_index+12] = (uint8_t)((uint16_t)&a);
+
+				// +13: PLP (restore guest flags)
+				code_ptr[code_index+13] = 0x28;
+
+				// +14: JMP $FFF0 (PATCHABLE)
+				code_ptr[code_index+14] = 0x4C;
+				code_ptr[code_index+15] = FFF0_DISPATCH & 0xFF;
+				code_ptr[code_index+16] = (FFF0_DISPATCH >> 8) & 0xFF;
+
+#ifndef ENABLE_IR
+				uint16_t jmp_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 15;
+				opt2_record_pending_branch_safe(0, jmp_operand_addr, flash_code_bank, target_pc, 0);
+#endif
+
+				pc = target_pc;
+				code_index += 17;
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			} else {
+				enable_interpret();
+			}
+#else  /* !ENABLE_FFF0_TEMPLATES */
+			// --- Old 9-byte patchable JMP pattern ---
 			if (code_index + 9 < CODE_SIZE) {
 				// +0: PHP
 				code_ptr[code_index] = 0x08;
@@ -2190,6 +2408,7 @@ static uint8_t recompile_opcode_b2_inner()
 			} else {
 				enable_interpret();
 			}
+#endif  /* ENABLE_FFF0_TEMPLATES */
 			break;
 		}
 		
@@ -2620,14 +2839,24 @@ static uint8_t recompile_opcode_b2()
 		uint8_t *buf = cache_code[cache_index] + ci_before;
 		uint8_t delta = (uint8_t)(code_index - ci_before);
 
-		/* Scan emitted bytes for patchable JMP $FFFF */
+		/* Scan emitted bytes for patchable JMP $FFFF or JMP $FFF0 */
 		uint8_t patchable_jmp_pos = 0xFF; /* 0xFF = not found */
+		uint8_t patchable_is_fff0 = 0;
 		{
 			uint8_t j;
 			for (j = 0; (uint8_t)(j + 2) < delta; j++) {
-				if (buf[j] == 0x4C && buf[j+1] == 0xFF && buf[j+2] == 0xFF) {
-					patchable_jmp_pos = j;
-					break;
+				if (buf[j] == 0x4C && buf[j+2] == 0xFF) {
+					if (buf[j+1] == 0xFF) {
+						patchable_jmp_pos = j;
+						break;
+					}
+#ifdef ENABLE_FFF0_TEMPLATES
+					if (buf[j+1] == (FFF0_DISPATCH & 0xFF)) {
+						patchable_jmp_pos = j;
+						patchable_is_fff0 = 1;
+						break;
+					}
+#endif
 				}
 			}
 		}
@@ -2650,12 +2879,47 @@ static uint8_t recompile_opcode_b2()
 			if (ir_ctx.deferred_patch_count < IR_MAX_DEFERRED_PATCHES) {
 				ir_deferred_patch_t *dp = &ir_ctx.deferred_patches[ir_ctx.deferred_patch_count];
 				uint8_t p = patchable_jmp_pos;
+#ifdef ENABLE_FFF0_TEMPLATES
+				if (patchable_is_fff0) {
+					/* $FFF0 template: target_pc is in the inline LDA#/STA _pc
+					 * sequence preceding the JMP.
+					 *
+					 * Branch (19B): ...PHP/LDA#lo/STA/LDA#hi/STA/LDA_a/PLP/Bxx/JMP
+					 *   JMP is at p, Bxx at p-2.
+					 *   LDA#lo byte at p-12, LDA#hi byte at p-8.
+					 *
+					 * JMP (17B):    ...PHP/LDA#lo/STA/LDA#hi/STA/LDA_a/PLP/JMP
+					 *   JMP is at p, PLP at p-1.
+					 *   LDA#lo byte at p-10, LDA#hi byte at p-6.
+					 */
+					/* Detect branch vs JMP: Bxx_inv at p-2 has bit pattern xxxx0000 in low nibble */
+					if (p >= 2 && (buf[p - 2] & 0x1F) == 0x10) {
+						/* Branch template (19B) */
+						dp->target_pc = (uint16_t)buf[p - 12]
+						              | ((uint16_t)buf[p - 8] << 8);
+						dp->is_branch = DEFERRED_PATCH_FFF0_BRANCH;
+						uint8_t bop = buf[p - 2];
+						/* The branch is INVERTED, so the original opcode is the
+						 * opposite.  For carry-live detection, check if the
+						 * ORIGINAL branch reads carry: BCC→BCS and BCS→BCC.
+						 * Inverted BCC(90) means original was BCS(B0) and vice versa. */
+						ir_ctx.carry_live_at_exit = (bop == 0x90 || bop == 0xB0) ? 1 : 0;
+					} else {
+						/* JMP template (17B) */
+						dp->target_pc = (uint16_t)buf[p - 10]
+						              | ((uint16_t)buf[p - 6] << 8);
+						dp->is_branch = DEFERRED_PATCH_FFF0_JMP;
+					}
+				} else
+#endif
+				{
+				/* Old templates */
 				/* 21-byte branch template: Bxx $03 immediately before JMP */
 				if (p >= 2 && buf[p - 1] == 0x03 && (buf[p - 2] & 0x1F) == 0x10) {
 					/* target_pc is LDA# at +7 (lo) and +11 (hi) from JMP */
 					dp->target_pc = (uint16_t)buf[p + 7]
 					              | ((uint16_t)buf[p + 11] << 8);
-					dp->is_branch = 1;
+					dp->is_branch = DEFERRED_PATCH_BRANCH_OLD;
 					/* Tell optimizer whether this branch reads carry.
 					 * BCC=$90 BCS=$B0 read carry; all others don't. */
 					{ uint8_t bop = buf[p - 2];
@@ -2664,7 +2928,8 @@ static uint8_t recompile_opcode_b2()
 				} else {
 					/* 9-byte JMP template — target is where pc was set */
 					dp->target_pc = pc;
-					dp->is_branch = 0;
+					dp->is_branch = DEFERRED_PATCH_JMP_OLD;
+				}
 				}
 				ir_ctx.deferred_patch_count++;
 			}

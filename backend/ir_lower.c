@@ -369,11 +369,15 @@ uint8_t ir_lower(ir_ctx_t *ctx, uint8_t *output_buf, uint8_t max_size)
  * ir_resolve_deferred_patches — Phase B post-lowering patch resolution
  *
  * After ir_lower() rewrites cache_code[0][], patchable templates
- * (21-byte branch, 9-byte JMP) may have shifted position.  This
- * function scans the lowered buffer for JMP $FFFF ($4C $FF $FF)
- * patterns, matches them 1:1 (in order) with the deferred_patches[]
+ * (21-byte branch, 9-byte JMP, $FFF0 variants) may have shifted
+ * position.  This function scans the lowered buffer for patchable
+ * JMP patterns, matches them 1:1 (in order) with the deferred_patches[]
  * table, and records the correct flash addresses via
  * opt2_record_pending_branch_safe.
+ *
+ * Pattern signatures:
+ *   Old templates:  $4C $FF $FF  (JMP $FFFF)
+ *   $FFF0 templates: $4C $F0 $FF  (JMP $FFF0)
  *
  * Must be called while bank 1 is mapped (lives in bank1 code).
  * Accesses WRAM globals directly to avoid argument-passing overhead
@@ -397,9 +401,30 @@ void ir_resolve_deferred_patches(void)
     uint8_t *buf = cache_code[0];
 
     for (uint8_t p = 0; (uint8_t)(p + 2) < len && dp_idx < ir_ctx.deferred_patch_count; p++) {
+        uint8_t type = ir_ctx.deferred_patches[dp_idx].is_branch;
+
+#ifdef ENABLE_FFF0_TEMPLATES
+        // $FFF0 templates: scan for $4C $F0 $FF (JMP $FFF0)
+        if ((type == DEFERRED_PATCH_FFF0_BRANCH || type == DEFERRED_PATCH_FFF0_JMP)
+            && buf[p] == 0x4C
+            && buf[p + 1] == (FFF0_DISPATCH & 0xFF)
+            && buf[p + 2] == ((FFF0_DISPATCH >> 8) & 0xFF))
+        {
+            uint16_t jmp_op_addr = flash_code_address + BLOCK_PREFIX_SIZE + p + 1;
+            // $FFF0 templates: branch_addr = 0 (no branch byte to patch)
+            opt2_record_pending_branch_safe(
+                0, jmp_op_addr,
+                flash_code_bank,
+                ir_ctx.deferred_patches[dp_idx].target_pc, 0);
+            dp_idx++;
+            continue;
+        }
+#endif
+
+        // Old templates: scan for $4C $FF $FF (JMP $FFFF)
         if (buf[p] == 0x4C && buf[p + 1] == 0xFF && buf[p + 2] == 0xFF) {
             uint16_t jmp_op_addr = flash_code_address + BLOCK_PREFIX_SIZE + p + 1;
-            if (ir_ctx.deferred_patches[dp_idx].is_branch) {
+            if (type == DEFERRED_PATCH_BRANCH_OLD) {
                 /* 21-byte branch template: branch offset byte at JMP - 1 */
                 uint16_t br_off_addr = flash_code_address + BLOCK_PREFIX_SIZE + p - 1;
                 opt2_record_pending_branch_safe(

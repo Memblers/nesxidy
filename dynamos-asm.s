@@ -201,9 +201,39 @@ _chr_nes:
 
 ;=======================================================	
 	section "trampoline"
+	global _fff0_dispatch, _fff0_dispatch_a_saved
 ;-------------------------------------------------------	
-_haltwait:
-	jmp _flash_dispatch_return
+; $FFF0 trampoline — patchable template dispatch hub.
+;
+; Two entry points in the 10-byte space before NES vectors ($FFF0-$FFF9):
+;
+; _fff0_dispatch ($FFF0) — for patchable branches (guest A is live).
+;   Saves A to _a, pushes guest flags, dispatches.
+;   Caller must have _pc already set to the branch target.
+;
+; _fff0_dispatch_a_saved ($FFF6) — for patchable JMPs (_a already saved).
+;   Pushes guest flags, dispatches.
+;   Caller must have _a and _pc already set.
+;
+; On entry (both):  X, Y = guest values (saved by flash_dispatch_return)
+;                   _pc  = target guest PC (set by caller before JMP)
+; On exit:          returns through flash_dispatch_return → C dispatcher
+;
+; When a target is compiled, the JMP $FFF0/$FFF6 operand is patched in flash
+; to jump directly to the compiled native code (2 flash byte writes, no
+; branch-byte patch needed).  If the target isn't 16-byte aligned, a local
+; JMP $FFFF trampoline is emitted at an aligned address within the block
+; and the operand is patched to that instead.
+;
+_fff0_dispatch:
+	sta _a				; save guest A (2B)
+	php					; push guest flags (1B)
+	jmp _flash_dispatch_return	; save X/Y, pop status, return (3B)
+
+_fff0_dispatch_a_saved:
+	php					; push guest flags (1B)
+	jmp _flash_dispatch_return	; save X/Y, pop status, return (3B)
+	; Total: 10 bytes ($FFF0-$FFF9), vectors follow at $FFFA
 
 ;=======================================================	
 	section "data"

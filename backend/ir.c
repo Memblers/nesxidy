@@ -208,11 +208,36 @@ uint8_t ir_emit_raw_op_abs(ir_ctx_t *ctx, uint8_t native_opcode, uint16_t addr)
 }
 
 /* -------------------------------------------------------------------
- * ir_emit_template — record a template blob reference
+ * ir_get_template_flags — determine IR flags for a template ID
+ * Templates that write to registers (A, X, Y) now have known flags
+ * instead of always being 0.  This allows optimization passes to
+ * understand and penetrate them.
+ * ------------------------------------------------------------------- */
+static inline uint8_t ir_get_template_flags(uint8_t tmpl_id)
+{
+    /* Only templates that write A get the W:A flag (0x10).
+     * All others don't write registers (PHA, PHP, STA_INDY read A).
+     * Branch/JMP templates don't affect registers. */
+    switch (tmpl_id) {
+        case IR_TMPL_PLA:           /* PLA writes A */
+        case IR_TMPL_JSR:           /* JSR writes A */
+        case IR_TMPL_NJSR:          /* NJSR writes A */
+        case IR_TMPL_NRTS:          /* RTS writes A */
+        case IR_TMPL_INDY_READ:     /* INDY read writes A */
+        case IR_TMPL_INDX:          /* INDX writes A */
+            return 0x10;            /* IR_W_A */
+        default:
+            return 0;               /* No register writes */
+    }
+}
+
+/* -------------------------------------------------------------------
+ * ir_emit_template — record a template blob reference with flags
  * ------------------------------------------------------------------- */
 uint8_t ir_emit_template(ir_ctx_t *ctx, uint8_t tmpl_id)
 {
-    return ir_emit(ctx, IR_TEMPLATE, 0, (uint16_t)tmpl_id);
+    uint8_t flags = ir_get_template_flags(tmpl_id);
+    return ir_emit(ctx, IR_TEMPLATE, flags, (uint16_t)tmpl_id);
 }
 
 /* -------------------------------------------------------------------

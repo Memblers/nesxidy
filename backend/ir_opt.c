@@ -408,17 +408,17 @@ uint8_t ir_opt_redundant_load(ir_ctx_t *ctx)
 
         /* --- Update register shadow --- */
         if (n->op == IR_LDA_IMM) { r->a_val = (uint8_t)n->operand; r->a_known = 1; }
-        else if (writes_a(n->op))  { r->a_known = 0; }
+        else if (writes_a(n->op) || (n->op == IR_TEMPLATE && (n->flags & 0x10))) { r->a_known = 0; }
 
         if (n->op == IR_LDX_IMM) { r->x_val = (uint8_t)n->operand; r->x_known = 1; }
         else if (n->op == IR_INX && r->x_known) { r->x_val = (uint8_t)(r->x_val + 1); }
         else if (n->op == IR_DEX && r->x_known) { r->x_val = (uint8_t)(r->x_val - 1); }
-        else if (writes_x(n->op))  { r->x_known = 0; }
+        else if (writes_x(n->op) || (n->op == IR_TEMPLATE && (n->flags & 0x20))) { r->x_known = 0; }
 
         if (n->op == IR_LDY_IMM) { r->y_val = (uint8_t)n->operand; r->y_known = 1; }
         else if (n->op == IR_INY && r->y_known) { r->y_val = (uint8_t)(r->y_val + 1); }
         else if (n->op == IR_DEY && r->y_known) { r->y_val = (uint8_t)(r->y_val - 1); }
-        else if (writes_y(n->op))  { r->y_known = 0; }
+        else if (writes_y(n->op) || (n->op == IR_TEMPLATE && (n->flags & 0x40))) { r->y_known = 0; }
 
         /* --- Update ZP shadow cache --- */
         /* On STA/STX/STY zp with known register: record in cache.

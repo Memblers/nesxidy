@@ -80,8 +80,13 @@ target_bank:	reserve 1
 	align 1
 ;-------------------------------------------------------	
 	align 8
+	if PLATFORM_NES
+_RAM_BASE:	reserve $800		; Full 2 KB NES internal RAM
+_CHARACTER_RAM_BASE = _RAM_BASE + $400	; alias — keeps C references valid
+	else
 _RAM_BASE:	reserve $400
 _CHARACTER_RAM_BASE:	reserve $800
+	endif
 	section "nesram"
 	align 8
 _SCREEN_RAM_BASE: reserve $400
@@ -291,6 +296,8 @@ _xbank_addr = * + 1
 	zpage _clockticks6502
 ;-------------------------------------------------------
 _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
+	lda #0
+	sta temp		; INIT temp to 0 (required: ROL temp uses residual value)
 	lda _pc+1		; D14-D15 - bank number
 	asl
 	rol temp
@@ -351,29 +358,15 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	lda target_bank
 	sta $C000
 
-	; --- Block cycle counting ---
-	; Header byte +6 = pre-computed 6502 cycle count.
-	; Code starts at header + 8, so cycles = *(dispatch_addr - 2).
-	; Add to 32-bit clockticks6502 for frame timing.
-	; Cost: ~25 NES cycles per dispatch (~0.2% overhead).
-	lda .dispatch_addr
-	sec
-	sbc #2
-	sta addr_lo
-	lda .dispatch_addr + 1
-	sbc #0
-	sta addr_hi
-	ldy #0
-	lda (addr_lo),y
-	cmp #$FF			; $FF = erased flash (no cycle data)
-	beq .no_cycles
-	clc
-	adc _clockticks6502
-	sta _clockticks6502
-	bcc .no_cycles
-	inc _clockticks6502+1
-	bne .no_cycles
-	inc _clockticks6502+2
+	; --- Block cycle counting (DISABLED) ---
+	; DISABLED: clockticks6502 ($3F-$42) overlaps guest zero-page state.
+	; For normal block entries, header byte +6 = $FF (>= $FE → skip),
+	; so no corruption.  But fence mid-block entries read random compiled
+	; code bytes at *(native_addr-2); values < $FE get added to $3F and
+	; carry propagates into $40/$41 — corrupting guest variables (e.g.
+	; DK's nfTrigger at $40).  ENABLE_BLOCK_CYCLES is disabled, so
+	; skip unconditionally.  When re-enabled, fence entries will need
+	; a proper solution (mini-headers or a non-ZP cycle accumulator).
 .no_cycles:
 
 	; NOTE: Block-complete sentinel ($AA at header+7 = dispatch_addr-1)
@@ -465,11 +458,20 @@ _native_jsr_trampoline:
 	; A = 1: needs recompile
 	; A = 2: needs interpret
 	beq .njsr_check_vblank	; A=0 → block executed, continue
-	bne .njsr_exit			; A!=0 → bail to C for compile or interpret
-	; NOTE: inline interpret was removed — it caused hangs because the
-	; trampoline absorbs vblanks, preventing IRQ dispatch.  The C-level
-	; guard in run_6502 case 1 handles interpret-only PCs cheaply.
-	
+	cmp #2
+	beq .njsr_interpret		; A=2 → inline interpret
+	jmp .njsr_exit			; A=1 → bail to C for compile
+
+.njsr_interpret:
+	; Inline interpret: switch to bank 0 and run one guest instruction.
+	; Avoids expensive C round-trip (~260 cycles) for interpret-only PCs.
+	lda #0
+	sta _mapper_prg_bank
+	lda _mapper_chr_bank
+	sta $C000
+	jsr _interpret_6502
+	; Fall through to check vblank and continue loop
+
 .njsr_check_vblank:
 	; Check for vblank: if NMI counter ($26) != last_nmi_frame, absorb it
 	; and continue looping.
@@ -825,6 +827,7 @@ _native_sta_indy_tmpl_size: db (_native_sta_indy_tmpl_end - _native_sta_indy_tmp
 
 ;=======================================================
 	section "data"
+	if !(PLATFORM_NES)
 	global _screen_diff_build_list
 	global _screen_shadow, _vram_update_list, _vram_list_pos
 ;-------------------------------------------------------
@@ -983,12 +986,15 @@ _screen_diff_build_list:
 	inx
 	stx _vram_list_pos
 	jmp .p3_next
+	endif  ; !(PLATFORM_NES) — end of screen_diff_build_list + BSS
 
 ;-------------------------------------------------------
-; BSS for shadow buffer and update list
+; BSS for shadow buffer and update list (Exidy only)
 	section "bss"
+	if !(PLATFORM_NES)
 _screen_shadow:		reserve $400	; 1024 bytes
 _vram_update_list:	reserve 97	; VRAM_UPDATE_MAX + 1 (terminator)
+	endif
 	section "data"
 
 ;=======================================================

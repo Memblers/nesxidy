@@ -23,6 +23,16 @@
 #include "static_analysis.h"
 #include "metrics.h"
 
+#ifdef ENABLE_IR
+#include "../backend/ir.h"
+extern ir_ctx_t ir_ctx;
+extern uint8_t ir_optimize(ir_ctx_t *ctx);
+extern uint8_t ir_optimize_ext(ir_ctx_t *ctx);
+extern uint8_t ir_lower(ir_ctx_t *ctx, uint8_t *buf, uint8_t buf_size);
+extern uint8_t ir_opt_rmw_fusion(ir_ctx_t *ctx);
+extern void ir_resolve_deferred_patches(void);
+#endif
+
 // -------------------------------------------------------------------------
 // External references
 // -------------------------------------------------------------------------
@@ -124,7 +134,7 @@ uint8_t sa_subroutine_list[SA_SUBROUTINE_MAX * 3];
 
 static uint8_t sa_bitmap_is_unknown(uint16_t addr)
 {
-    uint16_t byte_offset = addr >> 3;
+    uint16_t byte_offset = (addr & 0x7FFF) >> 3;
     uint8_t bit_mask = 1 << (addr & 7);
     uint8_t val = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS,
                                  SA_BITMAP_BASE + byte_offset);
@@ -133,7 +143,7 @@ static uint8_t sa_bitmap_is_unknown(uint16_t addr)
 
 static void sa_bitmap_mark(uint16_t addr)
 {
-    uint16_t byte_offset = addr >> 3;
+    uint16_t byte_offset = (addr & 0x7FFF) >> 3;
     uint8_t bit_mask = 1 << (addr & 7);
     uint8_t cur = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS,
                                  SA_BITMAP_BASE + byte_offset);
@@ -688,7 +698,12 @@ static uint8_t sa_compile_one_block(void)
 
         setup_flash_pc_tables(pc_old);
 
-        if (sa_compile_pass == 2)
+        if (sa_compile_pass == 2
+#ifdef ENABLE_IR
+            && !ir_ctx.enabled  /* IR active: skip per-instruction writes,
+                                 * bulk write after ir_lower instead */
+#endif
+        )
         {
             // Pass 2: write code bytes to flash immediately
             for (uint8_t i = 0; i < instr_len; i++)
@@ -712,6 +727,15 @@ static uint8_t sa_compile_one_block(void)
             cache_flag[0] &= ~READY_FOR_NEXT;
         }
 
+#ifdef ENABLE_IR
+        /* When IR is active in pass 2, skip per-instruction PC flag writes.
+         * The pre-optimization native offsets would be wrong after ir_lower.
+         * Block entry + fence PCs are published after lowering instead.
+         * The interpreted-flag repair pass catches remaining mid-block PCs.
+         * Pass 1 and non-IR blocks still write per-instruction flags. */
+        if (!(sa_compile_pass == 2 && ir_ctx.enabled))
+#endif
+        {
         if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
         {
             flash_cache_pc_update(native_offset, INTERPRETED);
@@ -735,6 +759,7 @@ static uint8_t sa_compile_one_block(void)
             }
 #endif
         }
+        } /* end !ir_ctx.enabled guard */
 
     } while (cache_flag[0] & READY_FOR_NEXT);
 
@@ -751,6 +776,47 @@ static uint8_t sa_compile_one_block(void)
     {
         uint16_t exit_pc = pc;
 
+#ifdef ENABLE_IR
+        // --- IR optimisation + lowering for SA pass 2 ---
+        // When IR recorded a block in pass 2, run the full optimise/lower
+        // pipeline (same as the dynamic path in run_6502).  The lowered
+        // bytes replace cache_code[0]; code_index is updated.  The bulk
+        // code write happens here; PC publishing is deferred until AFTER
+        // the header + epilogue are written (see sa_compile_pass==2 block
+        // below) to ensure the complete block is in flash before any
+        // dispatch can enter it.
+        if (sa_compile_pass == 2 && ir_ctx.enabled) {
+            uint8_t _sa_ir_bank = mapper_prg_bank;
+            uint8_t ir_bytes_before = code_index;
+            bankswitch_prg(BANK_IR_OPT);
+            ir_optimize(&ir_ctx);
+            bankswitch_prg(BANK_COMPILE);
+            ir_optimize_ext(&ir_ctx);
+            bankswitch_prg(BANK_EMIT);
+            ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
+            uint8_t lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
+            ir_resolve_deferred_patches();
+            bankswitch_prg(_sa_ir_bank);
+
+            if (lowered_size) {
+                code_index = lowered_size;
+                /* NOP-pad gap to prevent template BEQ offset corruption
+                 * (same guard as the dynamic path in run_6502). */
+                while (code_index < ir_bytes_before)
+                    cache_code[0][code_index++] = 0xEA;  /* NOP */
+            }
+
+            // Bulk write all code bytes to flash (epilogue written later)
+            for (uint8_t bw = 0; bw < code_index; bw++) {
+                flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + bw,
+                                   flash_code_bank, cache_code[0][bw]);
+            }
+
+            // NOTE: PC publishing (entry + fences) deferred to after
+            // epilogue write — see the sa_compile_pass==2 block below.
+        }
+#endif
+
 #ifdef ENABLE_PEEPHOLE
         // Flush deferred PLP from peephole before epilogue.
         // Must also write to flash — the compile loop only wrote bytes
@@ -758,7 +824,11 @@ static uint8_t sa_compile_one_block(void)
         // epilogue_start, so this byte would otherwise stay $FF (erased).
         if (block_flags_saved) {
             *(volatile uint8_t *)&cache_code[0][code_index] = 0x28;  // PLP
-            if (sa_compile_pass == 2) {
+            if (sa_compile_pass == 2
+#ifdef ENABLE_IR
+                && !ir_ctx.enabled  /* IR handles PLP elision internally */
+#endif
+            ) {
                 flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index,
                                    flash_code_bank, 0x28);
             }
@@ -841,6 +911,43 @@ static uint8_t sa_compile_one_block(void)
                 flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + i,
                                    flash_code_bank, cache_code[0][i]);
             }
+
+            // Block-complete sentinel
+            flash_byte_program(flash_code_address + 7, flash_code_bank, 0xAA);
+
+#ifdef ENABLE_IR
+            // --- Deferred IR PC publishing ---
+            // Now that header + epilogue + all code are in flash, it's safe
+            // to publish PC table entries.  This matches the dynamic path's
+            // order (write everything, then publish) and ensures dispatch
+            // never enters a block with incomplete epilogue.
+            if (ir_ctx.enabled) {
+                setup_flash_pc_tables(entry_pc);
+                flash_cache_pc_update(0, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+                opt2_notify_block_compiled(entry_pc,
+                    flash_code_address + BLOCK_HEADER_SIZE,
+                    flash_code_bank);
+#endif
+                // Publish mid-block fence PCs
+                if (ir_ctx.fence_count) {
+                    uint8_t _f;
+                    for (_f = 0; _f < ir_ctx.fence_count; _f++) {
+                        uint16_t fpc = ir_ctx.fence_guest_pc[_f];
+                        uint8_t  foff = ir_ctx.fence_native_offset[_f];
+                        // Safety: don't publish fences past main code
+                        if (foff >= epilogue_start) continue;
+                        setup_flash_pc_tables(fpc);
+                        flash_cache_pc_update(foff, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+                        opt2_notify_block_compiled(fpc,
+                            flash_code_address + BLOCK_HEADER_SIZE + foff,
+                            flash_code_bank);
+#endif
+                    }
+                }
+            }
+#endif  /* ENABLE_IR */
         }
 
         // After pass 2, a sector compaction sweep reclaims the wasted
@@ -1077,9 +1184,10 @@ static void sa_run_b2(void)
     // Two-pass static compilation with entry list.
     //
     // Architecture overview:
-    //   Bank 18 (BANK_ENTRY_LIST) holds a sequential table of 8-byte entries
+    //   Bank 18 (BANK_ENTRY_LIST) holds a sequential table of 16-byte entries
     //   written during pass 1.  Each entry records: entry_pc, exit_pc,
-    //   native_addr (code_index=0), code_bank, and code_len.  Pass 2
+    //   native_addr (code_index=0), code_bank, code_len, and the block's
+    //   exit register state (A/X/Y val+known) for boundary-state seeding.
     //   iterates this list (not the bitmap) to find block entry points and
     //   uses lookup_entry_list() for forward branch resolution.
     //
@@ -1177,7 +1285,31 @@ static void sa_run_b2(void)
             flash_byte_program(addr + 5, BANK_ENTRY_LIST, (uint8_t)(entry_native >> 8));
             flash_byte_program(addr + 6, BANK_ENTRY_LIST, flash_code_bank);
             flash_byte_program(addr + 7, BANK_ENTRY_LIST, code_index);  // code_len
-            entry_list_offset += 8;
+
+#ifdef ENABLE_IR
+            // Capture exit register state via IR optimizer shadow tracking.
+            // ir_opt_redundant_load walks forward and snapshots A/X/Y into
+            // ir_ctx.exit_* before each barrier reset.  The last snapshot
+            // is the state just before the terminal branch/JMP.
+            // Side effects (node kills) are harmless — pass 1 bytes are
+            // already in cache_code and are never used from flash.
+            if (ir_ctx.enabled) {
+                uint8_t _sa_saved_bank = mapper_prg_bank;
+                bankswitch_prg(BANK_IR_OPT);
+                ir_optimize(&ir_ctx);
+                bankswitch_prg(BANK_COMPILE);
+                ir_optimize_ext(&ir_ctx);
+                bankswitch_prg(_sa_saved_bank);
+                flash_byte_program(addr + 8,  BANK_ENTRY_LIST, ir_ctx.exit_a_val);
+                flash_byte_program(addr + 9,  BANK_ENTRY_LIST, ir_ctx.exit_a_known);
+                flash_byte_program(addr + 10, BANK_ENTRY_LIST, ir_ctx.exit_x_val);
+                flash_byte_program(addr + 11, BANK_ENTRY_LIST, ir_ctx.exit_x_known);
+                flash_byte_program(addr + 12, BANK_ENTRY_LIST, ir_ctx.exit_y_val);
+                flash_byte_program(addr + 13, BANK_ENTRY_LIST, ir_ctx.exit_y_known);
+            }
+#endif
+            // Bytes 14-15: reserved (left as 0xFF)
+            entry_list_offset += ENTRY_LIST_STRIDE;
             metrics_block_compiled(code_index);
         }
         else
@@ -1252,7 +1384,7 @@ static void sa_run_b2(void)
     // =====================================================================
     sa_compile_pass = 2;
 
-    for (uint16_t i = 0; i < entry_list_offset; i += 8)
+    for (uint16_t i = 0; i < entry_list_offset; i += ENTRY_LIST_STRIDE)
     {
         // Read entry from the list
         uint16_t addr = FLASH_BANK_BASE + i;
@@ -1266,6 +1398,51 @@ static void sa_run_b2(void)
 
         uint16_t entry_pc_val = ep_lo | ((uint16_t)ep_hi << 8);
         sa_block_exit_pc = ex_lo | ((uint16_t)ex_hi << 8);
+
+#ifdef ENABLE_IR
+        // Boundary-state seeding: look up predecessor block whose exit_pc
+        // matches this block's entry_pc.  Check the immediately preceding
+        // entry first (O(1) for sequential fall-through blocks), then scan
+        // the rest of the list for branch predecessors.
+        {
+            uint8_t seed_found = 0;
+            // Fast path: check previous entry in list
+            if (i >= ENTRY_LIST_STRIDE) {
+                uint16_t prev_addr = FLASH_BANK_BASE + i - ENTRY_LIST_STRIDE;
+                uint8_t pex_lo = peek_bank_byte(BANK_ENTRY_LIST, prev_addr + 2);
+                uint8_t pex_hi = peek_bank_byte(BANK_ENTRY_LIST, prev_addr + 3);
+                if (pex_lo == ep_lo && pex_hi == ep_hi) {
+                    ir_ctx.seed_a_val   = peek_bank_byte(BANK_ENTRY_LIST, prev_addr + 8);
+                    ir_ctx.seed_a_known = peek_bank_byte(BANK_ENTRY_LIST, prev_addr + 9);
+                    ir_ctx.seed_x_val   = peek_bank_byte(BANK_ENTRY_LIST, prev_addr + 10);
+                    ir_ctx.seed_x_known = peek_bank_byte(BANK_ENTRY_LIST, prev_addr + 11);
+                    ir_ctx.seed_y_val   = peek_bank_byte(BANK_ENTRY_LIST, prev_addr + 12);
+                    ir_ctx.seed_y_known = peek_bank_byte(BANK_ENTRY_LIST, prev_addr + 13);
+                    seed_found = 1;
+                }
+            }
+            // Slow path: scan entire list for any predecessor
+            if (!seed_found) {
+                for (uint16_t j = 0; j < entry_list_offset; j += ENTRY_LIST_STRIDE) {
+                    if (j == i) continue;
+                    uint16_t p_addr = FLASH_BANK_BASE + j;
+                    uint8_t jex_lo = peek_bank_byte(BANK_ENTRY_LIST, p_addr + 2);
+                    uint8_t jex_hi = peek_bank_byte(BANK_ENTRY_LIST, p_addr + 3);
+                    if (jex_lo == ep_lo && jex_hi == ep_hi) {
+                        ir_ctx.seed_a_val   = peek_bank_byte(BANK_ENTRY_LIST, p_addr + 8);
+                        ir_ctx.seed_a_known = peek_bank_byte(BANK_ENTRY_LIST, p_addr + 9);
+                        ir_ctx.seed_x_val   = peek_bank_byte(BANK_ENTRY_LIST, p_addr + 10);
+                        ir_ctx.seed_x_known = peek_bank_byte(BANK_ENTRY_LIST, p_addr + 11);
+                        ir_ctx.seed_y_val   = peek_bank_byte(BANK_ENTRY_LIST, p_addr + 12);
+                        ir_ctx.seed_y_known = peek_bank_byte(BANK_ENTRY_LIST, p_addr + 13);
+                        seed_found = 1;
+                        break;
+                    }
+                }
+            }
+            // If no predecessor found, IR_INIT will zero the seed fields
+        }
+#endif
 
         pc = entry_pc_val;
         if (!sa_compile_one_block())

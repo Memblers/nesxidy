@@ -179,6 +179,12 @@
 /* Two raw bytes — operand[7:0] = byte1, operand[15:8] = byte2 */
 #define IR_RAW_WORD      0xE3
 
+/* Mid-block PC fence — SA-identified branch target.
+ * operand = guest PC.  Emits zero native bytes but records the
+ * lowered offset so the PC table can be populated post-lowering.
+ * Acts as an optimization barrier (resets register shadow). */
+#define IR_PC_MARK       0xE4
+
 /* Dead node — removed by optimizer, skipped during lowering */
 #define IR_DEAD          0xFF
 
@@ -313,6 +319,28 @@ typedef struct {
     uint8_t stat_php_plp;         /* Pass 3: PLP/PHP pairs removed            */
     uint8_t stat_pair_rewrite;    /* Pass 4: pair rewrites + CMP #0           */
     uint8_t stat_rmw_fusion;     /* Pass 5: RMW fusion                       */
+
+    /* Mid-block PC fence table (IR_PC_MARK nodes).
+     * Populated during IR recording; native offsets filled by ir_lower.
+     * After lowering + flash write, untainted fences get published to
+     * the PC flag tables so dispatch can enter the block mid-stream
+     * instead of compiling a duplicate block. */
+#define IR_MAX_FENCES    16
+    uint8_t   fence_count;                       /* number of fences recorded */
+    uint8_t   fence_node_idx[IR_MAX_FENCES];     /* IR node index of each fence */
+    uint16_t  fence_guest_pc[IR_MAX_FENCES];     /* guest PC at each fence */
+    uint8_t   fence_native_offset[IR_MAX_FENCES];/* lowered byte offset (filled by ir_lower) */
+
+    /* Boundary-state seeding for cross-block optimization.
+     * seed_*: entry state from predecessor block (set before ir_optimize).
+     * exit_*: captured by ir_opt_redundant_load before final barrier reset.
+     * Only A/X/Y tracked — ZP/ABS shadow is too large to serialize. */
+    uint8_t   seed_a_val, seed_a_known;
+    uint8_t   seed_x_val, seed_x_known;
+    uint8_t   seed_y_val, seed_y_known;
+    uint8_t   exit_a_val, exit_a_known;
+    uint8_t   exit_x_val, exit_x_known;
+    uint8_t   exit_y_val, exit_y_known;
 } ir_ctx_t;
 
 /* ===================================================================
@@ -353,6 +381,10 @@ typedef struct {
     (ctx)->stat_php_plp = 0; \
     (ctx)->stat_pair_rewrite = 0; \
     (ctx)->stat_rmw_fusion = 0; \
+    (ctx)->fence_count = 0; \
+    /* NOTE: seed_* fields are NOT zeroed here — they are set by the
+     * caller before the compile loop for boundary-state seeding.
+     * For the dynamic path, they are zeroed explicitly in run_6502. */ \
 } while(0)
 
 /* Append one IR node (replaces ir_emit from bank1).
@@ -375,6 +407,24 @@ typedef struct {
         _p->byte_offset = (_byte_off); \
         _p->value = (_val); \
         (ctx)->tmpl_patch_count++; \
+    } \
+} while(0)
+
+/* Emit an IR_PC_MARK fence node and record metadata.
+ * _pc = guest PC at this fence point. */
+#define IR_EMIT_FENCE(ctx, _pc) do { \
+    if ((ctx)->node_count < IR_MAX_NODES && \
+        (ctx)->fence_count < IR_MAX_FENCES) { \
+        uint8_t _fi = (ctx)->fence_count; \
+        (ctx)->fence_node_idx[_fi] = (ctx)->node_count; \
+        (ctx)->fence_guest_pc[_fi] = (_pc); \
+        (ctx)->fence_native_offset[_fi] = 0; \
+        (ctx)->fence_count++; \
+        ir_node_t *_n = &(ctx)->nodes[(ctx)->node_count]; \
+        _n->op = IR_PC_MARK; \
+        _n->flags = 0; \
+        _n->operand = (uint16_t)(_pc); \
+        (ctx)->node_count++; \
     } \
 } while(0)
 
@@ -419,13 +469,17 @@ uint8_t ir_emit_raw_block(ir_ctx_t *ctx, const uint8_t *data, uint8_t len);
 /* Run all enabled optimization passes on the IR. Returns bytes saved. */
 uint8_t ir_optimize(ir_ctx_t *ctx);
 
+/* Extended passes in bank17 (pair_rewrite + clc_sec_sink).
+ * Call after ir_optimize() with BANK_COMPILE switched in. */
+uint8_t ir_optimize_ext(ir_ctx_t *ctx);
+
 /* Individual passes (called by ir_optimize, or directly for testing) */
 uint8_t ir_opt_redundant_load(ir_ctx_t *ctx);
 uint8_t ir_opt_dead_store(ir_ctx_t *ctx);
 uint8_t ir_opt_dead_load(ir_ctx_t *ctx);
 uint8_t ir_opt_php_plp_elision(ir_ctx_t *ctx);
-uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx);
-uint8_t ir_opt_clc_sec_sink(ir_ctx_t *ctx);
+uint8_t ir_opt_pair_rewrite(ir_ctx_t *ctx);   /* bank17 (ir_opt_ext.c) */
+uint8_t ir_opt_clc_sec_sink(ir_ctx_t *ctx);   /* bank17 (ir_opt_ext.c) */
 uint8_t ir_opt_rmw_fusion(ir_ctx_t *ctx);
 
 /* ===================================================================

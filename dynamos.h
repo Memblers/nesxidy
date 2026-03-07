@@ -236,7 +236,10 @@ extern uint8_t sa_compile_pass;
 extern uint16_t sa_block_exit_pc;
 
 // Entry list write cursor (offset within BANK_ENTRY_LIST, in bytes).
-// 8 bytes per entry: entry_pc(2), exit_pc(2), native_addr(2), bank(1), code_len(1).
+// 16 bytes per entry: entry_pc(2), exit_pc(2), native_addr(2), bank(1),
+// code_len(1), exit_a_val(1), exit_a_known(1), exit_x_val(1),
+// exit_x_known(1), exit_y_val(1), exit_y_known(1), reserved(2).
+#define ENTRY_LIST_STRIDE  16
 extern uint16_t entry_list_offset;
 
 // Pass 2: allocation size for the current block (set from entry list's code_len).

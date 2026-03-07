@@ -226,6 +226,23 @@ int main(void)
 
 	while (1)
 	{
+		// WRAM integrity sentinel: check first byte of dispatch_on_pc.
+		// If WRAM code area gets corrupted, halt immediately with diagnostics
+		// at $7EF0-$7EF5 so we can identify WHEN it happens.
+		{
+			extern void dispatch_on_pc(void);
+			volatile uint8_t *sentinel = (volatile uint8_t *)&dispatch_on_pc;
+			if (*sentinel != 0xA9) {  // LDA #imm opcode
+				*(volatile uint8_t *)(0x7EF0) = 0xDE;  // corruption marker
+				*(volatile uint8_t *)(0x7EF1) = *sentinel;  // corrupted value
+				*(volatile uint8_t *)(0x7EF2) = (uint8_t)(pc);
+				*(volatile uint8_t *)(0x7EF3) = (uint8_t)(pc >> 8);
+				*(volatile uint8_t *)(0x7EF4) = mapper_prg_bank;
+				*(volatile uint8_t *)(0x7EF5) = mapper_chr_bank;
+				for(;;);  // halt — check $7EF0-$7EF5 for corruption diagnostics
+			}
+		}
+
 #ifdef GAME_IDLE_PC
 		if (pc != GAME_IDLE_PC)
 #endif

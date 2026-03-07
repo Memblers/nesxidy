@@ -1,0 +1,6 @@
+# Mark binary files so git doesn't try to diff them
+*.nes binary
+*.o binary
+*.chr binary
+*.prg binary
+*.mlb binary

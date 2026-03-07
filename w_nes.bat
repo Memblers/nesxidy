@@ -7,7 +7,9 @@ rem
 rem Usage:   w_nes.bat [game]
 rem
 rem   game = donkeykong (default), battlecity, burgertime, defender,
-rem          galaxian, hypersports, loderunner, m82, zippyrace
+rem          galaxian, hypersports, loderunner, m82, zippyrace,
+rem          door, golf, karateka, mariobros, millipede, pooyan,
+rem          popeye, raidbung, skydestroyer, urbanchamp, warpman, yiear
 rem
 rem The script:
 rem   1. Splits the .nes file to .prg/.chr if needed
@@ -34,11 +36,25 @@ if /i "%GAME%"=="hypersports" set GAME_DEFINE=GAME_HYPER_SPORTS& set ROM_BASE=hy
 if /i "%GAME%"=="loderunner"  set GAME_DEFINE=GAME_LODE_RUNNER&  set ROM_BASE=loderunner
 if /i "%GAME%"=="m82"         set GAME_DEFINE=GAME_M82&          set ROM_BASE=m82
 if /i "%GAME%"=="zippyrace"   set GAME_DEFINE=GAME_ZIPPY_RACE&   set ROM_BASE=zippyrace
+if /i "%GAME%"=="door"        set GAME_DEFINE=GAME_DOOR&         set ROM_BASE=door
+if /i "%GAME%"=="golf"        set GAME_DEFINE=GAME_GOLF&         set ROM_BASE=golf
+if /i "%GAME%"=="karateka"    set GAME_DEFINE=GAME_KARATEKA&     set ROM_BASE=karateka
+if /i "%GAME%"=="mariobros"   set GAME_DEFINE=GAME_MARIO_BROS&   set ROM_BASE=mariobros
+if /i "%GAME%"=="millipede"   set GAME_DEFINE=GAME_MILLIPEDE&    set ROM_BASE=millipede
+if /i "%GAME%"=="pooyan"      set GAME_DEFINE=GAME_POOYAN&       set ROM_BASE=pooyan
+if /i "%GAME%"=="popeye"      set GAME_DEFINE=GAME_POPEYE&       set ROM_BASE=popeye
+if /i "%GAME%"=="raidbung"    set GAME_DEFINE=GAME_RAID_BUNG&    set ROM_BASE=raidbung
+if /i "%GAME%"=="skydestroyer" set GAME_DEFINE=GAME_SKY_DESTROYER& set ROM_BASE=skydestroyer
+if /i "%GAME%"=="urbanchamp"  set GAME_DEFINE=GAME_URBAN_CHAMP&  set ROM_BASE=urbanchamp
+if /i "%GAME%"=="warpman"     set GAME_DEFINE=GAME_WARPMAN&      set ROM_BASE=warpman
+if /i "%GAME%"=="yiear"       set GAME_DEFINE=GAME_YIEAR&        set ROM_BASE=yiear
 
 if "%GAME_DEFINE%"=="" (
     echo ERROR: Unknown game "%GAME%"
     echo Valid games: donkeykong battlecity burgertime defender
     echo              galaxian hypersports loderunner m82 zippyrace
+    echo              door golf karateka mariobros millipede pooyan
+    echo              popeye raidbung skydestroyer urbanchamp warpman yiear
     exit /b 1
 )
 
@@ -82,7 +98,7 @@ if %errorlevel% neq 0 (
 )
 
 rem --- Compile C files and link with pre-assembled object ---
-vc +mapper30 -+ -c99 -O2 -DPLATFORM_NES -D%GAME_DEFINE% mapper30.c nes.c fake6502.c dynamos.c frontend/cpu_6502.c platform/platform_nes.c backend/emit_6502.c backend/ir.c backend/ir_opt.c backend/ir_lower.c core/optimizer_v2_simple.c core/static_analysis.c core/metrics.c dynamos-asm-nes.o -llazynes -o %OUTPUT%
+vc +mapper30 -+ -c99 -O2 -DPLATFORM_NES -D%GAME_DEFINE% mapper30.c nes.c fake6502.c dynamos.c frontend/cpu_6502.c platform/platform_nes.c backend/emit_6502.c backend/ir.c backend/ir_opt.c backend/ir_opt_ext.c backend/ir_lower.c core/optimizer_v2_simple.c core/static_analysis.c core/metrics.c dynamos-asm-nes.o -llazynes -o %OUTPUT%
 if %errorlevel% neq 0 (
     echo BUILD FAILED
     exit /b %errorlevel%

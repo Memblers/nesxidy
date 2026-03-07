@@ -423,7 +423,12 @@ SECTIONS
   __DE = ADDR(data) + SIZEOF(data);
   __DC = LOADADDR(data);
 
-  __STACK = 0x8000;
+  /* Stack must start below $8000 so that (sp),Y never reaches ROM.
+     With sp_max = __STACK and Y_max = 255: __STACK + 255 must be < $8000,
+     so __STACK <= $7F01.  Use $7F00 for alignment.
+     For NES builds the Exidy-only screen_shadow ($7B00-$7EFF, 1 KB)
+     becomes an implicit stack guard — harmless overlap.             */
+  __STACK = 0x7F00;
 
   ___heap = ADDR(bss) + SIZEOF(bss);
   ___heapend = __STACK;

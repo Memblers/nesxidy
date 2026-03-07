@@ -222,6 +222,7 @@ static uint8_t node_byte_size(const ir_ctx_t *ctx, uint8_t idx)
     uint8_t op = n->op;
 
     if (op == IR_DEAD) return 0;
+    if (op == IR_PC_MARK) return 0;  /* fence — zero native bytes */
     if (op == IR_RAW_BYTE) return 1;
     if (op == IR_RAW_WORD) return 2;
 
@@ -286,6 +287,18 @@ uint8_t ir_lower(ir_ctx_t *ctx, uint8_t *output_buf, uint8_t max_size)
         uint8_t op = n->op;
 
         if (op == IR_DEAD) continue;
+
+        /* --- PC fence (zero bytes, record native offset) --- */
+        if (op == IR_PC_MARK) {
+            /* Find this node's fence slot and record the current pos */
+            for (uint8_t f = 0; f < ctx->fence_count; f++) {
+                if (ctx->fence_node_idx[f] == i) {
+                    ctx->fence_native_offset[f] = pos;
+                    break;
+                }
+            }
+            continue;
+        }
 
         /* --- Raw byte --- */
         if (op == IR_RAW_BYTE) {

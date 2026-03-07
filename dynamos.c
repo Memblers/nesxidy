@@ -192,6 +192,16 @@ uint8_t sa_block_alloc_size = 0;
 // Value 0 = no entry at that offset.  Otherwise code_index = value - 1.
 uint8_t block_ci_map[64];
 
+#ifdef ENABLE_IR
+// Mid-block fence targets: PCs identified by ROM pre-scan as branch/JMP
+// targets within the current block.  Used by recompile_opcode_b2() to
+// selectively insert IR_PC_MARK fences at real branch targets instead
+// of at every SA-known address (which would kill IR optimization).
+#define IR_FENCE_TARGET_MAX 8
+static uint8_t  ir_fence_target_count;
+static uint16_t ir_fence_targets[IR_FENCE_TARGET_MAX];
+#endif
+
 // Sector-based free-form allocator:
 // Each 4KB flash sector has a bump pointer tracking the next free offset.
 // Stored in WRAM (mutable).  Zeroed at boot by flash_cache_init_sectors().
@@ -502,7 +512,7 @@ void run_6502(void)
 	return;  // VBlank / idle / RTI exit — return to main loop
 batch_exit:  // case 1 (compile needed) jumps here
 #endif
-	
+
 	// Guard: don't compile addresses outside the ROM range.
 	// Transient stack corruption (or IO-space PCs) can produce
 	// out-of-range addresses.  Compiling them would read garbage
@@ -574,6 +584,51 @@ batch_exit:  // case 1 (compile needed) jumps here
 	// Native code starts at flash_code_address + BLOCK_HEADER_SIZE.
 	// Set up PC table pointers for the entry PC.
 	setup_flash_pc_tables(pc);
+
+#ifdef ENABLE_IR
+	// --- Pre-scan ROM for branch targets within this block ---
+	// Walk the guest ROM from entry_pc, find conditional branches and
+	// forward JMPs, record their targets.  These are the only mid-block
+	// PCs worth fencing (places other code might branch into).
+	{
+		ir_fence_target_count = 0;
+		uint16_t scan = entry_pc;
+		uint8_t scan_count = 0;  // limit scan to ~32 instructions
+		while (scan >= 0x8000 && scan <= 0xFFFF && scan_count < 32) {
+			uint8_t sop = read6502(scan);
+			uint8_t mode = addrmodes[sop];
+			uint8_t slen;
+			switch (mode) {
+				case imp: case acc: slen = 1; break;
+				case imm: case zp: case zpx: case zpy:
+				case rel: case indx: case indy: slen = 2; break;
+				default: slen = 3; break;
+			}
+			/* Conditional branch: record target if within block range */
+			if (mode == rel) {
+				int8_t boff = (int8_t)read6502(scan + 1);
+				uint16_t btgt = scan + 2 + boff;
+				if (btgt > entry_pc && btgt < entry_pc + 128 &&
+				    ir_fence_target_count < IR_FENCE_TARGET_MAX) {
+					/* Avoid duplicates */
+					uint8_t dup = 0;
+					for (uint8_t d = 0; d < ir_fence_target_count; d++) {
+						if (ir_fence_targets[d] == btgt) { dup = 1; break; }
+					}
+					if (!dup)
+						ir_fence_targets[ir_fence_target_count++] = btgt;
+				}
+			}
+			/* Stop at terminators */
+			if (sop == 0x60 || sop == 0x40 || sop == 0x00)  /* RTS/RTI/BRK */
+				break;
+			if (sop == 0x4C || sop == 0x6C)  /* JMP abs / JMP (ind) */
+				break;
+			scan += slen;
+			scan_count++;
+		}
+	}
+#endif  /* ENABLE_IR */
 
 #if OPT_BLOCK_METADATA
 	// Track branches for metadata
@@ -649,13 +704,17 @@ batch_exit:  // case 1 (compile needed) jumps here
 #ifdef ENABLE_PEEPHOLE
 		// Account for deferred PLP byte (block_flags_saved) that will be
 		// flushed before the next instruction or in the epilogue.
-		if ((code_index + block_flags_saved) > (CODE_SIZE - 6))
+		if ((code_index + block_flags_saved) > (CODE_SIZE - 6)
+		    || code_index < code_index_old)  // uint8 overflow detection
 #else
-		if (code_index > (CODE_SIZE - 6))
+		if (code_index > (CODE_SIZE - 6)
+		    || code_index < code_index_old)  // uint8 overflow detection
 #endif
 		{
 			cache_flag[0] |= OUT_OF_CACHE;
 			cache_flag[0] &= ~READY_FOR_NEXT;
+			if (code_index < code_index_old)
+				code_index = code_index_old;  // revert to pre-overflow value
 		}
 		
 		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
@@ -758,10 +817,60 @@ batch_exit:  // case 1 (compile needed) jumps here
 			} else {
 			bankswitch_prg(BANK_IR_OPT);
 			ir_optimize(&ir_ctx);
+			bankswitch_prg(BANK_COMPILE);
+			ir_optimize_ext(&ir_ctx);
 			bankswitch_prg(BANK_EMIT);
 			/* Pass 5+6: RMW fusion + register substitution in bank1 */
 			ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
 			lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
+			/* DIAG: check if PLP missing after dirty-flag PHP/INC $32 */
+			if (lowered_size > 5) {
+				uint8_t _dd;
+				for (_dd = 0; _dd + 3 < lowered_size; _dd++) {
+					if (cache_code[0][_dd] == 0x08 &&
+					    cache_code[0][_dd+1] == 0xE6 &&
+					    cache_code[0][_dd+2] == 0x32 &&
+					    cache_code[0][_dd+3] != 0x28) {
+						*(volatile uint8_t *)0x04F0 = 0xDD;
+						*(volatile uint8_t *)0x04F1 = ir_ctx.node_count;
+						*(volatile uint8_t *)0x04F2 = lowered_size;
+						*(volatile uint8_t *)0x04F3 = _dd;
+						break;
+					}
+				}
+			}
+			}
+			/* Post-lowering safety: verify that NRTS/JSR/NJSR template
+			 * blocks still have the leading PHP (0x08) in the lowered
+			 * output.  The IR optimizer should preserve the IR_TEMPLATE
+			 * node, but as a defence-in-depth measure, scan for the
+			 * template body signature (STA _a; STX _x = 85 54 86 55)
+			 * and re-insert PHP if it was stripped.  This guards against
+			 * optimizer bugs that remove the PHP and break the dispatch
+			 * return stack contract. */
+			if (lowered_size > 4) {
+				uint8_t *lb = cache_code[0];
+				/* Template body: STA _a (85 XX) STX _x (86 XX) STY _y (84 XX)
+				 * where XX = &a, &x, &y ZP addresses. Check for the unique
+				 * 6-byte signature starting with STA _a. */
+				uint8_t sa = (uint8_t)((uint16_t)&a);
+				uint8_t sx = (uint8_t)((uint16_t)&x);
+				for (uint8_t k = 0; k + 5 < lowered_size; k++) {
+					if (lb[k]   == 0x85 && lb[k+1] == sa &&
+					    lb[k+2] == 0x86 && lb[k+3] == sx) {
+						/* Found template body at lb[k]. PHP should be at lb[k-1]. */
+						if (k == 0 || lb[k-1] != 0x08) {
+							/* PHP missing — shift right and insert. */
+							if (lowered_size < CACHE_CODE_BUF_SIZE) {
+								for (uint8_t s = lowered_size; s > k; s--)
+									lb[s] = lb[s-1];
+								lb[k] = 0x08;  /* PHP */
+								lowered_size++;
+							}
+						}
+						break;
+					}
+				}
 			}
 			/* Update code_index to lowered size before resolving patches,
 			 * so ir_resolve_deferred_patches scans the correct range. */
@@ -788,8 +897,6 @@ batch_exit:  // case 1 (compile needed) jumps here
 			uint8_t ir_pass_dl = ir_ctx.stat_dead_load;
 			uint8_t ir_pass_pp = ir_ctx.stat_php_plp;
 			uint8_t ir_pass_pr = ir_ctx.stat_pair_rewrite + ir_ctx.stat_rmw_fusion;
-			/* Write RMW fusion count to WRAM for metrics_viewer */
-			*(volatile uint8_t *)(0x7E86) += ir_ctx.stat_rmw_fusion;
 			/* Count dead (killed) nodes */
 			uint8_t ir_dead_cnt = 0;
 			{ uint8_t k; for (k = 0; k < ir_ctx.node_count; k++) {
@@ -911,6 +1018,31 @@ batch_exit:  // case 1 (compile needed) jumps here
 #ifdef ENABLE_OPTIMIZER_V2
 		opt2_notify_block_compiled(entry_pc, flash_code_address + BLOCK_PREFIX_SIZE, flash_code_bank);
 #endif
+
+		// --- Publish mid-block PC fences ---
+		// IR_PC_MARK nodes recorded SA-identified branch targets.
+		// After lowering, each fence has a known native byte offset.
+		// Publish them so dispatch can enter this block mid-stream
+		// instead of compiling a duplicate block.
+		// Guard: only publish if IR lowering actually ran (enabled=1).
+		// When IR is disabled mid-block (node overflow), fence offsets
+		// were never populated and would be wrong.
+		if (ir_ctx.enabled && ir_ctx.fence_count) {
+			uint8_t f;
+			for (f = 0; f < ir_ctx.fence_count; f++) {
+				uint16_t fpc = ir_ctx.fence_guest_pc[f];
+				uint8_t  foff = ir_ctx.fence_native_offset[f];
+				// Safety: don't publish fences past main code
+				if (foff >= epilogue_start) continue;
+				setup_flash_pc_tables(fpc);
+				flash_cache_pc_update(foff, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+				opt2_notify_block_compiled(fpc,
+					flash_code_address + foff + BLOCK_PREFIX_SIZE,
+					flash_code_bank);
+#endif
+			}
+		}
 #endif  /* ENABLE_IR */
 
 		// Shrink sector allocation to actual size used (avoid wasting space)
@@ -1085,7 +1217,7 @@ static uint8_t lookup_entry_list_b17(uint16_t target_pc)
 	uint8_t target_lo = (uint8_t)target_pc;
 	uint8_t target_hi = (uint8_t)(target_pc >> 8);
 
-	for (uint16_t i = 0; i < entry_list_offset; i += 8)
+	for (uint16_t i = 0; i < entry_list_offset; i += ENTRY_LIST_STRIDE)
 	{
 		uint8_t b0 = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i);
 		uint8_t b1 = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 1);
@@ -1113,6 +1245,7 @@ static void flash_cache_pc_update_b17(uint8_t code_address, uint8_t flags)
 	// Guard against flash AND corruption: if slot already programmed, skip.
 	uint8_t current_flag = peek_bank_byte(pc_jump_flag_bank,
 	    (uint16_t)&flash_cache_pc_flags[pc_jump_flag_address]);
+	
 	if (current_flag != 0xFF)
 		return;  // slot already programmed — don't AND-corrupt it
 	
@@ -1401,7 +1534,7 @@ uint8_t emit_native_sta_indy(uint8_t *code_ptr, uint8_t ci,
 		code_ptr[ci + n++] = 0x08;       // PHP
 		code_ptr[ci + n++] = 0xE6;       // INC zp
 		code_ptr[ci + n++] = (mp->side_effect == 1) ? scrn_zp : char_zp;
-		code_ptr[ci + n++] = 0x28;       // PLP
+		*(volatile uint8_t *)&code_ptr[ci + n++] = 0x28;  // PLP (volatile: vbcc -O2 DCE)
 	}
 	return n;
 }
@@ -1452,7 +1585,7 @@ uint8_t emit_dirty_flag(uint8_t *code_ptr, uint8_t ci,
 		code_ptr[ci]   = 0x08;  // PHP
 		code_ptr[ci+1] = 0xE6;  // INC zp
 		code_ptr[ci+2] = (msb < 0x48) ? scrn_zp : char_zp;
-		code_ptr[ci+3] = 0x28;  // PLP
+		*(volatile uint8_t *)&code_ptr[ci+3] = 0x28;  // PLP (volatile: vbcc -O2 DCE)
 		return 4;
 	}
 	return 0;
@@ -1786,6 +1919,15 @@ static void ir_record_native_b2(const uint8_t *buf, uint8_t len)
 static uint8_t invert_branch(uint8_t opcode) {
 	return opcode ^ 0x20;
 }
+
+#ifdef ENABLE_IR
+/* Template ID set by recompile_opcode_b2_inner() when it emits an
+ * NRTS/JSR/NJSR template.  The outer wrapper emits these as atomic
+ * IR_TEMPLATE nodes instead of decomposing into individual IR nodes
+ * (which lets ir_opt_php_plp_elision remove the leading PHP and
+ * break the dispatch return stack contract).  0 = no template. */
+static uint8_t ir_tmpl_id;
+#endif
 
 static uint8_t recompile_opcode_b2_inner()
 {
@@ -2445,6 +2587,9 @@ static uint8_t recompile_opcode_b2_inner()
 				pc += 3;
 				code_index += opcode_6502_njsr_size;
 				block_has_jsr = 1;
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_NJSR;
+#endif
 				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}
@@ -2464,6 +2609,9 @@ static uint8_t recompile_opcode_b2_inner()
 				pc += 3;
 				code_index += opcode_6502_jsr_size;
 				block_has_jsr = 1;
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_JSR;
+#endif
 				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}
@@ -2496,6 +2644,9 @@ static uint8_t recompile_opcode_b2_inner()
 				
 				pc += 1;
 				code_index += opcode_6502_nrts_size;
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_NRTS;
+#endif
 				cache_flag[cache_index] &= ~READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}
@@ -2829,8 +2980,30 @@ static uint8_t recompile_opcode_b2()
 {
 #ifdef ENABLE_IR
 	uint8_t ci_before = code_index;
+	ir_tmpl_id = 0;
 	if (ci_before == 0) {
+		/* Zero seed fields for dynamic path.  SA pass 2 pre-sets them
+		 * with predecessor exit state before calling sa_compile_one_block,
+		 * so we only zero here when not in SA pass 2. */
+		if (sa_compile_pass != 2) {
+			ir_ctx.seed_a_known = 0;
+			ir_ctx.seed_x_known = 0;
+			ir_ctx.seed_y_known = 0;
+		}
 		IR_INIT(&ir_ctx);
+	}
+	else if (ir_ctx.enabled) {
+		/* Mid-block fence: check if this PC was identified by the ROM
+		 * pre-scan as a branch target within this block.  Only branch
+		 * targets get fences — fencing every instruction would kill
+		 * cross-instruction IR optimizations. */
+		uint8_t _ft;
+		for (_ft = 0; _ft < ir_fence_target_count; _ft++) {
+			if (ir_fence_targets[_ft] == pc) {
+				IR_EMIT_FENCE(&ir_ctx, pc);
+				break;
+			}
+		}
 	}
 #endif
 	uint8_t result = recompile_opcode_b2_inner();
@@ -2861,7 +3034,33 @@ static uint8_t recompile_opcode_b2()
 			}
 		}
 
-		if (patchable_jmp_pos != 0xFF) {
+		if (ir_tmpl_id && ir_ctx.enabled) {
+			/* NRTS/JSR/NJSR: emit as atomic IR_TEMPLATE.  This prevents
+			 * ir_opt_php_plp_elision from pairing a preceding PLP with
+			 * the template's leading PHP — removing that PHP breaks the
+			 * dispatch return stack contract (PLA pops JSR return byte
+			 * instead of guest status → RTS to garbage address). */
+			uint8_t pre = recompile_instr_start - ci_before;
+			if (pre) {
+				/* Record any flushed PLP bytes before the template */
+				ir_record_native_b2(buf, pre);
+			}
+			uint8_t tmpl_node_idx = ir_ctx.node_count;
+			IR_EMIT(&ir_ctx, IR_TEMPLATE, 0xFF, (uint16_t)ir_tmpl_id);
+			/* Record template patches for JSR/NJSR immediate operands */
+			if (ir_tmpl_id == IR_TMPL_JSR) {
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_ret_hi, buf[pre + opcode_6502_jsr_ret_hi]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_ret_lo, buf[pre + opcode_6502_jsr_ret_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_tgt_lo, buf[pre + opcode_6502_jsr_tgt_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_tgt_hi, buf[pre + opcode_6502_jsr_tgt_hi]);
+			} else if (ir_tmpl_id == IR_TMPL_NJSR) {
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_ret_hi, buf[pre + opcode_6502_njsr_ret_hi]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_ret_lo, buf[pre + opcode_6502_njsr_ret_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_tgt_lo, buf[pre + opcode_6502_njsr_tgt_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_tgt_hi, buf[pre + opcode_6502_njsr_tgt_hi]);
+			}
+			/* NRTS has no patches — template is fully fixed */
+		} else if (patchable_jmp_pos != 0xFF) {
 			/* Patchable template — record all bytes as IR_RAW_BYTE
 			 * to prevent optimizer from touching internal offsets.
 			 * Guard: if the node buffer can't hold all bytes, disable

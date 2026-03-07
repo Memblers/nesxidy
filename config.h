@@ -243,10 +243,60 @@
 #endif
 
 #ifdef GAME_M82
+#define GAME_IDLE_PC  0xC34A
 // No known idle PC.
 #endif
 
 #ifdef GAME_ZIPPY_RACE
+// No known idle PC.
+#endif
+
+#ifdef GAME_DOOR
+// No known idle PC.
+#endif
+
+#ifdef GAME_GOLF
+// No known idle PC.
+#endif
+
+#ifdef GAME_KARATEKA
+// No known idle PC.
+#endif
+
+#ifdef GAME_MARIO_BROS
+// No known idle PC.
+#endif
+
+#ifdef GAME_MILLIPEDE
+// No known idle PC.
+#endif
+
+#ifdef GAME_POOYAN
+// No known idle PC.
+#endif
+
+#ifdef GAME_POPEYE
+// No known idle PC.
+#endif
+
+#ifdef GAME_RAID_BUNG
+// No known idle PC.
+#endif
+
+#ifdef GAME_SKY_DESTROYER
+#define GAME_IDLE_PC  0xC5E0
+#endif
+
+#ifdef GAME_URBAN_CHAMP
+// No known idle PC.
+#endif
+
+#ifdef GAME_WARPMAN
+// No known idle PC.
+//#define GAME_IDLE_PC  0xD050
+#endif
+
+#ifdef GAME_YIEAR
 // No known idle PC.
 #endif
 

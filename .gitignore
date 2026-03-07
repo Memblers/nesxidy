@@ -1,0 +1,12 @@
+# ROM files (copyrighted)
+*.nes
+roms/
+
+# Build artifacts
+*.o
+*.map
+*.mlb
+
+# Split ROM data
+*.chr
+*.prg

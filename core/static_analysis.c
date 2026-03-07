@@ -1674,7 +1674,7 @@ void sa_run(void)
     bankswitch_prg(BANK_SA_CODE);
     sa_run_b2();
 #ifdef ENABLE_METRICS
-    bankswitch_prg(BANK_RENDER);
+    bankswitch_prg(BANK_METRICS);
     metrics_dump_sa_b2();
 #endif
     bankswitch_prg(saved_bank);

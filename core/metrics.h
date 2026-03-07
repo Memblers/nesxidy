@@ -136,7 +136,7 @@ extern __zpage uint32_t  clockticks6502;
 } while(0)
 
 /* ================================================================
- * WRAM dump functions (banked - call with BANK_RENDER mapped).
+ * WRAM dump functions (banked - call with BANK_METRICS mapped).
  * metrics_dump_sa_b2()      - call once after sa_run.
  * metrics_dump_runtime_b2() - call every frame.
  *
@@ -144,11 +144,8 @@ extern __zpage uint32_t  clockticks6502;
  * definitions in metrics.c, otherwise vbcc binds the symbol to
  * the section of the *first* declaration it sees (warning 371).
  * ================================================================ */
-#ifdef PLATFORM_NES
+/* BANK_METRICS = bank21 on both platforms */
 #pragma section bank21
-#else
-#pragma section bank22
-#endif
 void metrics_dump_sa_b2(void);
 void metrics_dump_runtime_b2(void);
 #pragma section default

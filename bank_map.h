@@ -94,6 +94,14 @@
 #endif
 
 /*
+ * BANK_METRICS: metrics dump functions (metrics_dump_sa_b2,
+ *               metrics_dump_runtime_b2).  Bank 21 on both platforms:
+ *   NES:   same as BANK_RENDER (bank21, $4000-$5FFF dead)
+ *   Exidy: separate from BANK_RENDER — $4000-$5FFF PC table is dead
+ */
+#define BANK_METRICS            21
+
+/*
  * BANK_PLATFORM_ROM: platform-specific guest ROM data (.incbin files).
  * Exidy ROMs are small enough to fit in one 16 KB bank.
  *

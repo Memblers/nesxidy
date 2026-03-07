@@ -2,6 +2,10 @@
 GAME_NUMBER = 0
 	endif
 
+	ifnd PLATFORM_NES
+PLATFORM_NES = 0
+	endif
+
 ;=======================================================	
 ; Kludgeville city limits
 
@@ -1481,7 +1485,8 @@ _flash_cache_pc:
 	; PC table for $4000-$5FFF is dead on NES anyway (I/O space).
 	else
 	section "bank21"
-	align 14		; PC table: $4000-$5FFF (dead on Exidy but allocated)
+	; No align: $4000-$5FFF PC table is dead on Exidy.
+	; Bank21 is repurposed for BANK_METRICS C code (metrics_dump_*_b2).
 	endif
 	section "bank22"
 	ifdef PLATFORM_NES

@@ -62,11 +62,8 @@ extern void     bankswitch_prg(uint8_t bank);
 /* ---- Banked implementations ---- */
 /* Exidy: bank22 (BANK_RENDER, $6000-$7FFF dead on Exidy)   */
 /* NES:   bank21 (BANK_RENDER, $4000-$5FFF dead on NES DK)  */
-#ifdef PLATFORM_NES
+/* BANK_METRICS = bank21 on both NES and Exidy */
 #pragma section bank21
-#else
-#pragma section bank22
-#endif
 
 void metrics_dump_sa_b2(void)
 {

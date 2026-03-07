@@ -79,7 +79,9 @@ __zpage uint8_t screen_ram_updated = 0;
 
 // 64-byte zero buffer for re-clearing the attribute table after
 // full-screen nametable pushes (Exidy has no attribute concept).
+#pragma section rodata21
 static const uint8_t attr_zeros[64] = {0};
+#pragma section default
 
 // Shadow buffer and VRAM update list are in dynamos-asm.s (BSS/WRAM)
 extern uint8_t screen_shadow[];
@@ -324,7 +326,7 @@ int main(void)
 				opt2_frame_tick();
 #endif
 #ifdef ENABLE_METRICS
-				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
+				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
 				nes_gamepad_refresh();
 				render_video();
@@ -346,7 +348,7 @@ int main(void)
 			opt2_frame_tick();
 #endif
 #ifdef ENABLE_METRICS
-			{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_RENDER); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
+			{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
 			nes_gamepad_refresh();
 			render_video();

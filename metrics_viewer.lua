@@ -32,8 +32,8 @@
 --         +$4E  ir_pass_dead_store     u16  (Pass 2: dead store+store-back)
 --         +$50  ir_pass_dead_load      u16  (Pass 2b)
 --         +$52  ir_pass_php_plp        u16  (Pass 3)
---         +$54  ir_pass_pair_rewrite   u16  (Pass 4)
---         +$56  ir_rmw_fusion          u8   (Pass 5: RMW fusion, written by dynamos.c)
+--         +$54  ir_pass_pair_rewrite   u16  (Pass 4: pair rewrite + CMP#0)
+--         +$56  ir_pass_rmw_fusion    u16  (Pass 5+6: shift/inc/dec fusion)
 
 local BASE = 0x7E30   -- CPU address (WRAM $6000-$7FFF mapped)
 local MEM  = emu.memType.nesDebug  -- side-effect-free reads
@@ -167,7 +167,7 @@ emu.addEventCallback(function()
   local ir_dl      = r16(0x50)
   local ir_pp      = r16(0x52)
   local ir_pr      = r16(0x54)
-  local ir_rmw     = r8(0x56)
+  local ir_rmw     = r16(0x56)
 
   local ir_saved   = ir_before - ir_after
   local ir_pct     = 0

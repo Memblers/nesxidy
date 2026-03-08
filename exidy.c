@@ -79,9 +79,12 @@ __zpage uint8_t screen_ram_updated = 0;
 
 // 64-byte zero buffer for re-clearing the attribute table after
 // full-screen nametable pushes (Exidy has no attribute concept).
-#pragma section rodata21
-static const uint8_t attr_zeros[64] = {0};
-#pragma section default
+// Must be in WRAM (non-banked) — lnPush queues the source pointer
+// for the NMI handler, which executes with an unpredictable
+// switchable bank.  Using `const` (rodata) in any banked section
+// causes the NMI to read code bytes from whatever bank happens to
+// be mapped, corrupting the attribute table.
+static uint8_t attr_zeros[64] = {0};
 
 // Shadow buffer and VRAM update list are in dynamos-asm.s (BSS/WRAM)
 extern uint8_t screen_shadow[];
@@ -808,7 +811,8 @@ static void flash_format_b2(void)
 		// Skip banks that contain our code/data — erasing them
 		// would destroy the running program and ROM assets.
 		if (bank == BANK_COMPILE)      continue;  // compile-time banked code
-		if (bank == BANK_RENDER)       continue;  // render_video_b2, metrics
+		if (bank == BANK_RENDER)       continue;  // render_video_b2
+		if (bank == BANK_METRICS)      continue;  // metrics_dump_*_b2
 		if (bank == BANK_PLATFORM_ROM) continue;  // ROM incbin data
 		if (bank == BANK_SA_CODE)      continue;  // static analysis code
 		if (bank == BANK_INIT_CODE)    continue;  // this function + convert_chr_b2

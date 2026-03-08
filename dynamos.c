@@ -823,14 +823,17 @@ batch_exit:  // case 1 (compile needed) jumps here
 			/* Pass 5+6: RMW fusion + register substitution in bank1 */
 			ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
 			lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
-			/* DIAG: check if PLP missing after dirty-flag PHP/INC $32 */
+			/* DIAG: dirty flag is now JSR-based (no inline PHP/INC/PLP).
+			 * Verify that no stale inline PHP/INC $32 without PLP remains
+			 * (would indicate the old path was taken). */
 			if (lowered_size > 5) {
 				uint8_t _dd;
 				for (_dd = 0; _dd + 3 < lowered_size; _dd++) {
 					if (cache_code[0][_dd] == 0x08 &&
 					    cache_code[0][_dd+1] == 0xE6 &&
-					    cache_code[0][_dd+2] == 0x32 &&
-					    cache_code[0][_dd+3] != 0x28) {
+					    cache_code[0][_dd+2] == 0x32) {
+						/* Old inline dirty flag found in lowered output!
+						 * This should never happen with the JSR fix. */
 						*(volatile uint8_t *)0x04F0 = 0xDD;
 						*(volatile uint8_t *)0x04F1 = ir_ctx.node_count;
 						*(volatile uint8_t *)0x04F2 = lowered_size;
@@ -896,7 +899,8 @@ batch_exit:  // case 1 (compile needed) jumps here
 			uint8_t ir_pass_ds = ir_ctx.stat_dead_store;
 			uint8_t ir_pass_dl = ir_ctx.stat_dead_load;
 			uint8_t ir_pass_pp = ir_ctx.stat_php_plp;
-			uint8_t ir_pass_pr = ir_ctx.stat_pair_rewrite + ir_ctx.stat_rmw_fusion;
+			uint8_t ir_pass_pr = ir_ctx.stat_pair_rewrite;
+			uint8_t ir_pass_rmw = ir_ctx.stat_rmw_fusion;
 			/* Count dead (killed) nodes */
 			uint8_t ir_dead_cnt = 0;
 			{ uint8_t k; for (k = 0; k < ir_ctx.node_count; k++) {
@@ -905,7 +909,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 			bankswitch_prg(ir_saved_bank);
 			metrics_ir_nodes_killed(ir_dead_cnt);
 			metrics_ir_pass_results(ir_pass_rl, ir_pass_ds, ir_pass_dl,
-			                        ir_pass_pp, ir_pass_pr);
+			                        ir_pass_pp, ir_pass_pr, ir_pass_rmw);
 			// If ir_lower returns 0 (error), keep original buffer unchanged
 		}
 
@@ -1032,6 +1036,12 @@ batch_exit:  // case 1 (compile needed) jumps here
 			for (f = 0; f < ir_ctx.fence_count; f++) {
 				uint16_t fpc = ir_ctx.fence_guest_pc[f];
 				uint8_t  foff = ir_ctx.fence_native_offset[f];
+				// Skip leading PLP from deferred peephole flush.
+				// When dispatch enters a fence, there's no matching
+				// PHP — a leading PLP would pop the dispatch JSR
+				// return byte and corrupt S.
+				if (foff < code_index && cache_code[0][foff] == 0x28)
+					foff++;
 				// Safety: don't publish fences past main code
 				if (foff >= epilogue_start) continue;
 				setup_flash_pc_tables(fpc);
@@ -1467,6 +1477,11 @@ uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *co
 //   - Fixed-bank functions ($C000+) are always reachable
 //   - opt2_record_pending_branch_safe() is a fixed-bank trampoline
 
+// Dirty-flag WRAM subroutines (defined in dynamos-asm.s).
+// Declared here so both emit_native_sta_indy and emit_dirty_flag can see them.
+extern void dirty_flag_screen(void);
+extern void dirty_flag_char(void);
+
 #ifdef ENABLE_POINTER_SWIZZLE
 // Mirror helpers — now in bank2 (compile-time only, called from recompile_opcode_b2).
 
@@ -1531,10 +1546,12 @@ uint8_t emit_native_sta_indy(uint8_t *code_ptr, uint8_t ci,
 		code_ptr[ci + i] = native_sta_indy_tmpl[i];
 
 	if (mp->side_effect) {
-		code_ptr[ci + n++] = 0x08;       // PHP
-		code_ptr[ci + n++] = 0xE6;       // INC zp
-		code_ptr[ci + n++] = (mp->side_effect == 1) ? scrn_zp : char_zp;
-		*(volatile uint8_t *)&code_ptr[ci + n++] = 0x28;  // PLP (volatile: vbcc -O2 DCE)
+		uint16_t target = (mp->side_effect == 1)
+		    ? (uint16_t)&dirty_flag_screen
+		    : (uint16_t)&dirty_flag_char;
+		code_ptr[ci + n++] = 0x20;  // JSR abs
+		code_ptr[ci + n++] = (uint8_t)target;
+		code_ptr[ci + n++] = (uint8_t)(target >> 8);
 	}
 	return n;
 }
@@ -1571,22 +1588,28 @@ void init_zp_mirror_table(void)
 #endif
 
 // emit_dirty_flag — bank2 helper (compile-time only).
-// Emits PHP / INC screen_ram_updated or character_ram_updated / PLP.
-// Returns bytes emitted (4) or 0 if not a screen/char store.
+// Emits JSR to a WRAM subroutine that does PHP/INC zp/PLP/RTS.
+// This replaces the old inline PHP/INC/PLP sequence.  The PLP is now
+// inside a fixed WRAM routine, making it impossible for the IR optimizer,
+// peephole, or flash write path to lose the PLP byte.
+// Returns bytes emitted (3 for JSR) or 0 if not a screen/char store.
 uint8_t emit_dirty_flag(uint8_t *code_ptr, uint8_t ci,
                         uint8_t opcode, uint8_t msb,
                         uint8_t scrn_zp, uint8_t char_zp)
 {
+	(void)scrn_zp; (void)char_zp;  // no longer used
 	// Only for store opcodes to $40xx-$4Fxx
 	if ((opcode == 0x8D || opcode == 0x8E || opcode == 0x8C ||
 	     opcode == 0x9D || opcode == 0x99) &&
 	    msb >= 0x40 && msb < 0x50)
 	{
-		code_ptr[ci]   = 0x08;  // PHP
-		code_ptr[ci+1] = 0xE6;  // INC zp
-		code_ptr[ci+2] = (msb < 0x48) ? scrn_zp : char_zp;
-		*(volatile uint8_t *)&code_ptr[ci+3] = 0x28;  // PLP (volatile: vbcc -O2 DCE)
-		return 4;
+		uint16_t target = (msb < 0x48)
+		    ? (uint16_t)&dirty_flag_screen
+		    : (uint16_t)&dirty_flag_char;
+		code_ptr[ci]   = 0x20;  // JSR abs
+		code_ptr[ci+1] = (uint8_t)target;
+		code_ptr[ci+2] = (uint8_t)(target >> 8);
+		return 3;
 	}
 	return 0;
 }
@@ -1927,6 +1950,10 @@ static uint8_t invert_branch(uint8_t opcode) {
  * (which lets ir_opt_php_plp_elision remove the leading PHP and
  * break the dispatch return stack contract).  0 = no template. */
 static uint8_t ir_tmpl_id;
+/* Number of dirty-flag bytes (PHP/INC zp/PLP) emitted at the END of
+ * the current instruction.  The outer wrapper records these as
+ * IR_RAW_BYTE nodes so the optimizer cannot strip the PLP. */
+static uint8_t ir_dirty_flag_bytes;
 #endif
 
 static uint8_t recompile_opcode_b2_inner()
@@ -2768,16 +2795,18 @@ static uint8_t recompile_opcode_b2_inner()
 						uint8_t msb = encoded_address >> 8;
 						if (msb >= 0x40 && msb < 0x50 &&
 						    !((msb < 0x48) ? block_dirty_screen : block_dirty_char) &&
-						    (code_index + 4 + EPILOGUE_SIZE) < CODE_SIZE)
+						    (code_index + 3 + EPILOGUE_SIZE) < CODE_SIZE)
 						{
 							uint8_t n = emit_dirty_flag(code_ptr, code_index,
 							    op_buffer_0, msb,
-							    (uint8_t)((uint16_t)&screen_ram_updated),
-							    (uint8_t)((uint16_t)&character_ram_updated));
+							    0, 0);
 							if (n) {
 								code_index += n;
 								if (msb < 0x48) block_dirty_screen = 1;
 								else            block_dirty_char = 1;
+#ifdef ENABLE_IR
+								ir_dirty_flag_bytes = n;
+#endif
 							}
 						}
 					}
@@ -2981,6 +3010,7 @@ static uint8_t recompile_opcode_b2()
 #ifdef ENABLE_IR
 	uint8_t ci_before = code_index;
 	ir_tmpl_id = 0;
+	ir_dirty_flag_bytes = 0;
 	if (ci_before == 0) {
 		/* Zero seed fields for dynamic path.  SA pass 2 pre-sets them
 		 * with predecessor exit state before calling sa_compile_one_block,
@@ -3134,7 +3164,19 @@ static uint8_t recompile_opcode_b2()
 			}
 			}  /* end else (node buffer had room) */
 		} else {
-			ir_record_native_b2(buf, delta);
+			if (ir_dirty_flag_bytes && ir_dirty_flag_bytes <= delta) {
+				/* Split: record the store instruction as structured IR
+				 * nodes, but emit the dirty flag (PHP/INC zp/PLP) as
+				 * IR_RAW_BYTE nodes so the optimizer cannot strip the
+				 * PLP and leave an unmatched PHP on the hardware stack. */
+				uint8_t store_len = delta - ir_dirty_flag_bytes;
+				if (store_len)
+					ir_record_native_b2(buf, store_len);
+				for (uint8_t _df = 0; _df < ir_dirty_flag_bytes; _df++)
+					IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)buf[store_len + _df]);
+			} else {
+				ir_record_native_b2(buf, delta);
+			}
 		}
 	}
 #endif

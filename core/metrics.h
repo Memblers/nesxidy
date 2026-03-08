@@ -54,6 +54,7 @@ typedef struct {
     uint16_t ir_pass_dead_load;       /* Pass 2b: dead load elimination       */
     uint16_t ir_pass_php_plp;         /* Pass 3: PLP/PHP pairs removed        */
     uint16_t ir_pass_pair_rewrite;    /* Pass 4: pair rewrites + CMP #0 elim  */
+    uint16_t ir_pass_rmw_fusion;     /* Pass 5+6: RMW fusion (shift+inc/dec) */
 } runtime_metrics_t;
 
 /* ================================================================
@@ -123,12 +124,13 @@ extern __zpage uint32_t  clockticks6502;
     runtime_metrics.ir_bytes_after  += (after); \
 } while(0)
 
-#define metrics_ir_pass_results(rl, ds, dl, pp, pr) do { \
+#define metrics_ir_pass_results(rl, ds, dl, pp, pr, rmw) do { \
     runtime_metrics.ir_pass_redundant_load += (rl); \
     runtime_metrics.ir_pass_dead_store     += (ds); \
     runtime_metrics.ir_pass_dead_load      += (dl); \
     runtime_metrics.ir_pass_php_plp        += (pp); \
     runtime_metrics.ir_pass_pair_rewrite   += (pr); \
+    runtime_metrics.ir_pass_rmw_fusion     += (rmw); \
 } while(0)
 
 #define metrics_ir_nodes_killed(n) do { \
@@ -165,7 +167,7 @@ void metrics_dump_runtime_b2(void);
 #define metrics_optimizer_run(m,p)        ((void)0)
 #define metrics_peephole_remove(p,l)      ((void)0)
 #define metrics_ir_block(b,a)              ((void)0)
-#define metrics_ir_pass_results(rl,ds,dl,pp,pr)  ((void)0)
+#define metrics_ir_pass_results(rl,ds,dl,pp,pr,rmw)  ((void)0)
 #define metrics_ir_nodes_killed(n)         ((void)0)
 static inline void metrics_dump_sa_b2(void) {}
 static inline void metrics_dump_runtime_b2(void) {}

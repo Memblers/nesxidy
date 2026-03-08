@@ -248,11 +248,24 @@ typedef struct {
 #define DEFERRED_PATCH_BRANCH_OLD  1  /* old 21-byte branch template */
 #define DEFERRED_PATCH_FFF0_BRANCH 2  /* $FFF0 17-byte branch (JMP $FFF0) */
 #define DEFERRED_PATCH_FFF0_JMP    3  /* $FFF0 13-byte JMP (JMP $FFF6) */
+#define DEFERRED_PATCH_DIRECT_BRANCH 4  /* direct native branch placeholder */
 typedef struct {
     uint16_t target_pc;   /* branch/JMP target PC */
     uint8_t  is_branch;   /* DEFERRED_PATCH_* type discriminator */
     uint8_t  pad;
 } ir_deferred_patch_t;
+
+/* Direct branch placeholder: records a 5-byte Bxx_inv+3/JMP $FFFE
+ * placeholder emitted during IR recording.  Resolved post-lowering
+ * by ir_resolve_direct_branches() which patches the JMP operand
+ * (or shrinks to 2-byte + NOP*3 if offset fits ±127). */
+#define IR_MAX_DIRECT_BRANCHES 8
+#define DIRECT_BRANCH_SENTINEL 0xFFFE  /* JMP $FFFE — distinct from $FFFF/$FFF0 */
+typedef struct {
+    uint16_t target_pc;       /* guest PC of branch target */
+    uint8_t  branch_opcode;   /* original 6502 branch opcode (e.g. $D0 for BNE) */
+    uint8_t  pad;
+} ir_direct_branch_t;
 
 /* Template patch: records a (offset, value) pair for template byte patching */
 typedef struct {
@@ -331,6 +344,12 @@ typedef struct {
     uint16_t  fence_guest_pc[IR_MAX_FENCES];     /* guest PC at each fence */
     uint8_t   fence_native_offset[IR_MAX_FENCES];/* lowered byte offset (filled by ir_lower) */
 
+    /* Direct branch placeholders (separate from deferred_patches[]).
+     * Recorded during IR emission for known-target branches; resolved
+     * post-lowering by ir_resolve_direct_branches(). */
+    ir_direct_branch_t direct_branches[IR_MAX_DIRECT_BRANCHES];
+    uint8_t   direct_branch_count;
+
     /* Boundary-state seeding for cross-block optimization.
      * seed_*: entry state from predecessor block (set before ir_optimize).
      * exit_*: captured by ir_opt_redundant_load before final barrier reset.
@@ -382,6 +401,7 @@ typedef struct {
     (ctx)->stat_pair_rewrite = 0; \
     (ctx)->stat_rmw_fusion = 0; \
     (ctx)->fence_count = 0; \
+    (ctx)->direct_branch_count = 0; \
     /* NOTE: seed_* fields are NOT zeroed here — they are set by the
      * caller before the compile loop for boundary-state seeding.
      * For the dynamic path, they are zeroed explicitly in run_6502. */ \
@@ -500,6 +520,17 @@ uint8_t ir_estimate_size(const ir_ctx_t *ctx);
  * the correct post-lowering flash addresses.  Call while bank 1 is mapped,
  * after ir_lower() has updated cache_code[0][] and code_index. */
 void ir_resolve_deferred_patches(void);
+
+/* Phase B: resolve direct branch placeholders post-IR-lowering.
+ * Scans the lowered buffer for JMP $FFFE sentinels, looks up target
+ * native addresses (intra-block via fences, inter-block via entry list),
+ * and patches to 2-byte native branch + NOP*3 or 5-byte Bxx_inv+JMP.
+ * Must be called BEFORE ir_resolve_deferred_patches(). */
+void ir_resolve_direct_branches(void);
+
+/* Rebuild block_ci_map[] from fence_native_offset[] after ir_lower().
+ * Re-enables try_intra_block_branch for backward branches under IR. */
+void ir_rebuild_block_ci_map(void);
 
 /* ===================================================================
  * IR API — buffer recording (see ir.c)

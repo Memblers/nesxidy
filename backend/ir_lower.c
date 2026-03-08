@@ -458,6 +458,148 @@ void ir_resolve_deferred_patches(void)
 }
 
 /* ===================================================================
+ * ir_resolve_direct_branches — Phase B post-lowering direct branch fixup
+ *
+ * Scans the lowered output buffer for JMP $FFFE sentinel patterns
+ * (5-byte placeholders: Bxx_inv +3 / JMP $FFFE).  For each match:
+ *   - Intra-block: look up target in fence_guest_pc[] → fence_native_offset[]
+ *   - Inter-block: call lookup_entry_list() for the native address
+ * Then patches to:
+ *   - 2-byte native branch + 3×NOP if offset fits ±127
+ *   - 5-byte Bxx_inv +3 / JMP abs otherwise
+ *
+ * Must be called BEFORE ir_resolve_deferred_patches() and while
+ * bank 1 is mapped.
+ * =================================================================== */
+void ir_resolve_direct_branches(void)
+{
+    extern ir_ctx_t ir_ctx;
+    extern uint8_t cache_code[][CACHE_CODE_BUF_SIZE];
+    extern __zpage uint8_t code_index;
+    extern uint16_t flash_code_address;
+    extern uint8_t flash_code_bank;
+    extern uint16_t reserve_result_addr;
+    extern uint8_t  reserve_result_bank;
+    extern uint8_t lookup_entry_list(uint16_t target_pc);
+    extern uint8_t lookup_native_addr_safe(uint16_t target_pc);
+
+    if (ir_ctx.direct_branch_count == 0)
+        return;
+
+    uint8_t db_idx = 0;
+    uint8_t len = code_index;
+    uint8_t *buf = cache_code[0];
+
+    /* Scan for JMP $FFFE (0x4C 0xFE 0xFF) sentinels in order */
+    for (uint8_t p = 0; (uint8_t)(p + 4) < len && db_idx < ir_ctx.direct_branch_count; p++) {
+        /* Look for the 5-byte pattern: Bxx_inv, +3, JMP $FFFE */
+        if (buf[p + 2] != 0x4C || buf[p + 3] != 0xFE || buf[p + 4] != 0xFF)
+            continue;
+
+        /* Verify this is a branch-invert + 3 pattern */
+        if (buf[p + 1] != 0x03)
+            continue;
+
+        uint16_t target_pc = ir_ctx.direct_branches[db_idx].target_pc;
+        uint8_t  orig_branch = ir_ctx.direct_branches[db_idx].branch_opcode;
+        uint16_t target_native = 0;
+        uint8_t  target_bank = 0;
+        uint8_t  resolved = 0;
+
+        /* Try intra-block: check fences for matching guest PC */
+        {
+            uint8_t f;
+            for (f = 0; f < ir_ctx.fence_count; f++) {
+                if (ir_ctx.fence_guest_pc[f] == target_pc) {
+                    /* Intra-block: native offset relative to buffer start.
+                     * Absolute address = flash_code_address + BLOCK_PREFIX_SIZE + offset. */
+                    target_native = flash_code_address + BLOCK_PREFIX_SIZE
+                                  + ir_ctx.fence_native_offset[f];
+                    target_bank = flash_code_bank;
+                    resolved = 1;
+                    break;
+                }
+            }
+        }
+
+        /* Try inter-block: lookup compiled entry point */
+        if (!resolved) {
+            if (lookup_entry_list(target_pc) && reserve_result_bank == flash_code_bank) {
+                target_native = reserve_result_addr;
+                target_bank = reserve_result_bank;
+                resolved = 1;
+            } else if (lookup_native_addr_safe(target_pc) && reserve_result_bank == flash_code_bank) {
+                target_native = reserve_result_addr;
+                target_bank = reserve_result_bank;
+                resolved = 1;
+            }
+        }
+
+        if (resolved && target_bank == flash_code_bank) {
+            /* Compute offset from the END of the original 2-byte branch
+             * instruction (position p + 2, since branch is at p, operand at p+1,
+             * and branch measures from p+2). */
+            int16_t branch_from = (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + p + 2);
+            int16_t native_offset = (int16_t)target_native - branch_from;
+
+            if (native_offset >= -128 && native_offset <= 127) {
+                /* Fits in 2-byte native branch: Bxx rel + NOP NOP NOP */
+                buf[p + 0] = orig_branch;
+                buf[p + 1] = (uint8_t)(int8_t)native_offset;
+                buf[p + 2] = 0xEA;  /* NOP */
+                buf[p + 3] = 0xEA;  /* NOP */
+                buf[p + 4] = 0xEA;  /* NOP */
+            } else {
+                /* 5-byte: Bxx_inv +3 / JMP abs (already has inverted branch) */
+                /* buf[p+0] already = inverted branch opcode */
+                /* buf[p+1] already = 3 */
+                buf[p + 2] = 0x4C;
+                buf[p + 3] = (uint8_t)(target_native & 0xFF);
+                buf[p + 4] = (uint8_t)(target_native >> 8);
+            }
+        }
+        /* else: leave sentinel — will dispatch through epilogue (safe fallback) */
+
+        db_idx++;
+    }
+}
+
+/* ===================================================================
+ * ir_rebuild_block_ci_map — rebuild block_ci_map from post-lowering
+ * fence_native_offset[] data.
+ *
+ * Under IR, the compile-loop populates block_ci_map with pre-optimization
+ * code_index values that become stale after ir_lower() removes bytes.
+ * This function rebuilds it using the fence table, which has true
+ * post-lowering native offsets.  Re-enables try_intra_block_branch()
+ * for backward branches.
+ *
+ * Must be called after ir_lower() fills fence_native_offset[].
+ * =================================================================== */
+void ir_rebuild_block_ci_map(void)
+{
+    extern ir_ctx_t ir_ctx;
+    extern uint8_t block_ci_map[64];
+    extern __zpage uint8_t cache_entry_pc_lo[];
+    extern __zpage uint8_t cache_entry_pc_hi[];
+    extern __zpage uint8_t cache_index;
+
+    uint16_t entry_pc = (uint16_t)cache_entry_pc_lo[cache_index]
+                      | ((uint16_t)cache_entry_pc_hi[cache_index] << 8);
+
+    /* Clear the map first */
+    for (uint8_t i = 0; i < 64; i++)
+        block_ci_map[i] = 0;
+
+    /* Rebuild from fences: each fence has a guest PC and post-lowering offset */
+    for (uint8_t f = 0; f < ir_ctx.fence_count; f++) {
+        uint16_t fpc = ir_ctx.fence_guest_pc[f];
+        uint8_t ci_slot = (uint8_t)(fpc - entry_pc) & 0x3F;
+        block_ci_map[ci_slot] = ir_ctx.fence_native_offset[f] + 1;
+    }
+}
+
+/* ===================================================================
  * Pass 5: RMW fusion (post-pass, called from dynamos.c after
  * ir_optimize completes, before ir_lower)
  *

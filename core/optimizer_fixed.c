@@ -184,14 +184,12 @@ uint8_t update_pc_entry(uint16_t src_pc, uint16_t new_native) {
         return 0;  // Already has value, skip
     }
     
-    // Erase sector and update via backup
-    backup_init();
-    backup_copy_from_flash(0, 0x8000, pc_bank);
-    flash_sector_erase(0x8000, pc_bank);
-    backup_write(0, pc_off, new_native & 0xFF);
-    backup_write(0, pc_off + 1, new_native >> 8);
-    backup_copy_to_flash(0, 0x8000, pc_bank);
-    backup_finish();
+    // Entry is erased ($FFFF) — program bytes directly.
+    // NOR flash allows clearing bits (1→0) without erasing.
+    // This avoids the expensive and race-prone backup-erase-rewrite
+    // cycle that temporarily zeroes the entire sector.
+    flash_byte_program(0x8000 + pc_off, pc_bank, new_native & 0xFF);
+    flash_byte_program(0x8000 + pc_off + 1, pc_bank, new_native >> 8);
     bankswitch_prg(1);
     return 1;
 }
@@ -209,13 +207,17 @@ uint8_t update_flag_entry(uint16_t src_pc, uint8_t new_bank) {
         return 1;  // Already correct
     }
     
-    // Check if write is possible (can only clear bits)
-    if (old_flag != 0xFF && (new_bank & old_flag) != new_bank) {
+    // Check if direct programming is possible (can only clear bits 1→0)
+    if ((old_flag & new_bank) == new_bank) {
+        // All required 0-bits are either already 0 or can be cleared.
+        // Program directly without erasing.
+        flash_byte_program(0x8000 + flag_off, flag_bank, new_bank);
         bankswitch_prg(1);
-        return 0;  // Can't set bits in flash
+        return 1;
     }
     
-    // Erase sector and update via backup
+    // Need to set bits (0→1) — must erase sector first.
+    // This should be rare; most flag updates go from $FF to a bank number.
     backup_init();
     backup_copy_from_flash(0, 0x8000, flag_bank);
     flash_sector_erase(0x8000, flag_bank);

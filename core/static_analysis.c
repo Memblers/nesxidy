@@ -31,6 +31,8 @@ extern uint8_t ir_optimize_ext(ir_ctx_t *ctx);
 extern uint8_t ir_lower(ir_ctx_t *ctx, uint8_t *buf, uint8_t buf_size);
 extern uint8_t ir_opt_rmw_fusion(ir_ctx_t *ctx);
 extern void ir_resolve_deferred_patches(void);
+extern void ir_resolve_direct_branches(void);
+extern void ir_rebuild_block_ci_map(void);
 #endif
 
 // -------------------------------------------------------------------------
@@ -795,6 +797,8 @@ static uint8_t sa_compile_one_block(void)
             bankswitch_prg(BANK_EMIT);
             ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
             uint8_t lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
+            ir_resolve_direct_branches();
+            ir_rebuild_block_ci_map();
             ir_resolve_deferred_patches();
             bankswitch_prg(_sa_ir_bank);
 

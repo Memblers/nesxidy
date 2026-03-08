@@ -486,6 +486,7 @@ void flash_format(void)
 		if (bank == BANK_COMPILE) continue;
 		if (bank == BANK_NES_PRG_LO) continue;
 		if (bank == BANK_RENDER) continue;
+		if (bank == BANK_METRICS) continue;
 		if (bank == BANK_NES_CHR) continue;
 		if (bank == BANK_SA_CODE) continue;
 		if (bank == BANK_INIT_CODE) continue;

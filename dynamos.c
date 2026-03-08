@@ -891,6 +891,12 @@ batch_exit:  // case 1 (compile needed) jumps here
 					cache_code[0][code_index++] = 0xEA;  /* NOP */
 				}
 			}
+			/* Phase B: resolve direct branch placeholders (JMP $FFFE)
+			 * BEFORE deferred patches — uses fence table + entry list. */
+			ir_resolve_direct_branches();
+			/* Rebuild block_ci_map from post-lowering fence offsets
+			 * so future intra-block branches use correct native positions. */
+			ir_rebuild_block_ci_map();
 			/* Phase B: resolve deferred branch/JMP pending patches with
 			 * correct post-lowering flash addresses (while bank1 mapped). */
 			ir_resolve_deferred_patches();
@@ -1436,6 +1442,43 @@ uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
 // The caller provides the branch opcode and code buffer pointer.
 //============================================================================================================
 #pragma section bank2
+#ifdef ENABLE_IR
+//============================================================================================================
+// ir_emit_direct_branch_placeholder — bank2 helper (called from recompile_opcode_b2_inner).
+// Records a direct-branch entry in ir_ctx and writes the 5-byte placeholder
+// (Bxx_inv +3 / JMP $FFFE) into cache_code[].  The wrapper recompile_opcode_b2()
+// will see code_index advanced, pick up these bytes, and record them as
+// IR_RAW_BYTE nodes during normal IR recording.
+// Returns cache_flag[cache_index] for the caller to return, or 0 if unable.
+//============================================================================================================
+uint8_t ir_emit_direct_branch_placeholder(uint16_t target_pc, uint8_t branch_opcode)
+{
+	/* Common capacity/space checks — returns 0 if cannot emit */
+	if ((code_index + 5 + EPILOGUE_SIZE + 6) >= CODE_SIZE ||
+	    ir_ctx.direct_branch_count >= IR_MAX_DIRECT_BRANCHES)
+		return 0;
+
+	ir_direct_branch_t *db = &ir_ctx.direct_branches[ir_ctx.direct_branch_count];
+	db->target_pc = target_pc;
+	db->branch_opcode = branch_opcode;
+	db->pad = 0;
+	ir_ctx.direct_branch_count++;
+
+	/* Write 5-byte placeholder to code buffer (wrapper records as IR) */
+	uint8_t *p = &cache_code[cache_index][code_index];
+	p[0] = branch_opcode ^ 0x20;             /* inverted branch */
+	p[1] = 3;                                /* skip next JMP */
+	p[2] = 0x4C;                             /* JMP */
+	p[3] = (uint8_t)(DIRECT_BRANCH_SENTINEL & 0xFF);
+	p[4] = (uint8_t)(DIRECT_BRANCH_SENTINEL >> 8);
+
+	pc += 2;
+	code_index += 5;
+	cache_branches++;
+	cache_flag[cache_index] |= READY_FOR_NEXT;
+	return cache_flag[cache_index];
+}
+#else
 uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *code_ptr)
 {
 	if (!lookup_entry_list(target_pc))
@@ -1464,6 +1507,7 @@ uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *co
 	}
 	return 0;
 }
+#endif
 
 // ==========================================================================
 // recompile_opcode — moved to bank 2 to save ~6KB of fixed-bank space.
@@ -2025,11 +2069,17 @@ static uint8_t recompile_opcode_b2_inner()
 				branch_forward++;
 
 				// --- Static pass 2: all native addresses known, emit direct ---
-				// Under IR, skip direct branches — their offsets are
-				// computed from pre-IR code_index and become stale after
-				// optimization removes bytes.  Fall through to the
-				// 21-byte patchable template (IR_RAW_BYTE, immune).
-#ifndef ENABLE_IR
+				// Under IR, emit a 5-byte placeholder (Bxx_inv+3 / JMP $FFFE)
+				// as IR_RAW_BYTE nodes.  ir_resolve_direct_branches() patches
+				// the sentinel post-lowering with the correct native address.
+#ifdef ENABLE_IR
+				if (lookup_entry_list(target_pc) &&
+				    reserve_result_bank == flash_code_bank)
+				{
+					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
+					if (r) return r;
+				}
+#else
 				if (sa_compile_pass == 2)
 				{
 					uint8_t emit_len = try_direct_branch(target_pc, op_buffer_0, code_ptr);
@@ -2395,8 +2445,21 @@ static uint8_t recompile_opcode_b2_inner()
 				//
 				// INTRA-BLOCK BACKWARD BRANCH: if the target is within
 				// this block, emit a native 2-byte branch (fixed-bank helper).
-				// Under IR, skip — offset becomes stale after optimisation.
-#ifndef ENABLE_IR
+				// Under IR, emit a 5-byte placeholder — fence_native_offset[]
+				// will resolve the correct offset post-lowering.
+#ifdef ENABLE_IR
+				/* Intra-block: target is within this block's fence table.
+				 * Emit 5-byte placeholder for post-lowering resolution. */
+				if (!block_has_jsr)
+				{
+					uint16_t blk_entry = (uint16_t)cache_entry_pc_lo[cache_index]
+					                   | ((uint16_t)cache_entry_pc_hi[cache_index] << 8);
+					if (target_pc >= blk_entry && target_pc < pc) {
+						uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
+						if (r) return r;
+					}
+				}
+#else
 				if (try_intra_block_branch(target_pc, op_buffer_0))
 					return cache_flag[cache_index];
 #endif
@@ -2405,10 +2468,16 @@ static uint8_t recompile_opcode_b2_inner()
 				// different block.  Same-bank: try 2-byte native branch
 				// first, then 5-byte Bxx_inv+JMP.
 				// Cross-bank: fall through to interpret.
-				// Under IR, skip all direct-offset paths — offsets are
-				// pre-IR and become stale.  Fall through to interpret,
-				// then fall through to the patchable template path.
-#ifndef ENABLE_IR
+				// Under IR, emit a 5-byte placeholder for post-lowering
+				// resolution via ir_resolve_direct_branches().
+#ifdef ENABLE_IR
+				if ((target_flag & 0x1F) == flash_code_bank &&
+				    lookup_native_addr_safe(target_pc))
+				{
+					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
+					if (r) return r;
+				}
+#else
 				if ((target_flag & 0x1F) == flash_code_bank &&
 				    (code_index + 2 + EPILOGUE_SIZE + 6) < CODE_SIZE &&
 				    lookup_native_addr_safe(target_pc))

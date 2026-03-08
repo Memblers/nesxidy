@@ -557,7 +557,26 @@ found:
 	dex
 	stx _cache_index
 	rts
-	
+
+;-------------------------------------------------------
+; Dirty-flag subroutines (called from JIT blocks via JSR).
+; Increments the screen/character dirty flag while preserving
+; the processor status register.  Using JSR instead of inline
+; PHP/INC/PLP prevents the PLP byte from being lost during
+; IR optimisation or flash writes.
+;-------------------------------------------------------
+	global _dirty_flag_screen, _dirty_flag_char
+_dirty_flag_screen:
+	php
+	inc _screen_ram_updated
+	plp
+	rts
+_dirty_flag_char:
+	php
+	inc _character_ram_updated
+	plp
+	rts
+
 ;=======================================================	
 	global _decode_address_asm, _decode_address_asm2
 	zpage _decoded_address, _encoded_address, _character_ram_updated, _screen_ram_updated

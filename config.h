@@ -149,7 +149,7 @@
 
 // After the walk, compile every discovered entry point in address order.
 // Gated separately so the walker can be tested without the compile pass.
-//#define ENABLE_STATIC_COMPILE
+#define ENABLE_STATIC_COMPILE
 
 // Visual PPU effect during static analysis: monochrome + toggling
 // emphasis bits during BFS walk and batch compile.  Writes the lazynes

@@ -56,6 +56,7 @@ extern uint8_t lnPPUMASK;  // lazynes shadow for $2001
 #endif
 
 // From dynamos.c — needed for batch compile
+extern uint8_t sa_do_compile;
 __zpage extern uint16_t pc;
 __zpage extern uint8_t code_index;
 __zpage extern uint8_t cache_index;
@@ -143,7 +144,7 @@ static uint8_t sa_bitmap_is_unknown(uint16_t addr)
     return val & bit_mask;
 }
 
-static void sa_bitmap_mark(uint16_t addr)
+void sa_bitmap_mark(uint16_t addr)
 {
     uint16_t byte_offset = (addr & 0x7FFF) >> 3;
     uint8_t bit_mask = 1 << (addr & 7);
@@ -158,36 +159,10 @@ static void sa_bitmap_mark(uint16_t addr)
 }
 
 // -------------------------------------------------------------------------
-// Indirect-target list helpers (fixed bank) — called from sa_record_indirect_target
+// Indirect-target list helpers — moved to BANK_SA_CODE (bank19/bank24)
+// alongside their only caller sa_record_indirect_target_b2.
+// See the section near sa_record_indirect_target_b2 below.
 // -------------------------------------------------------------------------
-
-static uint16_t sa_indirect_find_empty(void)
-{
-    for (uint16_t i = 0; i < SA_INDIRECT_MAX; i++)
-    {
-        uint16_t entry_addr = SA_INDIRECT_BASE + i * 3;
-        uint8_t type = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 2);
-        if (type == SA_TYPE_EMPTY)
-            return i;
-    }
-    return SA_INDIRECT_MAX;
-}
-
-static uint8_t sa_indirect_exists(uint16_t target_pc)
-{
-    for (uint16_t i = 0; i < SA_INDIRECT_MAX; i++)
-    {
-        uint16_t entry_addr = SA_INDIRECT_BASE + i * 3;
-        uint8_t type = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 2);
-        if (type == SA_TYPE_EMPTY)
-            return 0;
-        uint8_t lo = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 0);
-        uint8_t hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
-        if ((lo | (hi << 8)) == target_pc)
-            return 1;
-    }
-    return 0;
-}
 
 // -------------------------------------------------------------------------
 // BFS queue state (fixed-bank / BSS)
@@ -418,10 +393,10 @@ static void sa_walk_b2(void)
         sa_enqueue_if_valid(tgt);
     }
 
-    // Enable monochrome during BFS walk
+    // Darken screen during BFS walk (all 3 emphasis bits + greyscale)
 #ifdef ENABLE_COMPILE_PPU_EFFECT
-    lnPPUMASK = 0x3B | compile_ppu_effect;
-    *(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame
+    lnPPUMASK = 0x1B | 0xE0;
+    *(volatile uint8_t*)0x2001 = lnPPUMASK;
 #endif
 
     // BFS loop
@@ -431,10 +406,10 @@ static void sa_walk_b2(void)
         metrics_bfs_visit_address();
 
 #ifdef ENABLE_COMPILE_PPU_EFFECT
-        // Toggle blue emphasis (bit 7) per BFS node
-        compile_ppu_effect ^= 0x80;
-        lnPPUMASK = 0x3B | compile_ppu_effect;
-        *(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame
+        // Toggle greyscale per BFS node (screen stays darkened)
+        compile_ppu_effect ^= 0x01;
+        lnPPUMASK = 0x1A | 0xE0 | compile_ppu_effect;
+        *(volatile uint8_t*)0x2001 = lnPPUMASK;
 #endif
 
         // Walk linear code from cur_pc
@@ -618,10 +593,10 @@ uint16_t sa_blocks_total = 0;
 static uint8_t sa_compile_one_block(void)
 {
 #ifdef ENABLE_COMPILE_PPU_EFFECT
-    // Toggle green emphasis (bit 6) per block compiled
-    compile_ppu_effect ^= 0x40;
-    lnPPUMASK = 0x3B | compile_ppu_effect;
-    *(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame
+    // Toggle greyscale per block compiled (screen stays darkened)
+    compile_ppu_effect ^= 0x01;
+    lnPPUMASK = 0x1A | 0xE0 | compile_ppu_effect;
+    *(volatile uint8_t*)0x2001 = lnPPUMASK;
 #endif
 
     // Allocate space in a flash sector for max-size block.
@@ -787,30 +762,35 @@ static uint8_t sa_compile_one_block(void)
         // the header + epilogue are written (see sa_compile_pass==2 block
         // below) to ensure the complete block is in flash before any
         // dispatch can enter it.
-        if (sa_compile_pass == 2 && ir_ctx.enabled) {
-            uint8_t _sa_ir_bank = mapper_prg_bank;
-            uint8_t ir_bytes_before = code_index;
-            bankswitch_prg(BANK_IR_OPT);
-            ir_optimize(&ir_ctx);
-            bankswitch_prg(BANK_COMPILE);
-            ir_optimize_ext(&ir_ctx);
-            bankswitch_prg(BANK_EMIT);
-            ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
-            uint8_t lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
-            ir_resolve_direct_branches();
-            ir_rebuild_block_ci_map();
-            ir_resolve_deferred_patches();
-            bankswitch_prg(_sa_ir_bank);
+        if (sa_compile_pass == 2) {
+            if (ir_ctx.enabled) {
+                uint8_t ir_bytes_before = code_index;
+                // IR pipeline runs through WRAM trampoline because this
+                // function is in BANK_SA_CODE ($8000-$BFFF) and can't
+                // bankswitch to the IR banks without losing its own code.
+                // sa_ir_pipeline_full does: optimize(b0) → optimize_ext(b17)
+                // → rmw_fusion+lower+resolve(b1) → restore BANK_SA_CODE.
+                extern void sa_ir_pipeline_full(void);
+                extern uint8_t sa_ir_lowered_size;
+                sa_ir_pipeline_full();
+                uint8_t lowered_size = sa_ir_lowered_size;
 
-            if (lowered_size) {
-                code_index = lowered_size;
-                /* NOP-pad gap to prevent template BEQ offset corruption
-                 * (same guard as the dynamic path in run_6502). */
-                while (code_index < ir_bytes_before)
-                    cache_code[0][code_index++] = 0xEA;  /* NOP */
+                if (lowered_size) {
+                    code_index = lowered_size;
+                    /* NOP-pad gap to prevent template BEQ offset corruption
+                     * (same guard as the dynamic path in run_6502). */
+                    while (code_index < ir_bytes_before)
+                        cache_code[0][code_index++] = 0xEA;  /* NOP */
+                }
             }
-
-            // Bulk write all code bytes to flash (epilogue written later)
+            /* Bulk write all code bytes to flash (epilogue written later).
+             * This runs whether IR lowering ran or IR was disabled mid-block
+             * (node overflow).  When IR was disabled, the compile loop wrote
+             * post-overflow instructions per-instruction but pre-overflow
+             * instructions remain only in cache_code[0].  Re-writing
+             * already-programmed bytes is harmless on SST39SF040.
+             * Matches the dynamic path (dynamos.c) which bulk-writes
+             * unconditionally. */
             for (uint8_t bw = 0; bw < code_index; bw++) {
                 flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + bw,
                                    flash_code_bank, cache_code[0][bw]);
@@ -828,11 +808,14 @@ static uint8_t sa_compile_one_block(void)
         // epilogue_start, so this byte would otherwise stay $FF (erased).
         if (block_flags_saved) {
             *(volatile uint8_t *)&cache_code[0][code_index] = 0x28;  // PLP
-            if (sa_compile_pass == 2
-#ifdef ENABLE_IR
-                && !ir_ctx.enabled  /* IR handles PLP elision internally */
-#endif
-            ) {
+            if (sa_compile_pass == 2) {
+                /* Always write to flash — even when IR is enabled.
+                 * If ir_lower already included the PLP, this is a harmless
+                 * re-write ($28 over $28).  If ir_lower didn't include it,
+                 * this fills the gap that would otherwise stay $FF (erased).
+                 * The old !ir_ctx.enabled guard skipped this write but still
+                 * incremented code_index, creating a $FF gap byte between
+                 * block body and epilogue → illegal opcode crash. */
                 flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index,
                                    flash_code_bank, 0x28);
             }
@@ -925,7 +908,13 @@ static uint8_t sa_compile_one_block(void)
             // to publish PC table entries.  This matches the dynamic path's
             // order (write everything, then publish) and ensures dispatch
             // never enters a block with incomplete epilogue.
-            if (ir_ctx.enabled) {
+            // Always publish the entry PC — matches the dynamic path which
+            // calls setup_flash_pc_tables + flash_cache_pc_update outside
+            // any ir_ctx.enabled guard.  When IR was disabled mid-block,
+            // per-instruction PC flags were skipped for pre-overflow
+            // instructions, but the entry PC must still be published so
+            // dispatch can find this block.
+            {
                 setup_flash_pc_tables(entry_pc);
                 flash_cache_pc_update(0, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
@@ -933,8 +922,10 @@ static uint8_t sa_compile_one_block(void)
                     flash_code_address + BLOCK_HEADER_SIZE,
                     flash_code_bank);
 #endif
-                // Publish mid-block fence PCs
-                if (ir_ctx.fence_count) {
+                // Publish mid-block fence PCs — only valid when IR lowering
+                // actually ran (enabled=1).  When IR is disabled mid-block,
+                // fence offsets were never populated and would be wrong.
+                if (ir_ctx.enabled && ir_ctx.fence_count) {
                     uint8_t _f;
                     for (_f = 0; _f < ir_ctx.fence_count; _f++) {
                         uint16_t fpc = ir_ctx.fence_guest_pc[_f];
@@ -1184,8 +1175,11 @@ static void sa_run_b2(void)
     sa_analyze_all_subroutines();
 
 #ifdef ENABLE_STATIC_COMPILE
+  if (sa_do_compile) {
     // =====================================================================
     // Two-pass static compilation with entry list.
+    // Only runs on warm boot (sa_do_compile set by platform main).
+    // Cold boot skips this — dynamic JIT fills the cache at runtime.
     //
     // Architecture overview:
     //   Bank 18 (BANK_ENTRY_LIST) holds a sequential table of 16-byte entries
@@ -1298,12 +1292,11 @@ static void sa_run_b2(void)
             // Side effects (node kills) are harmless — pass 1 bytes are
             // already in cache_code and are never used from flash.
             if (ir_ctx.enabled) {
-                uint8_t _sa_saved_bank = mapper_prg_bank;
-                bankswitch_prg(BANK_IR_OPT);
-                ir_optimize(&ir_ctx);
-                bankswitch_prg(BANK_COMPILE);
-                ir_optimize_ext(&ir_ctx);
-                bankswitch_prg(_sa_saved_bank);
+                // IR optimize passes run through WRAM trampoline
+                // (same reason as pass 2 — can't bankswitch from
+                // BANK_SA_CODE without losing our own code).
+                extern void sa_ir_capture_exit(void);
+                sa_ir_capture_exit();
                 flash_byte_program(addr + 8,  BANK_ENTRY_LIST, ir_ctx.exit_a_val);
                 flash_byte_program(addr + 9,  BANK_ENTRY_LIST, ir_ctx.exit_a_known);
                 flash_byte_program(addr + 10, BANK_ENTRY_LIST, ir_ctx.exit_x_val);
@@ -1575,6 +1568,7 @@ static void sa_run_b2(void)
         }
     }
 
+  } // if (sa_do_compile)
 #endif // ENABLE_STATIC_COMPILE
 
     // Restore normal PPU rendering after static analysis
@@ -1640,6 +1634,34 @@ uint8_t sa_subroutine_lookup(uint16_t target_pc)
 #pragma section bank24
 #endif
 
+static uint16_t sa_indirect_find_empty(void)
+{
+    for (uint16_t i = 0; i < SA_INDIRECT_MAX; i++)
+    {
+        uint16_t entry_addr = SA_INDIRECT_BASE + i * 3;
+        uint8_t type = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 2);
+        if (type == SA_TYPE_EMPTY)
+            return i;
+    }
+    return SA_INDIRECT_MAX;
+}
+
+static uint8_t sa_indirect_exists(uint16_t target_pc)
+{
+    for (uint16_t i = 0; i < SA_INDIRECT_MAX; i++)
+    {
+        uint16_t entry_addr = SA_INDIRECT_BASE + i * 3;
+        uint8_t type = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 2);
+        if (type == SA_TYPE_EMPTY)
+            return 0;
+        uint8_t lo = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 0);
+        uint8_t hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+        if ((lo | (hi << 8)) == target_pc)
+            return 1;
+    }
+    return 0;
+}
+
 static void sa_record_indirect_target_b2(uint16_t target_pc, uint8_t type)
 {
     // Quick check: is this address already in the bitmap?
@@ -1691,5 +1713,10 @@ void sa_record_indirect_target(uint16_t target_pc, uint8_t type)
     sa_record_indirect_target_b2(target_pc, type);
     bankswitch_prg(saved_bank);
 }
+
+// sa_record_subroutine_runtime — moved to WRAM assembly stub in
+// dynamos-asm.s to save fixed-bank space.  The asm version does the
+// same save-bank / bankswitch(BANK_SA_CODE) / call / restore pattern
+// but avoids the vbcc __rsave12/__rload12 prologue overhead.
 
 #endif // ENABLE_STATIC_ANALYSIS

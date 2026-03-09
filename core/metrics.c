@@ -54,9 +54,10 @@ extern void     bankswitch_prg(uint8_t bank);
  *   +$39  magic  'M' 'E'
  * ================================================================ */
 
-#define METRICS_WRAM  ((volatile uint8_t *)0x7E30)
+#define METRICS_WRAM  ((volatile uint8_t *)0x7FA0)
 
-#define FLASH_CACHE_SECTORS 16
+// Must match dynamos.h:  13 banks × 4 sectors = 52 sectors, 4KB each
+#define FLASH_CACHE_SECTORS 52
 #define FLASH_SECTOR_SIZE   0x1000UL
 
 /* ---- Banked implementations ---- */
@@ -118,8 +119,8 @@ void metrics_dump_runtime_b2(void)
         uint8_t i;
         for (i = 0; i < FLASH_CACHE_SECTORS; i++)
             total_free += (FLASH_SECTOR_SIZE - sector_free_offset[i]);
-        uint32_t used = (FLASH_CACHE_SECTORS * FLASH_SECTOR_SIZE) - total_free;
-        p[0x38] = (uint8_t)((used * 100UL) / (FLASH_CACHE_SECTORS * FLASH_SECTOR_SIZE));
+        uint32_t used = ((uint32_t)FLASH_CACHE_SECTORS * FLASH_SECTOR_SIZE) - total_free;
+        p[0x38] = (uint8_t)((used * 100UL) / ((uint32_t)FLASH_CACHE_SECTORS * FLASH_SECTOR_SIZE));
     }
 
     /* Magic signature */

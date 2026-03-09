@@ -107,13 +107,27 @@
 // Run the full static analysis pass:
 //   1. Check / write SA header signature
 //   2. BFS walk from vectors + persisted indirect targets
-//   3. (if ENABLE_STATIC_COMPILE) batch-compile discovered entry points
+//   3. (if ENABLE_STATIC_COMPILE && sa_do_compile) batch-compile discovered entry points
+//
+// sa_do_compile must be set to 1 by the platform main() before calling
+// sa_run() for the two-pass static compile to execute.  On cold boot,
+// leave it 0 — only the BFS walk + subroutine analysis runs.
 void sa_run(void);
+
+// Mark an address as known code in the persistent SA bitmap.
+// Single flash bit-clear (free on SST39SF040 — no erase required).
+// Safe to call from any bank (lives in the fixed bank).
+void sa_bitmap_mark(uint16_t addr);
 
 // Record a runtime-discovered indirect-jump target into the persistent
 // flash list.  Called from the interpreter when JMP ($xxxx) is executed.
 // Safe to call from any bank (lives in the fixed bank).
 void sa_record_indirect_target(uint16_t target_pc, uint8_t type);
+
+// Record a runtime-discovered JSR target into the persistent subroutine
+// table.  Called from the JIT compiler when JSR is compiled at runtime.
+// Safe to call from any bank (WRAM trampoline to BANK_SA_CODE, in dynamos-asm.s).
+void sa_record_subroutine_runtime(uint16_t target);
 
 // Check if a JSR target is stack-clean.  Returns SA_SUB_CLEAN,
 // SA_SUB_DIRTY, or SA_SUB_EMPTY (target not found in subroutine table).

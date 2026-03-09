@@ -591,8 +591,11 @@ uint8_t ir_opt_dead_store(ir_ctx_t *ctx)
             if (template_writes_memory(m))
                 break;
 
-            /* Another store to same ZP address? First store is dead. */
-            if (m->op == store_op && (uint8_t)m->operand == target_addr) {
+            /* Another store to same ZP address? First store is dead.
+             * Match any STA/STX/STY, not just the same opcode — e.g.
+             * STA _pc followed by STX _pc is still a dead first store. */
+            if ((m->op == IR_STA_ZP || m->op == IR_STX_ZP || m->op == IR_STY_ZP) &&
+                (uint8_t)m->operand == target_addr) {
                 ir_kill(ctx, i);
                 changes++;
                 break;
@@ -630,8 +633,14 @@ uint8_t ir_opt_dead_load(ir_ctx_t *ctx)
         ir_node_t *n = &ctx->nodes[i];
         if (n->op == IR_DEAD) continue;
 
-        if (n->op != IR_LDA_ZP && n->op != IR_LDX_ZP && n->op != IR_LDY_ZP)
-            continue;
+        /* Determine which register this load targets (0=none/skip) */
+        uint8_t load_reg;  /* 'A', 'X', 'Y', or 0 */
+        switch (n->op) {
+            case IR_LDA_ZP: case IR_LDA_IMM: load_reg = 'A'; break;
+            case IR_LDX_ZP: case IR_LDX_IMM: load_reg = 'X'; break;
+            case IR_LDY_ZP: case IR_LDY_IMM: load_reg = 'Y'; break;
+            default: continue;
+        }
 
         uint8_t reg_dead = 0, flags_dead = 0;
 
@@ -646,17 +655,17 @@ uint8_t ir_opt_dead_load(ir_ctx_t *ctx)
             if (!reg_dead) {
                 uint8_t rused = 0;
                 uint8_t fl = ctx->nodes[j].flags;
-                if (n->op == IR_LDA_ZP && (reads_a(op) || (op == IR_TEMPLATE && (fl & 0x01)))) rused = 1;
-                if (n->op == IR_LDX_ZP && (reads_x(op) || (op == IR_TEMPLATE && (fl & 0x02)))) rused = 1;
-                if (n->op == IR_LDY_ZP && (reads_y(op) || (op == IR_TEMPLATE && (fl & 0x04)))) rused = 1;
+                if (load_reg == 'A' && (reads_a(op) || (op == IR_TEMPLATE && (fl & 0x01)))) rused = 1;
+                if (load_reg == 'X' && (reads_x(op) || (op == IR_TEMPLATE && (fl & 0x02)))) rused = 1;
+                if (load_reg == 'Y' && (reads_y(op) || (op == IR_TEMPLATE && (fl & 0x04)))) rused = 1;
                 if (rused) break;  /* register is live */
 
                 uint8_t writes_reg = 0;
-                if (n->op == IR_LDA_ZP) {
+                if (load_reg == 'A') {
                     writes_reg = writes_a(op) || (op == IR_TEMPLATE && (fl & 0x10));
-                } else if (n->op == IR_LDX_ZP) {
+                } else if (load_reg == 'X') {
                     writes_reg = writes_x(op) || (op == IR_TEMPLATE && (fl & 0x20));
-                } else if (n->op == IR_LDY_ZP) {
+                } else {
                     writes_reg = writes_y(op) || (op == IR_TEMPLATE && (fl & 0x40));
                 }
                 if (writes_reg) reg_dead = 1;

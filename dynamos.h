@@ -118,6 +118,19 @@
 #define CACHE_SIG_MAGIC_3       0x01   // version 1
 #define CACHE_SIG_SIZE          8      // 4 magic + 4 ROM hash
 
+// Recompile-requested signature
+// Stored at offset $3C8 in bank 3 (gap between flash_block_flags and cache_sig).
+// Written by reset triggers (cache pressure / Select+Start hold) before
+// soft-reset; checked by boot code to detect a deliberate recompile cycle.
+// Value $55 = "recompile requested".  Cleared by writing $00 (burn bits).
+#define RECOMPILE_SIG_OFFSET     0x3C8
+#define RECOMPILE_SIG_ADDRESS    (FLASH_BANK_BASE + RECOMPILE_SIG_OFFSET)
+#define RECOMPILE_SIG_VALUE      0x55
+
+// Cache pressure threshold: ~80% of available sectors triggers auto-reset.
+// FLASH_CACHE_SECTORS = 52 (13 banks × 4 sectors), threshold ≈ 42.
+#define FLASH_CACHE_PRESSURE_THRESHOLD  ((FLASH_CACHE_SECTORS * 4) / 5)
+
 #pragma section bank23
 extern const unsigned char rom_sidetrac[];
 extern const unsigned char rom_targ[];
@@ -157,6 +170,13 @@ __regsused("a/x/y") extern void flash_dispatch_return_no_regs();
 __regsused("a/x/y") extern void cross_bank_dispatch();
 __regsused("a/x/y") extern void xbank_trampoline();
 extern uint8_t xbank_addr;
+
+#ifdef PLATFORM_NES
+// Flash data copy for indexed ROM reads — see nes_rom_data_copy() in dynamos.c.
+// ROM data is copied into the flash cache sector at compile time.
+// No runtime bank-switching needed.
+extern uint8_t nes_rom_copy_bank;   // set by nes_rom_data_copy()
+#endif
 
 
 extern uint8_t addr_6502_indy[];

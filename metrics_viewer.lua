@@ -4,7 +4,7 @@
 -- Usage:  In Mesen → Script Window → Open this file → Run
 --
 -- WRAM layout (written by metrics.c):
---   $7E30 +$00  bfs_addresses_visited  u16
+--   $7FA0 +$00  bfs_addresses_visited  u16
 --         +$02  bfs_entry_points       u16
 --         +$04  bitmap_marked          u16
 --         +$06  blocks_compiled        u16
@@ -35,7 +35,7 @@
 --         +$54  ir_pass_pair_rewrite   u16  (Pass 4: pair rewrite + CMP#0)
 --         +$56  ir_pass_rmw_fusion    u16  (Pass 5+6: shift/inc/dec fusion)
 
-local BASE = 0x7E30   -- CPU address (WRAM $6000-$7FFF mapped)
+local BASE = 0x7FA0   -- CPU address (WRAM $6000-$7FFF mapped)
 local MEM  = emu.memType.nesDebug  -- side-effect-free reads
 
 -- helpers

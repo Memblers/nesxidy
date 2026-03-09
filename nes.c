@@ -84,6 +84,8 @@ uint8_t PPUSCROLL_soft[2];
 extern void bankswitch_prg(__reg("a") uint8_t bank);
 extern uint8_t mapper_prg_bank;
 extern void flash_sector_erase(uint16_t addr, uint8_t bank);
+extern void flash_byte_program(uint16_t addr, uint8_t bank, uint8_t data);
+extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
 extern void flash_cache_init_sectors(void);
 
 __zpage uint8_t last_nmi_frame;  // __zpage: ASM dispatch references it directly
@@ -99,6 +101,16 @@ uint8_t nmi_sp_guard;  // sp value just before nmi6502()
 // page here instead of hitting the hardware register directly.  The main
 // loop executes the actual DMA during VBlank when timing is correct.
 uint8_t oam_dma_request = 0;
+
+// Raw gamepad state (lazynes convention: bit SET = pressed).
+// Stored by nes_gamepad_refresh() for use by recompile trigger checks.
+static uint8_t cached_raw_pad = 0;
+
+// Recompile trigger state
+static uint8_t cache_pressure_frames = 0;
+
+// Assembly routine: JMP ($FFFC) — never returns.
+extern void trigger_soft_reset(void);
 
 
 // ******************************************************************************************
@@ -163,6 +175,78 @@ void nes_register_write(uint16_t address, uint8_t value)
 
 
 // ******************************************************************************************
+// Recompile signature helpers — warm boot detection and reset triggers
+//
+// Banked into BANK_RENDER (bank21) to save fixed-bank space.  The
+// flash_byte_program / peek_bank_byte routines live in WRAM so they
+// are callable from any bank.  trigger_soft_reset is also in WRAM.
+// ******************************************************************************************
+
+#pragma section bank21
+
+static void write_recompile_signature_b21(void)
+{
+	flash_byte_program(RECOMPILE_SIG_ADDRESS, BANK_FLASH_BLOCK_FLAGS, RECOMPILE_SIG_VALUE);
+}
+
+uint8_t check_recompile_signature_b21(void)
+{
+	uint8_t val = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, RECOMPILE_SIG_ADDRESS);
+	return (val == RECOMPILE_SIG_VALUE);
+}
+
+void clear_recompile_signature_b21(void)
+{
+	flash_byte_program(RECOMPILE_SIG_ADDRESS, BANK_FLASH_BLOCK_FLAGS, 0x00);
+}
+
+static void check_recompile_triggers_b21(void)
+{
+	extern uint16_t sector_free_offset[];
+
+	// --- Cache pressure auto-reset ---
+	// Count how many sectors are actually occupied (sector_free_offset > 0).
+	// next_free_sector is a wrapping cursor and cannot be used as a
+	// high-water mark — it wraps to 0 after reaching FLASH_CACHE_SECTORS.
+	{
+		uint8_t occupied = 0;
+		for (uint8_t i = 0; i < FLASH_CACHE_SECTORS; i++) {
+			if (sector_free_offset[i] > 0)
+				occupied++;
+		}
+		if (occupied >= FLASH_CACHE_PRESSURE_THRESHOLD) {
+			cache_pressure_frames++;
+			if (cache_pressure_frames >= 8) {  // ~0.13s confirmation
+				write_recompile_signature_b21();
+				trigger_soft_reset();
+				// Never reached
+			}
+		} else {
+			cache_pressure_frames = 0;
+		}
+	}
+
+	// --- Manual B+Select press (instantaneous) ---
+	if ((cached_raw_pad & (lfB | lfSelect)) == (lfB | lfSelect)) {
+		write_recompile_signature_b21();
+		trigger_soft_reset();
+		// Never reached
+	}
+}
+
+#pragma section default
+
+// Fixed-bank trampoline — called once per frame from the main loop.
+static void check_recompile_triggers(void)
+{
+	uint8_t saved = mapper_prg_bank;
+	bankswitch_prg(BANK_RENDER);
+	check_recompile_triggers_b21();
+	bankswitch_prg(saved);
+}
+
+
+// ******************************************************************************************
 // Main
 // ******************************************************************************************
 
@@ -203,6 +287,26 @@ int main(void)
 
 	lnPPUCTRL &= ~0x08;
 	lnPPUMASK = 0x3A;
+
+	// --- Cold boot vs warm boot ---
+	// Warm boot: recompile signature was written by a reset trigger
+	// (cache pressure or Select+Start hold).  SA data is richer than
+	// at the previous boot.  Clear the signature and proceed with a
+	// full flash format (SA sectors protected) + two-pass static compile.
+	//
+	// Cold boot: no signature present.  Same path — flash_format() with
+	// SA sector protection preserves any SA data from prior sessions.
+	{
+		extern uint8_t sa_do_compile;
+		uint8_t saved_bank = mapper_prg_bank;
+		bankswitch_prg(BANK_RENDER);
+		if (check_recompile_signature_b21()) {
+			clear_recompile_signature_b21();
+			// Warm boot — SA data intact, static compile will run
+			sa_do_compile = 1;
+		}
+		bankswitch_prg(saved_bank);
+	}
 
 #ifdef ENABLE_CACHE_PERSIST
 	flash_init_persist();
@@ -278,6 +382,7 @@ int main(void)
 				{
 					// Guest main loop — safe to render and fire NMI
 					nes_gamepad_refresh();
+					check_recompile_triggers();
 #ifdef ENABLE_METRICS
 					{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
@@ -325,6 +430,7 @@ int main(void)
 		{
 			frame_time += FRAME_LENGTH;
 			nes_gamepad_refresh();
+			check_recompile_triggers();
 #ifdef ENABLE_METRICS
 			{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
@@ -432,6 +538,7 @@ void nes_gamepad_refresh(void)
 {
 	uint8_t targ = 0;
 	uint8_t joypad = lnGetPad(1);
+	cached_raw_pad = joypad;  // store raw for recompile trigger detection
 	targ |= (joypad & lfR) ? TARG_RIGHT : 0;
 	targ |= (joypad & lfL) ? TARG_LEFT  : 0;
 	targ |= (joypad & lfU) ? TARG_UP    : 0;
@@ -476,10 +583,21 @@ void render_video(void)
 
 // ******************************************************************************************
 // flash_format — erase all flash cache banks
+//
+// Banked into BANK_INIT_CODE (bank19) — only called once at boot.
+// flash_sector_erase lives in WRAM so it is callable from any bank.
 // ******************************************************************************************
 
-void flash_format(void)
+#pragma section bank19
+
+static void flash_format_b19(void)
 {
+#ifdef ENABLE_STATIC_ANALYSIS
+	// Extern refs for SA_SECTOR_FIRST/LAST macros (defined in static_analysis.c)
+	extern uint8_t sa_code_bitmap[];
+	extern uint8_t sa_subroutine_list[];
+#endif
+
 	for (uint8_t bank = 3; bank < 31; bank++)
 	{
 		// Skip repurposed banks
@@ -492,6 +610,24 @@ void flash_format(void)
 		if (bank == BANK_INIT_CODE) continue;
 
 		for (uint16_t sector = 0x8000; sector < 0xC000; sector += 0x1000)
+		{
+#ifdef ENABLE_STATIC_ANALYSIS
+			// Protect the SA persistence region in bank 3 from erasure.
+			if (bank == 3 && sector >= SA_SECTOR_FIRST && sector <= SA_SECTOR_LAST)
+				continue;
+#endif
 			flash_sector_erase(sector, bank);
+		}
 	}
+}
+
+#pragma section default
+
+// Fixed-bank trampoline — called once at boot from main().
+void flash_format(void)
+{
+	uint8_t saved = mapper_prg_bank;
+	bankswitch_prg(BANK_INIT_CODE);
+	flash_format_b19();
+	bankswitch_prg(saved);
 }

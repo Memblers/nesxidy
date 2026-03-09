@@ -247,6 +247,7 @@ _fff0_dispatch_a_saved:
 ;=======================================================	
 	section "data"
 	global _cross_bank_dispatch
+	zpage _dispatch_sp
 ;-------------------------------------------------------
 ; Cross-bank dispatch trampoline (fixed bank)
 ; Called from patchable epilogue slow path when exit_pc is in a different
@@ -256,17 +257,30 @@ _fff0_dispatch_a_saved:
 ; On entry (from epilogue slow path):
 ;   _a, _pc already saved by epilogue
 ;   X, Y still live from guest code
-;   Stack: [epilogue's PHP] [.dispatch_addr JSR return] [run_6502 return]
+;   Stack: [epilogue's PHP] [.dispatch_addr JSR return] [caller return]
+;   (PHP may be missing if the IR lowerer produced code with an instruction
+;    alignment issue — the epilogue's PHP byte gets consumed as a data
+;    operand of the preceding instruction.)
 ;
-; Pops PHP and the stale .dispatch_addr return, then JMPs to dispatch_on_pc
-; which creates a fresh JSR .dispatch_addr for the next block.
+; Pops one byte as best-effort _status, then restores SP from _dispatch_sp
+; (saved before the JSR) to cleanly discard remaining stack bytes.
 _cross_bank_dispatch:
 	stx _x				; save X (not saved by epilogue)
 	sty _y				; save Y (not saved by epilogue)
-	pla					; pop epilogue's PHP
+	; Pop whatever is on top — epilogue's PHP (correct _status) or
+	; the JSR return byte (wrong _status, if PHP was missing due to
+	; instruction alignment issues in IR-lowered code).  Either way
+	; we get a best-effort _status and avoid crashing.
+	pla
 	sta _status
-	pla					; pop stale .dispatch_addr return lo
-	pla					; pop stale .dispatch_addr return hi
+	; Restore stack pointer to the level saved before JSR
+	; .dispatch_addr_instruction.  This cleanly discards the remaining
+	; JSR return bytes (and any stale PHP), regardless of whether the
+	; block pushed PHP or not.  Without this, a missing PHP causes the
+	; third PLA to consume a byte from the caller's frame, and the
+	; subsequent not_recompiled RTS jumps to garbage.
+	ldx _dispatch_sp
+	txs
 	jmp _dispatch_on_pc	; re-dispatch _pc without C round-trip
 
 ;=======================================================	
@@ -360,6 +374,9 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 .addr_valid:
 
 	lda target_bank
+	if PLATFORM_NES
+	; (flash_exec_bank removed — flash data copy lives in same bank as code)
+	endif
 	sta $C000
 
 	; --- Block cycle counting (DISABLED) ---
@@ -382,6 +399,11 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	; PC table update (writing the table entry only after code is in
 	; flash) is the primary crash fix; the sentinel write is kept as
 	; forensic metadata for offline flash dumps.
+
+	; Save stack pointer before JSR so cross_bank_dispatch can
+	; restore it cleanly, even if the block's epilogue is missing PHP.
+	tsx
+	stx _dispatch_sp
 
 	lda _status
 	;ora #$04	; REMOVED: was hiding IRQ flag during JIT, but this
@@ -450,11 +472,12 @@ _flash_dispatch_return_no_regs:
 	zpage _last_nmi_frame, _native_jsr_saved_sp
 	global _native_jsr_trampoline
 _native_jsr_trampoline:
-	; Save outer _native_jsr_saved_sp on NES stack for nesting safety.
-	; If an inner NJSR fires, it overwrites _native_jsr_saved_sp;
-	; we restore the outer value on exit so the caller's trampoline
-	; still checks against the correct SP threshold.
+	; Save outer _native_jsr_saved_sp and _dispatch_sp on NES stack
+	; for nesting safety.  If an inner NJSR fires, it overwrites both;
+	; we restore the outer values on exit.
 	lda _native_jsr_saved_sp
+	pha
+	lda _dispatch_sp
 	pha
 .njsr_loop:
 	jsr _dispatch_on_pc		; dispatch current _pc block
@@ -499,8 +522,10 @@ _native_jsr_trampoline:
 	
 	; Subroutine completed (SP restored). _pc and _status are already
 	; set correctly by the nrts template's inner dispatch.
-	; Restore outer saved_sp, pop njsr's PHP, return 0.
-	pla						; restore outer saved_sp
+	; Restore outer saved values (pop in reverse push order), return 0.
+	pla						; restore outer _dispatch_sp
+	sta _dispatch_sp
+	pla						; restore outer _native_jsr_saved_sp
 	sta _native_jsr_saved_sp
 	pla						; discard njsr's PHP (don't overwrite _status!)
 	lda #0					; return 0 = executed from flash
@@ -511,7 +536,9 @@ _native_jsr_trampoline:
 	; _status was already saved by the last block's epilogue.
 	; Preserve dispatch result (A=1 compile, A=2 interpret) across stack cleanup.
 	tax						; save dispatch result in X
-	pla						; restore outer saved_sp
+	pla						; restore outer _dispatch_sp
+	sta _dispatch_sp
+	pla						; restore outer _native_jsr_saved_sp
 	sta _native_jsr_saved_sp
 	pla						; discard njsr's PHP
 	txa						; return actual dispatch result (1 or 2)
@@ -1299,9 +1326,10 @@ _indy_ptr:		reserve 2
 
 ;=======================================================
 	section "zpage"
-	global _native_jsr_saved_sp
+	global _native_jsr_saved_sp, _dispatch_sp
 ;-------------------------------------------------------
 _native_jsr_saved_sp:	reserve 1
+_dispatch_sp:			reserve 1
 
 ;=======================================================
 ; NES ZP slots for native pointer mirroring.
@@ -1467,6 +1495,179 @@ _peek_bank_byte:
 	sta $C000			; restore caller's bank
 	pla
 	sta r0				; return value
+	rts
+
+; (ROM read thunks removed — replaced by flash data copy in dynamos.c)
+
+;=======================================================
+	section "data"
+	global _trigger_soft_reset
+;-------------------------------------------------------
+; trigger_soft_reset() — jump to NES reset vector.
+; Never returns.  Lives in WRAM so it is always reachable
+; regardless of which bank is mapped at $8000-$BFFF.
+;
+; CRITICAL: Must map PRG bank 0 before jumping.  The C startup
+; copies the data-init image from the switchable bank ($8000-$BFFF)
+; to WRAM.  If the wrong bank is still mapped, WRAM gets garbage
+; (all globals + WRAM code — flash_byte_program, peek_bank_byte,
+; dispatch_on_pc, etc. — are corrupted).
+;
+_trigger_soft_reset:
+	lda _mapper_chr_bank	; preserve CHR bank, PRG bank = 0
+	sta $C000
+	jmp ($FFFC)
+
+;=======================================================
+	section "data"
+	global _sa_record_subroutine_runtime
+;-------------------------------------------------------
+; sa_record_subroutine_runtime(uint16_t target) — WRAM trampoline
+; Saves current bank, switches to BANK_SA_CODE, calls
+; sa_record_subroutine(target), then restores the previous bank.
+; Lives in WRAM so it's reachable from any bank (callers in bank2).
+; Argument already in r0/r1 per vbcc calling convention — passed
+; through to sa_record_subroutine untouched.
+;
+	if PLATFORM_NES
+SA_CODE_BANK = 19
+	else
+SA_CODE_BANK = 24
+	endif
+
+_sa_record_subroutine_runtime:
+	lda _mapper_prg_bank		; save current PRG bank
+	pha
+	lda #SA_CODE_BANK			; switch to SA code bank
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+	jsr _sa_record_subroutine	; target still in r0/r1
+	pla							; restore previous PRG bank
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+	rts
+
+;=======================================================
+	section "data"
+	global _sa_ir_pipeline_full, _sa_ir_capture_exit, _sa_ir_lowered_size
+;-------------------------------------------------------
+; sa_ir_pipeline_full() — WRAM trampoline for SA pass 2 IR pipeline.
+; Called from sa_compile_one_block (in BANK_SA_CODE) when the block
+; needs IR optimize + lower.  Switches through banks 0, 17, 1 and
+; back to BANK_SA_CODE.  Lives in WRAM so bankswitches don't affect
+; the code being executed.
+;
+; On entry:  BANK_SA_CODE is mapped
+; On exit:   BANK_SA_CODE restored, _sa_ir_lowered_size set
+;
+
+_sa_ir_lowered_size:
+	reserve 1
+
+_sa_ir_pipeline_full:
+	; Step 1: ir_optimize(&ir_ctx) in bank 0
+	lda #0
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+	lda #<_ir_ctx
+	sta r0
+	lda #>_ir_ctx
+	sta r1
+	jsr _ir_optimize
+	; Step 2: ir_optimize_ext(&ir_ctx) in bank 17
+	lda #17
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+	lda #<_ir_ctx
+	sta r0
+	lda #>_ir_ctx
+	sta r1
+	jsr _ir_optimize_ext
+	; Step 3: ir_opt_rmw_fusion(&ir_ctx) in bank 1
+	lda #1
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+	lda #<_ir_ctx
+	sta r0
+	lda #>_ir_ctx
+	sta r1
+	jsr _ir_opt_rmw_fusion
+	; Step 4: ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE)
+	; still in bank 1
+	lda #<_ir_ctx
+	sta r0
+	lda #>_ir_ctx
+	sta r1
+	lda #<_cache_code
+	sta r2
+	lda #>_cache_code
+	sta r3
+	lda #250				; CACHE_CODE_BUF_SIZE
+	sta r4
+	jsr _ir_lower
+	; A = return value from ir_lower (pos = lowered byte count).
+	; vbcc returns uint8_t in A, NOT r0.  r0 ($0000) is restored to
+	; the ctx pointer low byte ($0E = 14) by the callee's register
+	; restore epilogue.  Reading r0 here would always give $0E,
+	; causing every SA block to get lowered_size=14 regardless of
+	; actual size — stale cache_code data (including JMP $FFFF from
+	; previous blocks' epilogues) leaks into flash → crash.
+	sta _sa_ir_lowered_size	; save lowered_size for C caller
+	beq .sa_skip_ci
+	sta _code_index		; update code_index for resolution functions
+.sa_skip_ci:
+	; Step 5: ir_resolve_direct_branches() in bank 1 (no args)
+	jsr _ir_resolve_direct_branches
+	; Step 6: ir_rebuild_block_ci_map() in bank 1 (no args)
+	jsr _ir_rebuild_block_ci_map
+	; Step 7: ir_resolve_deferred_patches() in bank 1 (no args)
+	jsr _ir_resolve_deferred_patches
+	; Restore BANK_SA_CODE
+	lda #SA_CODE_BANK
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+	rts
+
+;-------------------------------------------------------
+; sa_ir_capture_exit() — WRAM trampoline for SA pass 1 exit-state capture.
+; Called from sa_run_b2 (in BANK_SA_CODE) to run IR optimize passes
+; that populate ir_ctx.exit_* fields.
+;
+; On entry:  BANK_SA_CODE is mapped
+; On exit:   BANK_SA_CODE restored, ir_ctx.exit_* populated
+;
+_sa_ir_capture_exit:
+	; Step 1: ir_optimize(&ir_ctx) in bank 0
+	lda #0
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+	lda #<_ir_ctx
+	sta r0
+	lda #>_ir_ctx
+	sta r1
+	jsr _ir_optimize
+	; Step 2: ir_optimize_ext(&ir_ctx) in bank 17
+	lda #17
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+	lda #<_ir_ctx
+	sta r0
+	lda #>_ir_ctx
+	sta r1
+	jsr _ir_optimize_ext
+	; Restore BANK_SA_CODE
+	lda #SA_CODE_BANK
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
 	rts
 
 ;=======================================================	

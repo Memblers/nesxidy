@@ -45,8 +45,12 @@ uint8_t addrmodes[256] = {
 };
 #pragma section default
 
-// Address translation - lives in fixed bank ($C000+), callable from bank2.
-// Only references BSS globals (RAM_BASE, ROM_NAME, etc.), no bank switching.
+// Address translation — only called from recompile_opcode_b2 (bank2).
+// NES build: placed in bank2 (b31 is tight, b2 has room).
+// Exidy build: stays in default/b31 (b2 is tight on Exidy).
+#ifdef PLATFORM_NES
+#pragma section bank2
+#endif
 uint16_t translate_address(uint16_t src_addr) {
 #ifdef PLATFORM_NES
     // NES memory map: $0000-$07FF=RAM, $8000-$FFFF=ROM, rest=I/O
@@ -111,6 +115,18 @@ uint16_t translate_address(uint16_t src_addr) {
 }
 #pragma section default
 
+#ifdef PLATFORM_NES
+// Convert an absolute-addressed read opcode to its immediate equivalent.
+// Returns the immediate opcode, or 0 if no immediate form exists.
+// Lives in bank 31 (fixed) — only does arithmetic, no bank-specific data.
+static uint8_t nes_abs_to_imm(uint8_t op) {
+    uint8_t lo = op & 0x0F;
+    if (lo == 0x0D && op != 0x8D) return op - 4;
+    if (op == 0xAC || op == 0xCC || op == 0xEC || op == 0xAE) return op - 0x0C;
+    return 0;
+}
+#endif
+
 __zpage extern uint8_t sp;
 __zpage extern uint8_t a;
 __zpage extern uint8_t x;
@@ -170,6 +186,13 @@ __zpage uint8_t  idle_count   = 0;
 //   0 = dynamic (runtime) or pass-1 measure — forward branches use 21-byte patchable template
 //   2 = pass-2 emit — forward branches use lookup_entry_list() for direct branches
 uint8_t sa_compile_pass = 0;
+
+// Static-compile gate: set to 1 by the platform's main() when a warm-boot
+// recompile is requested (recompile signature detected).  sa_run_b2()
+// checks this before entering the two-pass compile.  On cold boot this
+// stays 0 — only BFS walk + subroutine analysis runs, and the dynamic
+// JIT fills the cache at runtime.
+uint8_t sa_do_compile = 0;
 
 // Pass 2: forced exit PC for the current block being compiled.
 // Set by sa_run before calling sa_compile_one_block in pass 2.
@@ -326,6 +349,12 @@ uint16_t pc_jump_flag_address;
 uint8_t pc_jump_flag_bank;
 uint16_t flash_code_address;
 uint8_t flash_code_bank;
+
+#ifdef PLATFORM_NES
+// Floor for sector_free_offset shrink — data copies placed beyond code
+// must not be reclaimed.  Reset to 0 at the start of each recompile.
+uint16_t sector_alloc_floor;
+#endif
 
 
 // Removed: local addrmodes[] array - now using cpu_6502_addrmodes from frontend/cpu_6502.c
@@ -529,6 +558,11 @@ batch_exit:  // case 1 (compile needed) jumps here
 	// Compile directly to flash
 	cache_misses++;
 
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+	// Darken screen during dynamic compile (all 3 emphasis bits)
+	IO8(0x2001) = lnPPUMASK | 0xE0;
+#endif
+
 	// Save the entry PC before compilation
 	uint16_t entry_pc = pc;
 	
@@ -568,6 +602,10 @@ batch_exit:  // case 1 (compile needed) jumps here
 	extern uint16_t sector_free_offset[];
 	extern uint8_t next_free_sector;
 	uint8_t pre_alloc_next_free = next_free_sector;
+#ifdef PLATFORM_NES
+	extern uint16_t sector_alloc_floor;
+	sector_alloc_floor = 0;
+#endif
 	
 	if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
 	{
@@ -1017,6 +1055,13 @@ batch_exit:  // case 1 (compile needed) jumps here
 		//  - Any future bugs that create premature table entries
 		flash_byte_program(flash_code_address + 7, flash_code_bank, BLOCK_SENTINEL);
 
+#ifdef ENABLE_STATIC_ANALYSIS
+		// Record this entry PC in the SA bitmap so the next boot's BFS walk
+		// includes all runtime-discovered code addresses.  Single flash
+		// bit-clear (1→0), free on SST39SF040 — no erase required.
+		sa_bitmap_mark(entry_pc);
+#endif
+
 #ifdef ENABLE_IR
 		// --- Deferred IR entry-PC table update ---
 		// Now that both the header and code are in flash, it's safe to
@@ -1062,7 +1107,15 @@ batch_exit:  // case 1 (compile needed) jumps here
 #endif  /* ENABLE_IR */
 
 		// Shrink sector allocation to actual size used (avoid wasting space)
-		sector_free_offset[next_free_sector] = (flash_code_address & FLASH_SECTOR_MASK) + BLOCK_HEADER_SIZE + code_index;
+		{
+			uint16_t shrunk = (flash_code_address & FLASH_SECTOR_MASK) + BLOCK_HEADER_SIZE + code_index;
+#ifdef PLATFORM_NES
+			// Don't reclaim ROM data copies placed beyond the code block
+			if (shrunk < sector_alloc_floor)
+				shrunk = sector_alloc_floor;
+#endif
+			sector_free_offset[next_free_sector] = shrunk;
+		}
 
 #ifdef ENABLE_OPTIMIZER
 		// Notify optimizer that a new unique block was compiled
@@ -1356,6 +1409,53 @@ static uint8_t try_intra_block_branch_b17(uint16_t target_pc, uint8_t branch_opc
 	return 1;
 }
 
+#ifdef PLATFORM_NES
+// nes_rom_data_copy_b17 — allocate 256 bytes in a flash sector and copy
+// ROM data there.  Returns the absolute flash address of the data, or 0
+// on failure (all sectors full).
+//
+// rom_offset: offset into PRG ROM (encoded_address & 0x3FFF)
+// Result: absolute address in flash ($8000-$BFFF range) of 256 data bytes,
+//         with the correct bank stored in nes_rom_copy_bank.
+//
+// The caller emits e.g. LDA flash_addr,X using the returned address.
+// At runtime, dispatch_on_pc switches to the code block's bank, and the
+// ROM data copy lives in the SAME flash sector — zero bank switching.
+
+static uint16_t nes_rom_data_copy_b17(uint16_t rom_offset)
+{
+	// Find a sector with >= 256 free bytes
+	uint8_t s = next_free_sector;
+	uint8_t start_s = s;
+	uint8_t checked = 0;
+	for (;;) {
+		if (s >= FLASH_CACHE_SECTORS) s = 0;
+		if (checked && s == start_s) return 0;  // all full
+		checked = 1;
+		uint16_t cur = sector_free_offset[s];
+		if (cur + 256 <= FLASH_ERASE_SECTOR_SIZE) break;  // fits
+		s++;
+	}
+	uint8_t bank = (s >> 2) + BANK_CODE;
+	uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(s & 3) << 12);
+	uint16_t flash_addr = sector_base + sector_free_offset[s];
+
+	// Copy 256 ROM bytes from BANK_NES_PRG_LO into flash
+	uint16_t rom_base = (uint16_t)&ROM_NAME[rom_offset];
+	for (uint16_t i = 0; i < 256; i++) {
+		uint8_t byte = peek_bank_byte(BANK_NES_PRG_LO, rom_base + i);
+		flash_byte_program(flash_addr + i, bank, byte);
+	}
+
+	sector_free_offset[s] += 256;
+	// Prevent post-compile shrink from reclaiming this data copy
+	if (sector_free_offset[s] > sector_alloc_floor)
+		sector_alloc_floor = sector_free_offset[s];
+	nes_rom_copy_bank = bank;
+	return flash_addr;
+}
+#endif
+
 //============================================================================================================
 // Fixed-bank trampolines for BANK_COMPILE functions.
 // Save caller's bank, switch to bank 17, call _b17 impl, restore bank.
@@ -1370,6 +1470,18 @@ uint8_t flash_sector_alloc(uint8_t total_size)
 	bankswitch_prg(saved_bank);
 	return result;
 }
+
+#ifdef PLATFORM_NES
+uint8_t nes_rom_copy_bank;   // bank of last successful ROM data copy
+uint16_t nes_rom_data_copy(uint16_t rom_offset)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint16_t result = nes_rom_data_copy_b17(rom_offset);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+#endif
 
 // Result globals for lookup_native_addr_safe (and formerly reserve_block_for_pc)
 uint16_t reserve_result_addr;    // native entry address of looked-up block
@@ -2683,6 +2795,10 @@ static uint8_t recompile_opcode_b2_inner()
 				pc += 3;
 				code_index += opcode_6502_njsr_size;
 				block_has_jsr = 1;
+#ifdef ENABLE_STATIC_ANALYSIS
+				// Record JSR target for stack-safety analysis on next boot
+				sa_record_subroutine_runtime(target);
+#endif
 #ifdef ENABLE_IR
 				ir_tmpl_id = IR_TMPL_NJSR;
 #endif
@@ -2705,6 +2821,10 @@ static uint8_t recompile_opcode_b2_inner()
 				pc += 3;
 				code_index += opcode_6502_jsr_size;
 				block_has_jsr = 1;
+#ifdef ENABLE_STATIC_ANALYSIS
+				// Record JSR target for stack-safety analysis on next boot
+				sa_record_subroutine_runtime(target);
+#endif
 #ifdef ENABLE_IR
 				ir_tmpl_id = IR_TMPL_JSR;
 #endif
@@ -2852,13 +2972,59 @@ static uint8_t recompile_opcode_b2_inner()
 						code_ptr[code_index+2] = (uint8_t) (decoded_address >> 8);
 					}
 					else
-						enable_interpret();							
-		
+					{
+#ifdef PLATFORM_NES
+						// NES ROM at $8000+: translate_address returns 0
+						// because ROM_NAME lives in the flash cache window.
+						if (encoded_address >= 0x8000) {
+							uint8_t am = addrmodes[op_buffer_0];
+							// Constant-fold: non-indexed abs reads → immediate
+							if (am == abso) {
+								uint8_t imm_op = nes_abs_to_imm(op_buffer_0);
+								if (imm_op) {
+									extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+									code_ptr[code_index] = imm_op;
+									code_ptr[code_index+1] = peek_bank_byte(
+										BANK_NES_PRG_LO,
+										(uint16_t)&ROM_NAME[encoded_address & 0x3FFF]);
+									pc += 3;
+									code_index += 2;
+									break;
+								}
+							}
+							// Indexed ROM reads (abs,X / abs,Y): copy ROM data into
+							// the flash cache sector, then emit the original opcode
+							// pointing at the flash copy.  Zero bank-switch overhead
+							// at runtime — normal 3-byte instruction, ~4 cycles.
+							else if (am == absx || am == absy) {
+								extern uint16_t nes_rom_data_copy(uint16_t rom_offset);
+								extern uint8_t nes_rom_copy_bank;
+								uint16_t fa = nes_rom_data_copy(encoded_address & 0x3FFF);
+								if (fa) {
+									// Verify the copy ended up in the same bank as
+									// the code block.  If not, fall through to interpret
+									// (cross-bank data ref would need a bankswitch).
+									if (nes_rom_copy_bank == flash_code_bank) {
+										code_ptr[code_index+1] = (uint8_t)fa;
+										code_ptr[code_index+2] = (uint8_t)(fa >> 8);
+										pc += 3;
+										code_index += 3;
+										break;
+									}
+								}
+							}
+						}
+#endif
+						enable_interpret();
+					}
 					pc += 3;
 					code_index += 3;
 
 					// Emit dirty flag for stores to screen/char RAM.
 					// Skip if we already INC'd that region in this block.
+					// NES: disabled — NES has no screen/char RAM at $40xx-$4Fxx.
+					// $40xx on NES = APU registers (no dirty tracking needed).
+#ifndef PLATFORM_NES
 					if (decoded_address)
 					{
 						uint8_t msb = encoded_address >> 8;
@@ -2879,6 +3045,7 @@ static uint8_t recompile_opcode_b2_inner()
 							}
 						}
 					}
+#endif
 					break;
 				}						
 				
@@ -3263,11 +3430,11 @@ uint8_t recompile_opcode(void)
 	bankswitch_prg(saved_bank);
 
 #ifdef ENABLE_COMPILE_PPU_EFFECT
-	// Toggle red emphasis (bit 5) per instruction compiled (SA boot only)
+	// Toggle greyscale per instruction (SA boot only — darkened screen)
 	if (compile_ppu_active) {
-		compile_ppu_effect ^= 0x20;
-		lnPPUMASK = 0x3B | compile_ppu_effect;
-		*(volatile uint8_t*)0x2001 = lnPPUMASK;  // mid-frame
+		compile_ppu_effect ^= 0x01;
+		lnPPUMASK = 0x1A | 0xE0 | compile_ppu_effect;
+		*(volatile uint8_t*)0x2001 = lnPPUMASK;
 	}
 #endif
 

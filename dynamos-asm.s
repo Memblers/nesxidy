@@ -251,7 +251,7 @@ _fff0_dispatch_a_saved:
 ;=======================================================	
 	section "data"
 	global _cross_bank_dispatch
-	zpage _dispatch_sp
+	zpage _dispatch_sp, _nmi_yield
 ;-------------------------------------------------------
 ; Cross-bank dispatch trampoline (fixed bank)
 ; Called from patchable epilogue slow path when exit_pc is in a different
@@ -289,9 +289,28 @@ _cross_bank_dispatch:
 	; block pushed PHP or not.  Without this, a missing PHP causes the
 	; third PLA to consume a byte from the caller's frame, and the
 	; subsequent not_recompiled RTS jumps to garbage.
+	lda #0
+	sta _nmi_yield			; clear VBlank yield flag (prevent re-yield)
 	ldx _dispatch_sp
 	txs
 	jmp _dispatch_on_pc	; re-dispatch _pc without C round-trip
+
+;=======================================================	
+	section "data"
+	global _nmi_yield_hook
+;-------------------------------------------------------
+; NMI VBlank yield hook (WRAM, called from lazyNES NMI handler)
+;
+; The lazyNES NMI handler calls JSR _nmiCallback every VBlank.
+; A post-build patch redirects that JSR to this hook, which sets
+; bit 7 of nmi_yield — signaling compiled backward-branch stubs
+; to yield on their next iteration.  A/X/Y are already saved by
+; the NMI handler, so we can freely use A here.
+;
+_nmi_yield_hook:
+	lda #$80
+	sta _nmi_yield			; set bit 7 — backward branch stubs see BMI
+	rts
 
 ;=======================================================	
 	section "data"
@@ -557,6 +576,8 @@ _native_jsr_trampoline:
 	cmp _last_nmi_frame		; has a new vblank occurred?
 	beq .njsr_no_vblank		; no → skip absorb
 	sta _last_nmi_frame		; absorb vblank: update last_nmi_frame
+	lda #0
+	sta _nmi_yield			; clear VBlank yield flag (vblank absorbed here)
 	; Hook: optimizer frame tick — the NJSR trampoline absorbs vblanks
 	; so the C main loop never sees them.  Call opt2_frame_tick here so
 	; the settling detector and link resolver still fire.

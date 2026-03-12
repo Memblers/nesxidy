@@ -549,22 +549,25 @@ void ir_resolve_direct_branches(void)
 
 #ifdef PLATFORM_NES
             if (intra_block && native_offset < 0) {
-                /* Counted backward branch stub for NES.
+                /* VBlank-triggered backward branch stub for NES.
                  * Intra-block backward branches can create tight loops that
                  * never return to the dispatch loop, blocking NMI and PPU
-                 * updates.  This stub decrements a zero-page counter on each
-                 * backward-branch-take; every 256th take forces a dispatch
-                 * exit so the main loop can process NMI / rendering.
+                 * updates.  The lazyNES NMI hook sets nmi_yield bit 7 on
+                 * each real VBlank.  This stub polls that flag:
                  *
-                 * Normal path (9 bytes, ~20 cycles per iteration):
-                 *   PHP / DEC loop_ctr / BEQ(+4) / PLP / JMP target
-                 * Dispatch exit (15 bytes, every 256th take):
+                 * Normal path (9 bytes, ~15 cycles per iteration):
+                 *   PHP / BIT nmi_yield / BMI(+4) / PLP / JMP target
+                 * Dispatch exit (15 bytes, on VBlank only):
                  *   PLP / STA _a / PHP / LDA #pc / STA _pc / JMP dispatch
+                 *
+                 * Unlike the old DEC counter, this only yields when VBlank
+                 * actually fires — eliminating thousands of false exits/frame
+                 * while still guaranteeing timely NMI processing.
                  *
                  * Sentinel slot keeps Bxx_inv +3 / JMP stub_addr. */
                 extern __zpage uint8_t a;
                 extern __zpage uint16_t pc;
-                extern __zpage uint8_t loop_ctr;
+                extern __zpage uint8_t nmi_yield;
                 extern void cross_bank_dispatch(void);
 
                 if ((uint16_t)code_index + 24 + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE
@@ -574,9 +577,9 @@ void ir_resolve_direct_branches(void)
                                        + BLOCK_PREFIX_SIZE + code_index;
                     /* --- Normal path --- */
                     buf[code_index++] = 0x08;  /* PHP */
-                    buf[code_index++] = 0xC6;  /* DEC zp */
-                    buf[code_index++] = (uint8_t)((uint16_t)&loop_ctr);
-                    buf[code_index++] = 0xF0;  /* BEQ +4 → dispatch exit */
+                    buf[code_index++] = 0x24;  /* BIT zp */
+                    buf[code_index++] = (uint8_t)((uint16_t)&nmi_yield);
+                    buf[code_index++] = 0x30;  /* BMI +4 → dispatch exit */
                     buf[code_index++] = 4;
                     buf[code_index++] = 0x28;  /* PLP */
                     buf[code_index++] = 0x4C;  /* JMP target_native */

@@ -153,7 +153,7 @@ __zpage uint8_t next_new_cache = 0;
 __zpage uint8_t matched = 0;
 __zpage uint8_t decimal_mode = 0;
 __zpage uint8_t block_has_jsr = 0;  // set when JSR/NJSR compiled in current block
-__zpage uint8_t loop_ctr = 0;           // backward branch iteration counter (NES preemption)
+__zpage uint8_t nmi_yield = 0;          // VBlank yield flag (bit 7 set by NMI hook)
 static uint8_t block_dirty_screen = 0;  // set after first INC screen_ram_updated in block
 static uint8_t block_dirty_char = 0;    // set after first INC character_ram_updated in block
 #ifdef ENABLE_PEEPHOLE
@@ -2652,12 +2652,9 @@ static uint8_t recompile_opcode_b2_inner()
 #ifdef ENABLE_IR
 				/* Intra-block: target is within this block's fence table.
 				 * Emit 5-byte placeholder for post-lowering resolution.
-				 * NES: DISABLED — intra-block backward branches create
-				 * native loops that never yield to the dispatch loop,
-				 * blocking VBlank/NMI.  DK runs ALL game logic in NMI;
-				 * a single stuck loop freezes sprites/DMA/input/sound.
-				 * Fall through to enable_interpret() instead. */
-#ifndef PLATFORM_NES
+				 * NMI safety: ir_lower.c emits a BIT nmi_yield / BMI
+				 * backward-branch stub that yields to the dispatch loop
+				 * when VBlank fires, guaranteeing NMI processing. */
 				if (!block_has_jsr)
 				{
 					uint16_t blk_entry = (uint16_t)cache_entry_pc_lo[cache_index]
@@ -2667,7 +2664,6 @@ static uint8_t recompile_opcode_b2_inner()
 						if (r) return r;
 					}
 				}
-#endif
 #else
 				if (try_intra_block_branch(target_pc, op_buffer_0))
 					return cache_flag[cache_index];
@@ -2680,17 +2676,16 @@ static uint8_t recompile_opcode_b2_inner()
 				// Under IR, emit a 5-byte placeholder for post-lowering
 				// resolution via ir_resolve_direct_branches().
 #ifdef ENABLE_IR
-				// NES: also skip inter-block backward branches — the
-				// target block may itself contain a backward branch
-				// chain that loops without yielding to dispatch.
-#ifndef PLATFORM_NES
+				// Inter-block backward branches are inherently safe:
+				// the JMP lands at the target block's entry, which runs
+				// to its epilogue and returns to cross_bank_dispatch →
+				// dispatch loop → VBlank/NMI check.
 				if ((target_flag & 0x1F) == flash_code_bank &&
 				    lookup_native_addr_safe(target_pc))
 				{
 					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
 					if (r) return r;
 				}
-#endif
 #else
 				if ((target_flag & 0x1F) == flash_code_bank &&
 				    (code_index + 2 + EPILOGUE_SIZE + 6) < CODE_SIZE &&
@@ -3457,13 +3452,6 @@ static uint8_t recompile_opcode_b2_inner()
 					// Immediate values are kept in original Exidy-space.
 					// The NES ZP mirror applies hi_offset at the STA point.
 					code_ptr[code_index+1] = read6502(pc+1);
-#ifdef PLATFORM_NES
-					// Backward branches compiled as native loops block NMI.
-					// End block so dispatch loop can fire VBlank/NMI.
-					if ((code_ptr[code_index+1] & 0x80) &&
-					    addrmodes[op_buffer_0] == rel)
-						enable_interpret();
-#endif
 					pc += 2;
 					code_index += 2;
 					break;

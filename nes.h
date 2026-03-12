@@ -56,6 +56,7 @@ __zpage extern uint16_t encoded_address;
 extern uint8_t nmi_active;
 extern uint8_t nmi_sp_guard;
 __zpage extern uint8_t last_nmi_frame;
+__zpage extern uint8_t nmi_yield;
 
 // Platform functions
 uint8_t nes_gamepad(void);

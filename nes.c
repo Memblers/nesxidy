@@ -415,6 +415,9 @@ int main(void)
 				// — its lnSync re-arms lazynes so nmiCounter advances on
 				// the next VBlank, breaking the deadlock.
 				nmi_stuck_count = 0;
+				// Safety: ensure NMI is enabled before the blocking lnSync
+				// inside render_video.  See comment in render_video().
+				IO8(0x2000) = lnPPUCTRL;
 				render_video();
 				cur_nmi = *(volatile uint8_t*)0x26;
 				if (cur_nmi != last_nmi_frame)
@@ -585,6 +588,15 @@ void render_video(void)
 	ppu_queue[ppu_queue_index] = lfEnd;
 	lnList(ppu_queue);
 	ppu_queue_index = 0;
+
+	// Defensive: ensure real PPUCTRL has NMI enabled (bit 7) before
+	// entering lnSync's blocking wait loop.  lnSync skips the PPUCTRL
+	// write on 2nd+ calls (when nmiFlags bit 3 is set), relying on the
+	// previous value.  If anything cleared bit 7 on the real register
+	// between NMI handler runs, the NMI never fires and lnSync loops
+	// forever at the sprite-0-hit / nmiFlags polling loop.
+	IO8(0x2000) = lnPPUCTRL;
+
 	lnSync(0);
 }
 

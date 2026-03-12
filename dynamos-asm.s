@@ -6,6 +6,10 @@ GAME_NUMBER = 0
 PLATFORM_NES = 0
 	endif
 
+	ifnd ENABLE_NATIVE_STACK
+ENABLE_NATIVE_STACK = 0
+	endif
+
 ;=======================================================	
 ; Kludgeville city limits
 
@@ -273,6 +277,12 @@ _cross_bank_dispatch:
 	; we get a best-effort _status and avoid crashing.
 	pla
 	sta _status
+	if ENABLE_NATIVE_STACK
+	; --- Native stack mode ---
+	; PLA was from guest stack.  Save guest SP, restore host SP.
+	tsx
+	stx _sp				; save guest SP
+	endif
 	; Restore stack pointer to the level saved before JSR
 	; .dispatch_addr_instruction.  This cleanly discards the remaining
 	; JSR return bytes (and any stale PHP), regardless of whether the
@@ -405,6 +415,31 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 	tsx
 	stx _dispatch_sp
 
+	if ENABLE_NATIVE_STACK
+	; --- Native stack mode ---
+	; Swap to guest stack before restoring guest state.  The compiled
+	; block runs entirely on the guest stack ($0100-$017F).  Dispatch
+	; returns via _flash_dispatch_return which swaps back to host SP.
+	ldx _sp				; load guest SP
+	bpl .sp_ok			; $00-$7F is in guest range
+	ldx #$7F			; clamp to guest top (game did TXS with SP>$7F)
+	stx _sp
+.sp_ok:
+	txs					; switch to guest stack
+	lda _status
+	pha					; push status on GUEST stack
+	lda _a
+	ldx _x
+	ldy _y
+	plp					; pop status from GUEST stack
+	; JMP (not JSR) — avoids pushing dispatch return addr on guest stack.
+	; _flash_dispatch_return restores host SP and does RTS back to caller.
+.dispatch_addr_instruction:
+.dispatch_addr = * + 1
+	jmp $FFFF			; self-modifying: target native code address
+
+	else
+	; --- Emulated stack mode ---
 	lda _status
 	;ora #$04	; REMOVED: was hiding IRQ flag during JIT, but this
 	;           ; corrupted _status on block exit — the epilogue's PHP
@@ -427,6 +462,7 @@ _dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
 .dispatch_addr_instruction:	
 .dispatch_addr = * + 1
 	jmp $FFFF	; self-modifying	
+	endif
 	
 _flash_dispatch_return:	
 	; Note: _a, _pc, and status (on stack) are already set by the code block epilogue
@@ -434,9 +470,24 @@ _flash_dispatch_return:
 	sty _y	
 	
 _flash_dispatch_return_no_regs:
-	; Entry point when _a, _x, _y are already saved (used by native JSR)
+	; Entry point when _a, _x, _y are already saved (used by normal epilogues)
 	pla
 	sta _status
+
+	global _flash_dispatch_return_status_saved
+_flash_dispatch_return_status_saved:
+	; Entry point when _a, _x, _y AND _status are already saved
+	; (used by NS_JSR/NS_RTS templates which save flags via php/pla/sta)
+
+	if ENABLE_NATIVE_STACK
+	; --- Native stack mode ---
+	; We just PLA'd the epilogue's PHP from the GUEST stack.
+	; Save updated guest SP, restore host SP for the dispatch RTS.
+	tsx
+	stx _sp				; save guest SP (may have changed from push/pull)
+	ldx _dispatch_sp
+	txs					; back to host stack
+	endif
 
 	; Restore PRG bank — native code ran in a flash bank (4-18),
 	; but our caller (run_6502/main loop) expects the fixed bank (0).
@@ -1298,6 +1349,76 @@ _opcode_6502_nrts_end:
 _opcode_6502_nrts_size:	db (_opcode_6502_nrts_end - _opcode_6502_nrts)
 
 ;=======================================================
+	section "text"
+	global _opcode_6502_ns_jsr, _opcode_6502_ns_jsr_size
+	global _opcode_6502_ns_jsr_ret_hi, _opcode_6502_ns_jsr_ret_lo
+	global _opcode_6502_ns_jsr_tgt_lo, _opcode_6502_ns_jsr_tgt_hi
+;-------------------------------------------------------
+; Native Stack JSR template (27 bytes)
+; ENABLE_NATIVE_STACK: pushes return address onto hardware guest stack
+; using PHA (instead of _RAM_BASE+$100,x), then sets _pc and exits.
+; Saves guest flags to _status directly (not on stack) since the PHA
+; pushes would bury the PHP status byte below the return address.
+; 6502 convention: push (pc+2) hi first, then lo.
+_opcode_6502_ns_jsr:
+	sta _a						; +0  save A (no flag change)
+	php							; +2  save guest flags
+	pla							; +3  pop flags → A
+	sta _status					; +4  save to _status ZP
+	stx _x						; +6  save X
+	sty _y						; +8  save Y
+_opcode_6502_ns_jsr_ret_hi_loc:
+	lda #$FF					; +10 LDA #>(return_addr) - PATCH
+	pha							; +12 push hi to GUEST stack
+_opcode_6502_ns_jsr_ret_lo_loc:
+	lda #$FF					; +13 LDA #<(return_addr) - PATCH
+	pha							; +15 push lo to GUEST stack
+_opcode_6502_ns_jsr_tgt_lo_loc:
+	lda #$FF					; +16 LDA #<target - PATCH
+	sta _pc						; +18
+_opcode_6502_ns_jsr_tgt_hi_loc:
+	lda #$FF					; +20 LDA #>target - PATCH
+	sta _pc+1					; +22
+	jmp _flash_dispatch_return_status_saved	; +24  (skip PLA — flags already in _status)
+
+_opcode_6502_ns_jsr_end:
+_opcode_6502_ns_jsr_size:	db (_opcode_6502_ns_jsr_end - _opcode_6502_ns_jsr)
+_opcode_6502_ns_jsr_ret_hi: db (_opcode_6502_ns_jsr_ret_hi_loc - _opcode_6502_ns_jsr + 1)
+_opcode_6502_ns_jsr_ret_lo: db (_opcode_6502_ns_jsr_ret_lo_loc - _opcode_6502_ns_jsr + 1)
+_opcode_6502_ns_jsr_tgt_lo: db (_opcode_6502_ns_jsr_tgt_lo_loc - _opcode_6502_ns_jsr + 1)
+_opcode_6502_ns_jsr_tgt_hi: db (_opcode_6502_ns_jsr_tgt_hi_loc - _opcode_6502_ns_jsr + 1)
+
+;=======================================================
+	section "text"
+	global _opcode_6502_ns_rts, _opcode_6502_ns_rts_size
+;-------------------------------------------------------
+; Native Stack RTS template (25 bytes)
+; ENABLE_NATIVE_STACK: pops return address from hardware guest stack
+; using PLA (instead of _RAM_BASE+$100,x), adds 1, exits.
+; Saves guest flags to _status directly (php/pla/sta) before the PLAs,
+; so the return address bytes are TOS when we PLA.
+; 6502 RTS convention: pull lo, pull hi, PC = (hi:lo) + 1.
+_opcode_6502_ns_rts:
+	sta _a						; +0  save A (no flag change)
+	php							; +2  save guest flags
+	pla							; +3  pop flags → A
+	sta _status					; +4  save to _status ZP
+	stx _x						; +6  save X
+	sty _y						; +8  save Y
+	pla							; +10 pull lo from GUEST stack
+	sta _pc						; +11
+	pla							; +13 pull hi from GUEST stack
+	sta _pc+1					; +14
+	inc _pc						; +16 add 1 (RTS convention)
+	bne .ns_rts_no_carry		; +18
+	inc _pc+1					; +20
+.ns_rts_no_carry:
+	jmp _flash_dispatch_return_status_saved	; +22  (skip PLA — flags already in _status)
+
+_opcode_6502_ns_rts_end:
+_opcode_6502_ns_rts_size: db (_opcode_6502_ns_rts_end - _opcode_6502_ns_rts)
+
+;=======================================================
 	section "data"
 	global _opcode_stx_zpy, _opcode_stx_zpy_size
 ;-------------------------------------------------------	; to add
@@ -1625,6 +1746,10 @@ _sa_ir_pipeline_full:
 	jsr _ir_resolve_direct_branches
 	; Step 6: ir_rebuild_block_ci_map() in bank 1 (no args)
 	jsr _ir_rebuild_block_ci_map
+	; Step 6.5: ir_compute_instr_offsets() in bank 1 (no args)
+	; Fills sa_ir_instr_native_off[] with post-lowering byte offsets
+	; for SA pass 2 mid-block PC publishing.
+	jsr _ir_compute_instr_offsets
 	; Step 7: ir_resolve_deferred_patches() in bank 1 (no args)
 	jsr _ir_resolve_deferred_patches
 	; Restore BANK_SA_CODE

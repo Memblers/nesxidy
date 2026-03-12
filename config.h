@@ -109,14 +109,37 @@
 #define ENABLE_IDLE_DETECT
 #define IDLE_DETECT_THRESHOLD  8   // backward branches to same PC before activating
 
-// Native JSR mode - for stack-clean subroutines (no TSX/TXS), JSR calls a
-// WRAM trampoline that dispatches subroutine blocks in a tight assembly loop
-// until RTS, avoiding C round-trips for each block dispatch.
-// Requires ENABLE_STATIC_ANALYSIS for the subroutine stack-safety table.
-// Disable this if a game misbehaves (e.g. stack tricks the analysis missed).
+// Native JSR mode - for stack-clean subroutines (no TSX/TXS, no unbalanced
+// PLA/PLP), JSR calls a WRAM trampoline that dispatches subroutine blocks
+// in a tight assembly loop until RTS, avoiding C round-trips for each block
+// dispatch.  Requires ENABLE_STATIC_ANALYSIS for the subroutine table.
 #ifdef ENABLE_STATIC_ANALYSIS
 #define ENABLE_NATIVE_JSR
 #endif
+
+// Native stack mode — use the real NES hardware stack page ($0100-$01FF)
+// for emulated 6502 stack operations.  The stack page is split:
+//   Guest: $0100-$017F (SP starts at $7F, grows down) — PHA/PLA/PHP/PLP/JSR/RTS
+//   Host:  $0180-$01FF (SP starts at $FF, grows down) — dispatch, C runtime
+// When active, PHA/PLA/PHP/PLP compile to single native instructions (1 byte
+// each instead of 9-14), and JSR/RTS for stack-clean subroutines compile to
+// native JSR abs / RTS (3/1 bytes instead of 34/32).  TSX/TXS compile to
+// native TSX/TXS since the real SP *is* the guest SP during block execution.
+//
+// When ENABLE_NATIVE_STACK is active, ENABLE_NATIVE_JSR's trampoline is
+// superseded — stack-clean JSR/RTS use real hardware JSR/RTS instead.
+// Stack-dirty or cross-bank calls fall back to the emulated JSR template.
+//
+// Opt-in: only safe for games with "generic" stack usage — no direct reads
+// of $01xx addresses expecting specific layout, no JSR-into-middle tricks.
+// Requires ENABLE_STATIC_ANALYSIS.
+//#define ENABLE_NATIVE_STACK
+
+// Per-game subroutine blacklist — force specific addresses to SA_SUB_DIRTY
+// even if the static analysis classifies them as clean.  Safety valve for
+// edge cases the heuristic misses.  List of 16-bit addresses, 0-terminated.
+// Example: #define FORCE_DIRTY_SUBS  0xF32D, 0xE107, 0
+//#define FORCE_DIRTY_SUBS  0
 
 // Zero page index wrapping - when enabled, zpx/zpy instructions are interpreted
 // to preserve correct 6502 behavior where (zp_addr + index) wraps within $00-$FF.

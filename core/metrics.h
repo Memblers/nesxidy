@@ -55,6 +55,8 @@ typedef struct {
     uint16_t ir_pass_php_plp;         /* Pass 3: PLP/PHP pairs removed        */
     uint16_t ir_pass_pair_rewrite;    /* Pass 4: pair rewrites + CMP #0 elim  */
     uint16_t ir_pass_rmw_fusion;     /* Pass 5+6: RMW fusion (shift+inc/dec) */
+    uint16_t ir_instrs_eliminated;   /* guest instrs fully removed by IR     */
+    uint16_t ir_instr_overflow;      /* blocks where instr count > MAX_INSTRS */
 } runtime_metrics_t;
 
 /* ================================================================
@@ -137,6 +139,14 @@ extern __zpage uint32_t  clockticks6502;
     runtime_metrics.ir_nodes_killed += (n); \
 } while(0)
 
+#define metrics_ir_instrs_eliminated(n) do { \
+    runtime_metrics.ir_instrs_eliminated += (n); \
+} while(0)
+
+#define metrics_ir_instr_overflow() do { \
+    runtime_metrics.ir_instr_overflow++; \
+} while(0)
+
 /* ================================================================
  * WRAM dump functions (banked - call with BANK_METRICS mapped).
  * metrics_dump_sa_b2()      - call once after sa_run.
@@ -169,6 +179,8 @@ void metrics_dump_runtime_b2(void);
 #define metrics_ir_block(b,a)              ((void)0)
 #define metrics_ir_pass_results(rl,ds,dl,pp,pr,rmw)  ((void)0)
 #define metrics_ir_nodes_killed(n)         ((void)0)
+#define metrics_ir_instrs_eliminated(n)    ((void)0)
+#define metrics_ir_instr_overflow()        ((void)0)
 static inline void metrics_dump_sa_b2(void) {}
 static inline void metrics_dump_runtime_b2(void) {}
 

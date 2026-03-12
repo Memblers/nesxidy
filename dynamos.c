@@ -153,6 +153,7 @@ __zpage uint8_t next_new_cache = 0;
 __zpage uint8_t matched = 0;
 __zpage uint8_t decimal_mode = 0;
 __zpage uint8_t block_has_jsr = 0;  // set when JSR/NJSR compiled in current block
+__zpage uint8_t loop_ctr = 0;           // backward branch iteration counter (NES preemption)
 static uint8_t block_dirty_screen = 0;  // set after first INC screen_ram_updated in block
 static uint8_t block_dirty_char = 0;    // set after first INC character_ram_updated in block
 #ifdef ENABLE_PEEPHOLE
@@ -164,6 +165,16 @@ uint8_t recompile_instr_start;           // code_index at instruction start (aft
 
 #ifdef ENABLE_IR
 ir_ctx_t ir_ctx;                         // IR compilation context (~480B WRAM)
+// SA pass 2 mid-block PC tracking: record each guest instruction's PC offset
+// and starting IR node index so that post-lowering native offsets can be
+// computed and published.  Populated by sa_compile_one_block's compile loop,
+// consumed by ir_compute_instr_offsets (bank 1) after ir_lower.
+#define SA_IR_MAX_INSTRS 64
+uint8_t sa_ir_instr_pc_offset[SA_IR_MAX_INSTRS];   // (guest_pc - entry_pc) & 0xFF
+uint8_t sa_ir_instr_first_node[SA_IR_MAX_INSTRS];  // ir_ctx.node_count at instruction start
+uint8_t sa_ir_instr_native_off[SA_IR_MAX_INSTRS];  // post-lowering native offset (fwd-filled from next)
+uint8_t sa_ir_instr_count;                         // number of instructions recorded
+uint8_t sa_ir_instrs_eliminated;                   // count of IR-eliminated instrs (forward-filled)
 #endif
 #ifdef ENABLE_COMPILE_PPU_EFFECT
 __zpage uint8_t compile_ppu_effect = 0;  // PPU emphasis bits toggled during compile
@@ -193,6 +204,10 @@ uint8_t sa_compile_pass = 0;
 // stays 0 — only BFS walk + subroutine analysis runs, and the dynamic
 // JIT fills the cache at runtime.
 uint8_t sa_do_compile = 0;
+
+// Set to 1 after SA two-pass compile completes.  Checked by the cache-
+// pressure auto-reset logic to suppress endless SA cycling.
+uint8_t sa_compile_completed = 0;
 
 // Pass 2: forced exit PC for the current block being compiled.
 // Set by sa_run before calling sa_compile_one_block in pass 2.
@@ -547,7 +562,11 @@ batch_exit:  // case 1 (compile needed) jumps here
 	// out-of-range addresses.  Compiling them would read garbage
 	// from character/screen RAM and program it into flash, causing
 	// hard crashes on subsequent dispatches.  Interpret instead.
-	if (pc < ROM_ADDR_MIN || pc > ROM_ADDR_MAX)
+	// Also reject $FFFA-$FFFF: the 6502 vector table (NMI/RESET/IRQ)
+	// is data, never executable code.  Note: pc > ROM_ADDR_MAX is
+	// always false when ROM_ADDR_MAX == 0xFFFF (uint16_t max), so the
+	// vector-table check is the only effective upper-bound guard.
+	if (pc < ROM_ADDR_MIN || pc > ROM_ADDR_MAX || pc >= 0xFFFA)
 	{
 		cache_interpret++;
 		bankswitch_prg(0);
@@ -632,7 +651,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 		ir_fence_target_count = 0;
 		uint16_t scan = entry_pc;
 		uint8_t scan_count = 0;  // limit scan to ~32 instructions
-		while (scan >= 0x8000 && scan <= 0xFFFF && scan_count < 32) {
+		while (scan >= 0x8000 && scan < 0xFFFA && scan_count < 32) {
 			uint8_t sop = read6502(scan);
 			uint8_t mode = addrmodes[sop];
 			uint8_t slen;
@@ -796,6 +815,12 @@ batch_exit:  // case 1 (compile needed) jumps here
 #endif
 #endif  /* ENABLE_IR */
 		}
+
+		// Guard: stop block if pc advanced into the 6502 vector table
+		// ($FFFA-$FFFF) or wrapped past $FFFF into low memory.
+		// These addresses are NMI/RESET/IRQ vectors (data, not code).
+		if (pc >= 0xFFFA || pc < ROM_ADDR_MIN)
+			cache_flag[0] &= ~READY_FOR_NEXT;
 		
 	} while (cache_flag[0] & READY_FOR_NEXT);
 
@@ -885,31 +910,64 @@ batch_exit:  // case 1 (compile needed) jumps here
 			 * blocks still have the leading PHP (0x08) in the lowered
 			 * output.  The IR optimizer should preserve the IR_TEMPLATE
 			 * node, but as a defence-in-depth measure, scan for the
-			 * template body signature (STA _a; STX _x = 85 54 86 55)
-			 * and re-insert PHP if it was stripped.  This guards against
-			 * optimizer bugs that remove the PHP and break the dispatch
-			 * return stack contract. */
-			if (lowered_size > 4) {
+			 * template body signature and re-insert PHP if it was
+			 * stripped.
+			 *
+			 * Two patterns are checked:
+			 *
+			 *   (A) Full 6-byte prologue: STA _a; STX _x; STY _y
+			 *       Matches the intact template prologue.
+			 *
+			 *   (B) NRTS/PHA 7-byte: STA _a; STY _y; LDX _sp; INX
+			 *       Matches when IR optimizer stripped the dead STX _x
+			 *       (X is immediately overwritten by LDX _sp).  The
+			 *       trailing INX (E8) distinguishes pop-style templates
+			 *       from non-template code that coincidentally saves
+			 *       A/Y and loads SP.
+			 *
+			 * The PLP template starts with STA _a; STX _x; INC _sp
+			 * and must NOT receive a PHP insertion.  Pattern A does
+			 * not match PLP (requires STY _y at k+4; PLP has INC).
+			 * Pattern B does not match PLP (requires STY _y at k+2;
+			 * PLP has STX _x). */
+			if (lowered_size > 6) {
 				uint8_t *lb = cache_code[0];
-				/* Template body: STA _a (85 XX) STX _x (86 XX) STY _y (84 XX)
-				 * where XX = &a, &x, &y ZP addresses. Check for the unique
-				 * 6-byte signature starting with STA _a. */
 				uint8_t sa = (uint8_t)((uint16_t)&a);
 				uint8_t sx = (uint8_t)((uint16_t)&x);
+				uint8_t sy = (uint8_t)((uint16_t)&y);
+				uint8_t ssp = (uint8_t)((uint16_t)&sp);
+				uint8_t php_insert_pos = 0xFF;  /* 0xFF = not found */
+
 				for (uint8_t k = 0; k + 5 < lowered_size; k++) {
+					/* Pattern A: STA _a (85 sa) STX _x (86 sx) STY _y (84 sy) */
 					if (lb[k]   == 0x85 && lb[k+1] == sa &&
-					    lb[k+2] == 0x86 && lb[k+3] == sx) {
-						/* Found template body at lb[k]. PHP should be at lb[k-1]. */
-						if (k == 0 || lb[k-1] != 0x08) {
-							/* PHP missing — shift right and insert. */
-							if (lowered_size < CACHE_CODE_BUF_SIZE) {
-								for (uint8_t s = lowered_size; s > k; s--)
-									lb[s] = lb[s-1];
-								lb[k] = 0x08;  /* PHP */
-								lowered_size++;
-							}
-						}
+					    lb[k+2] == 0x86 && lb[k+3] == sx &&
+					    lb[k+4] == 0x84 && lb[k+5] == sy) {
+						php_insert_pos = k;
 						break;
+					}
+					/* Pattern B: STA _a; STY _y; LDX _sp; INX
+					 * (85 sa 84 sy A6 ssp E8) — 7 bytes.
+					 * Matches NRTS/PHA when STX _x was stripped. */
+					if (k + 6 < lowered_size &&
+					    lb[k]   == 0x85 && lb[k+1] == sa &&
+					    lb[k+2] == 0x84 && lb[k+3] == sy &&
+					    lb[k+4] == 0xA6 && lb[k+5] == ssp &&
+					    lb[k+6] == 0xE8) {
+						php_insert_pos = k;
+						break;
+					}
+				}
+				if (php_insert_pos != 0xFF) {
+					uint8_t k = php_insert_pos;
+					if (k == 0 || lb[k-1] != 0x08) {
+						/* PHP missing — shift right and insert. */
+						if (lowered_size < CACHE_CODE_BUF_SIZE) {
+							for (uint8_t s = lowered_size; s > k; s--)
+								lb[s] = lb[s-1];
+							lb[k] = 0x08;  /* PHP */
+							lowered_size++;
+						}
 					}
 				}
 			}
@@ -1342,6 +1400,13 @@ static void setup_flash_pc_tables_b17(uint16_t emulated_pc)
 	lookup_pc_jump_flag(emulated_pc);
 }
 
+// Combined setup + update in a single bank17 call (avoids double bankswitch)
+static void setup_and_update_pc_b17(uint16_t emulated_pc, uint8_t code_address, uint8_t flags)
+{
+	setup_flash_pc_tables_b17(emulated_pc);
+	flash_cache_pc_update_b17(code_address, flags);
+}
+
 static void setup_flash_address_b17(uint16_t emulated_pc, uint16_t block_number)
 {
 	if (block_number) {}  // suppress unused-parameter warning
@@ -1521,6 +1586,16 @@ void setup_flash_pc_tables(uint16_t emulated_pc)
 	bankswitch_prg(saved_bank);
 }
 
+// Combined setup + update with a single bankswitch pair (vs 2 pairs for
+// separate setup_flash_pc_tables + flash_cache_pc_update calls).
+void setup_and_update_pc(uint16_t emulated_pc, uint8_t code_address, uint8_t flags)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	setup_and_update_pc_b17(emulated_pc, code_address, flags);
+	bankswitch_prg(saved_bank);
+}
+
 void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
 {
 	uint8_t saved_bank = mapper_prg_bank;
@@ -1593,7 +1668,7 @@ uint8_t ir_emit_direct_branch_placeholder(uint16_t target_pc, uint8_t branch_opc
 #else
 uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *code_ptr)
 {
-	if (!lookup_entry_list(target_pc))
+	if (!lookup_native_addr_safe(target_pc))
 		return 0;
 	if (reserve_result_bank != flash_code_bank)
 		return 0;
@@ -2093,24 +2168,29 @@ static void ir_record_native_b2(const uint8_t *buf, uint8_t len)
 
 #endif /* ENABLE_IR */
 
-#pragma section bank2
-
-static uint8_t invert_branch(uint8_t opcode) {
-	return opcode ^ 0x20;
-}
-
 #ifdef ENABLE_IR
 /* Template ID set by recompile_opcode_b2_inner() when it emits an
  * NRTS/JSR/NJSR template.  The outer wrapper emits these as atomic
  * IR_TEMPLATE nodes instead of decomposing into individual IR nodes
  * (which lets ir_opt_php_plp_elision remove the leading PHP and
- * break the dispatch return stack contract).  0 = no template. */
+ * break the dispatch return stack contract).  0 = no template.
+ *
+ * CRITICAL: these MUST be in a RAM-backed section (#pragma section
+ * default = WRAM).  Under #pragma section bank2, static variables
+ * land in bank2 flash ROM where writes are silently ignored — the
+ * variable always reads as its zero-initialized value, causing the
+ * NRTS template to be decomposed instead of atomic.  Same fix as
+ * the scratch variables in ir_opt.c (see comment there). */
+#pragma section default
 static uint8_t ir_tmpl_id;
-/* Number of dirty-flag bytes (PHP/INC zp/PLP) emitted at the END of
- * the current instruction.  The outer wrapper records these as
- * IR_RAW_BYTE nodes so the optimizer cannot strip the PLP. */
 static uint8_t ir_dirty_flag_bytes;
 #endif
+
+#pragma section bank2
+
+static uint8_t invert_branch(uint8_t opcode) {
+	return opcode ^ 0x20;
+}
 
 static uint8_t recompile_opcode_b2_inner()
 {
@@ -2184,8 +2264,12 @@ static uint8_t recompile_opcode_b2_inner()
 				// Under IR, emit a 5-byte placeholder (Bxx_inv+3 / JMP $FFFE)
 				// as IR_RAW_BYTE nodes.  ir_resolve_direct_branches() patches
 				// the sentinel post-lowering with the correct native address.
+				// IMPORTANT: use lookup_native_addr_safe (PC tables) NOT
+				// lookup_entry_list.  The entry list has pass-1 native addrs
+				// which may diverge from pass-2 addrs when data copies or
+				// different code sizes shift sector allocations.
 #ifdef ENABLE_IR
-				if (lookup_entry_list(target_pc) &&
+				if (lookup_native_addr_safe(target_pc) &&
 				    reserve_result_bank == flash_code_bank)
 				{
 					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
@@ -2561,7 +2645,13 @@ static uint8_t recompile_opcode_b2_inner()
 				// will resolve the correct offset post-lowering.
 #ifdef ENABLE_IR
 				/* Intra-block: target is within this block's fence table.
-				 * Emit 5-byte placeholder for post-lowering resolution. */
+				 * Emit 5-byte placeholder for post-lowering resolution.
+				 * NES: DISABLED — intra-block backward branches create
+				 * native loops that never yield to the dispatch loop,
+				 * blocking VBlank/NMI.  DK runs ALL game logic in NMI;
+				 * a single stuck loop freezes sprites/DMA/input/sound.
+				 * Fall through to enable_interpret() instead. */
+#ifndef PLATFORM_NES
 				if (!block_has_jsr)
 				{
 					uint16_t blk_entry = (uint16_t)cache_entry_pc_lo[cache_index]
@@ -2571,6 +2661,7 @@ static uint8_t recompile_opcode_b2_inner()
 						if (r) return r;
 					}
 				}
+#endif
 #else
 				if (try_intra_block_branch(target_pc, op_buffer_0))
 					return cache_flag[cache_index];
@@ -2583,12 +2674,17 @@ static uint8_t recompile_opcode_b2_inner()
 				// Under IR, emit a 5-byte placeholder for post-lowering
 				// resolution via ir_resolve_direct_branches().
 #ifdef ENABLE_IR
+				// NES: also skip inter-block backward branches — the
+				// target block may itself contain a backward branch
+				// chain that loops without yielding to dispatch.
+#ifndef PLATFORM_NES
 				if ((target_flag & 0x1F) == flash_code_bank &&
 				    lookup_native_addr_safe(target_pc))
 				{
 					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
 					if (r) return r;
 				}
+#endif
 #else
 				if ((target_flag & 0x1F) == flash_code_bank &&
 				    (code_index + 2 + EPILOGUE_SIZE + 6) < CODE_SIZE &&
@@ -2637,9 +2733,11 @@ static uint8_t recompile_opcode_b2_inner()
 			uint16_t target_pc = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
 
 			// --- Static pass 2: target address known, emit direct JMP ---
+			// Use lookup_native_addr_safe (not lookup_entry_list) to get
+			// current-pass native addresses, avoiding stale pass-1 addrs.
 			if (sa_compile_pass == 2 &&
 			    code_index + 3 < CODE_SIZE &&
-			    lookup_entry_list(target_pc))
+			    lookup_native_addr_safe(target_pc))
 			{
 				if (reserve_result_bank == flash_code_bank)
 				{
@@ -2766,12 +2864,14 @@ static uint8_t recompile_opcode_b2_inner()
 		{			
 			// JSR: push return address onto emulated stack, set _pc to target.
 			//
-			// Stack-clean subroutines (no TSX/TXS) use the native JSR template
-			// which loops through subroutine blocks via a WRAM trampoline
-			// without returning to C between each block dispatch.
+			// ENABLE_NATIVE_STACK: uses NS_JSR template which pushes return addr
+			// onto the hardware guest stack via PHA (25 bytes vs 34).  No NJSR
+			// trampoline — the dispatch handles subroutine blocks normally.
 			//
-			// Stack-dirty or unknown subroutines use the emulated JSR template
-			// which exits to the C dispatcher after pushing the return address.
+			// ENABLE_NATIVE_JSR (non-NS): Stack-clean subroutines use NJSR
+			// template with WRAM trampoline.
+			//
+			// Otherwise: emulated JSR template (manual _RAM_BASE+$100 push).
 			//
 			// 6502 JSR convention: pushes (pc+2) hi then lo (address of last byte of JSR).
 			// RTS pops lo then hi, adds 1, jumps there -> lands on pc+3.
@@ -2779,7 +2879,39 @@ static uint8_t recompile_opcode_b2_inner()
 			uint16_t target = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
 			uint16_t return_addr = pc + 2;  // 6502 convention: push PC+2 (addr of last byte)
 
-#ifdef ENABLE_NATIVE_JSR
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: push return addr via PHA onto hardware guest stack
+			if ((code_index + opcode_6502_ns_jsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_ns_jsr_size; i++)
+					code_ptr[code_index+i] = opcode_6502_ns_jsr[i];
+				
+				code_ptr[code_index + opcode_6502_ns_jsr_ret_hi] = (uint8_t)(return_addr >> 8);
+				code_ptr[code_index + opcode_6502_ns_jsr_ret_lo] = (uint8_t)(return_addr);
+				code_ptr[code_index + opcode_6502_ns_jsr_tgt_lo] = (uint8_t)(target);
+				code_ptr[code_index + opcode_6502_ns_jsr_tgt_hi] = (uint8_t)(target >> 8);
+				
+				pc += 3;
+				code_index += opcode_6502_ns_jsr_size;
+				block_has_jsr = 1;
+#ifdef ENABLE_STATIC_ANALYSIS
+				sa_record_subroutine_runtime(target);
+#endif
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_JSR;
+#endif
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			else
+			{
+				// NS_JSR didn't fit — can't fall back to emulated template
+				// (it uses _sp directly, which is stale under native stack)
+				cache_branch_pc_lo[cache_index] = read6502(pc+1);
+				cache_branch_pc_hi[cache_index] = read6502(pc+2);
+				enable_interpret();
+			}
+#elif defined(ENABLE_NATIVE_JSR)
 			// Check if subroutine is stack-clean — use native trampoline template
 			if (sa_subroutine_lookup(target) == SA_SUB_CLEAN &&
 			    (code_index + opcode_6502_njsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
@@ -2796,7 +2928,6 @@ static uint8_t recompile_opcode_b2_inner()
 				code_index += opcode_6502_njsr_size;
 				block_has_jsr = 1;
 #ifdef ENABLE_STATIC_ANALYSIS
-				// Record JSR target for stack-safety analysis on next boot
 				sa_record_subroutine_runtime(target);
 #endif
 #ifdef ENABLE_IR
@@ -2806,7 +2937,6 @@ static uint8_t recompile_opcode_b2_inner()
 				return cache_flag[cache_index];
 			}
 			else
-#endif
 			// Emulated JSR: standard template (stack-dirty, unknown, or no SA)
 			if ((code_index + opcode_6502_jsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
 			{
@@ -2838,6 +2968,39 @@ static uint8_t recompile_opcode_b2_inner()
 				cache_branch_pc_hi[cache_index] = read6502(pc+2);
 				enable_interpret();
 			}
+#else
+			// Emulated JSR: standard template (no SA, manual _RAM_BASE+$100 push)
+			if ((code_index + opcode_6502_jsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_jsr_size; i++)
+					code_ptr[code_index+i] = opcode_6502_jsr[i];
+				
+				code_ptr[code_index + opcode_6502_jsr_ret_hi] = (uint8_t)(return_addr >> 8);
+				code_ptr[code_index + opcode_6502_jsr_ret_lo] = (uint8_t)(return_addr);
+				code_ptr[code_index + opcode_6502_jsr_tgt_lo] = (uint8_t)(target);
+				code_ptr[code_index + opcode_6502_jsr_tgt_hi] = (uint8_t)(target >> 8);
+				
+				pc += 3;
+				code_index += opcode_6502_jsr_size;
+				block_has_jsr = 1;
+#ifdef ENABLE_STATIC_ANALYSIS
+				// Record JSR target for stack-safety analysis on next boot
+				sa_record_subroutine_runtime(target);
+#endif
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_JSR;
+#endif
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			else
+			{
+				// Not enough space -- fall back to interpreter
+				cache_branch_pc_lo[cache_index] = read6502(pc+1);
+				cache_branch_pc_hi[cache_index] = read6502(pc+2);
+				enable_interpret();
+			}
+#endif
 			break;
 		}
 		
@@ -2850,9 +3013,24 @@ static uint8_t recompile_opcode_b2_inner()
 		
 		case opRTS:
 		{
-			// Compiled RTS: pop return addr from emulated stack, add 1, set _pc,
-			// exit to dispatcher.  The native JSR trampoline detects the SP
-			// change and knows the subroutine returned.
+			// Compiled RTS: pop return addr, add 1, set _pc, exit to dispatcher.
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: pop return addr via PLA from hardware guest stack
+			if ((code_index + opcode_6502_ns_rts_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_ns_rts_size; i++)
+					code_ptr[code_index+i] = opcode_6502_ns_rts[i];
+				
+				pc += 1;
+				code_index += opcode_6502_ns_rts_size;
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_NRTS;
+#endif
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+#else
+			// Emulated stack: pop from _RAM_BASE+$100
 			if ((code_index + opcode_6502_nrts_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
 			{
 				for (uint8_t i = 0; i < opcode_6502_nrts_size; i++)
@@ -2866,6 +3044,7 @@ static uint8_t recompile_opcode_b2_inner()
 				cache_flag[cache_index] &= ~READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}
+#endif
 			enable_interpret();
 			break;
 		}
@@ -2874,10 +3053,17 @@ static uint8_t recompile_opcode_b2_inner()
 		{
 			if ((code_index + 3 + 3) < CODE_SIZE)
 			{				
+#ifdef ENABLE_NATIVE_STACK
+				// Native stack: real SP = guest SP, emit native TSX
+				code_ptr[code_index] = 0xBA;  // TSX
+				pc += 1;
+				code_index += 1;
+#else
 				code_ptr[code_index] = opLDX_ZP;
 				code_ptr[code_index+1] = (uint16_t) &sp;				
 				pc += 1;
 				code_index += 2;
+#endif
 				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}			
@@ -2891,6 +3077,17 @@ static uint8_t recompile_opcode_b2_inner()
 		
 		case opTXS:
 		{
+#ifdef ENABLE_NATIVE_STACK
+			// TXS under native stack is complex: must clamp SP to guest
+			// range ($00-$7F), preserve flags (real TXS affects none), and
+			// handle the hardware SP change without PHP/PLP mismatch
+			// (PHP pushes at OLD SP, PLP pops at NEW SP after TXS).
+			// Since TXS is extremely rare (typically once at reset),
+			// interpret it safely.  The interpreter clamps via:
+			//   sp = (x >= 0x80) ? 0x7F : x;
+			enable_interpret();
+			break;
+#else
 			if ((code_index + 3 + 3) < CODE_SIZE)
 			{				
 				code_ptr[code_index] = opSTX_ZP;
@@ -2905,17 +3102,66 @@ static uint8_t recompile_opcode_b2_inner()
 				cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
 				cache_flag[cache_index] &= ~READY_FOR_NEXT;
 				return cache_flag[cache_index];
-			}																				
+			}
+#endif
 		}		
 		
 		case opPHA:
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: emit single PHA instruction
+			if ((code_index + 1 + 3) < CODE_SIZE) {
+				code_ptr[code_index++] = 0x48;  // PHA
+				pc += 1;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			enable_interpret();
+			break;
+#else
 			return emit_template(opcode_6502_pha, opcode_6502_pha_size);
+#endif
 		case opPLA:
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: emit single PLA instruction
+			if ((code_index + 1 + 3) < CODE_SIZE) {
+				code_ptr[code_index++] = 0x68;  // PLA
+				pc += 1;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			enable_interpret();
+			break;
+#else
 			return emit_template(opcode_6502_pla, opcode_6502_pla_size);
+#endif
 		case opPHP:
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: emit single PHP instruction
+			if ((code_index + 1 + 3) < CODE_SIZE) {
+				code_ptr[code_index++] = 0x08;  // PHP
+				pc += 1;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			enable_interpret();
+			break;
+#else
 			return emit_template(opcode_6502_php, opcode_6502_php_size);
+#endif
 		case opPLP:
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: emit single PLP instruction
+			if ((code_index + 1 + 3) < CODE_SIZE) {
+				code_ptr[code_index++] = 0x28;  // PLP
+				pc += 1;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			enable_interpret();
+			break;
+#else
 			return emit_template(opcode_6502_plp, opcode_6502_plp_size);
+#endif
 		case opCLI:
 		case opSEI:
 		{
@@ -2952,7 +3198,7 @@ static uint8_t recompile_opcode_b2_inner()
 		}
 
 		default:
-		{			
+		{
 			code_ptr[code_index] = op_buffer_0;
 			switch (addrmodes[op_buffer_0])	// use address mode type to determine instruction size
 			{					
@@ -3205,13 +3451,27 @@ static uint8_t recompile_opcode_b2_inner()
 					// Immediate values are kept in original Exidy-space.
 					// The NES ZP mirror applies hi_offset at the STA point.
 					code_ptr[code_index+1] = read6502(pc+1);
+#ifdef PLATFORM_NES
+					// Backward branches compiled as native loops block NMI.
+					// End block so dispatch loop can fire VBlank/NMI.
+					if ((code_ptr[code_index+1] & 0x80) &&
+					    addrmodes[op_buffer_0] == rel)
+						enable_interpret();
+#endif
 					pc += 2;
 					code_index += 2;
 					break;
 				}
 				case imp:
-				case acc:						
+				case acc:
 				{
+					// Any legal imp/acc opcode (NOP, CLC, TAX, PHA, ASL A …)
+					// has its own explicit case in the outer switch and never
+					// reaches this default handler.  An imp/acc opcode here
+					// is therefore an illegal/undocumented instruction (e.g.
+					// $D2 = STP/KIL).  Copying it verbatim into native flash
+					// would halt the real 6502.  Fall through to interpret.
+					enable_interpret();
 					pc += 1;
 					code_index += 1;
 					break;
@@ -3306,6 +3566,18 @@ static uint8_t recompile_opcode_b2()
 			 * the template's leading PHP — removing that PHP breaks the
 			 * dispatch return stack contract (PLA pops JSR return byte
 			 * instead of guest status → RTS to garbage address). */
+			/* Safety: check if enough patch slots remain for this template.
+			 * JSR/NJSR need 4 patches each.  If we'd overflow, disable IR
+			 * for this block — the raw bytes in cache_code[] are already
+			 * correctly patched, so falling back is safe.  Without this,
+			 * IR_TMPL_PATCH silently drops patches → ir_lower emits the
+			 * pristine template with $FF placeholders → guest PC = $FFFF. */
+			uint8_t patches_needed = 0;
+			if (ir_tmpl_id == IR_TMPL_JSR || ir_tmpl_id == IR_TMPL_NJSR)
+				patches_needed = 4;
+			if (ir_ctx.tmpl_patch_count + patches_needed > IR_MAX_TMPL_PATCHES) {
+				ir_ctx.enabled = 0;  /* fall back to raw bytes */
+			} else {
 			uint8_t pre = recompile_instr_start - ci_before;
 			if (pre) {
 				/* Record any flushed PLP bytes before the template */
@@ -3325,6 +3597,7 @@ static uint8_t recompile_opcode_b2()
 				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_tgt_lo, buf[pre + opcode_6502_njsr_tgt_lo]);
 				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_tgt_hi, buf[pre + opcode_6502_njsr_tgt_hi]);
 			}
+			} /* end patches_needed check */
 			/* NRTS has no patches — template is fully fixed */
 		} else if (patchable_jmp_pos != 0xFF) {
 			/* Patchable template — record all bytes as IR_RAW_BYTE

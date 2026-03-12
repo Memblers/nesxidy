@@ -76,8 +76,8 @@
 // Flag values for byte 2 of each subroutine entry.
 // These are written as a whole byte in a single flash program operation.
 #define SA_SUB_EMPTY        0xFF    // erased / unused slot
-#define SA_SUB_CLEAN        0x00    // stack-clean (no TSX/TXS in body)
-#define SA_SUB_DIRTY        0x01    // stack-dirty (has TSX or TXS)
+#define SA_SUB_CLEAN        0x00    // stack-clean (no TSX/TXS, balanced push/pull)
+#define SA_SUB_DIRTY        0x01    // stack-dirty (TSX/TXS or unbalanced PLA/PLP)
 
 // -------------------------------------------------------------------------
 // BFS walker queue — lives in WRAM during the analysis pass.

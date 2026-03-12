@@ -167,6 +167,7 @@ extern void decode_address_asm2();
 __regsused("a/x/y") extern uint8_t dispatch_on_pc();
 __regsused("a/x/y") extern void flash_dispatch_return();
 __regsused("a/x/y") extern void flash_dispatch_return_no_regs();
+__regsused("a/x/y") extern void flash_dispatch_return_status_saved();
 __regsused("a/x/y") extern void cross_bank_dispatch();
 __regsused("a/x/y") extern void xbank_trampoline();
 extern uint8_t xbank_addr;
@@ -220,6 +221,18 @@ extern uint8_t native_jsr_saved_sp;
 extern const uint8_t opcode_6502_nrts_size;
 extern uint8_t opcode_6502_nrts[];
 
+// Native Stack JSR template (ENABLE_NATIVE_STACK: uses PHA to push return addr)
+extern const uint8_t opcode_6502_ns_jsr_size;
+extern uint8_t opcode_6502_ns_jsr[];
+extern const uint8_t opcode_6502_ns_jsr_ret_hi;
+extern const uint8_t opcode_6502_ns_jsr_ret_lo;
+extern const uint8_t opcode_6502_ns_jsr_tgt_lo;
+extern const uint8_t opcode_6502_ns_jsr_tgt_hi;
+
+// Native Stack RTS template (ENABLE_NATIVE_STACK: uses PLA to pop return addr)
+extern const uint8_t opcode_6502_ns_rts_size;
+extern uint8_t opcode_6502_ns_rts[];
+
 // STA (zp),Y native handler
 extern void sta_indy_handler();
 extern uint8_t sta_indy_template[];
@@ -244,11 +257,28 @@ uint8_t flash_sector_alloc(uint8_t total_size);  // allocate space in a sector; 
 void flash_cache_pc_update(uint8_t code_address, uint8_t flags);
 void setup_flash_address(uint16_t emulated_pc, uint16_t block_number);  // legacy, kept for PC-table side
 void setup_flash_pc_tables(uint16_t emulated_pc);  // set up PC table pointers only
+void setup_and_update_pc(uint16_t emulated_pc, uint8_t code_address, uint8_t flags);  // combined setup+update (1 bankswitch)
 void flash_cache_init_sectors(void);  // erase code cache sectors, zero free-pointer table
 uint8_t flash_cache_search(uint16_t emulated_pc);
 
+#ifdef ENABLE_IR
+// SA pass 2 mid-block PC tracking (see dynamos.c for details)
+#define SA_IR_MAX_INSTRS 64
+extern uint8_t sa_ir_instr_pc_offset[SA_IR_MAX_INSTRS];
+extern uint8_t sa_ir_instr_first_node[SA_IR_MAX_INSTRS];
+extern uint8_t sa_ir_instr_native_off[SA_IR_MAX_INSTRS];
+extern uint8_t sa_ir_instr_count;
+extern uint8_t sa_ir_instrs_eliminated;
+#endif
+
 // Static compilation pass flag (0=dynamic/pass1, 2=pass2-emit-with-knowledge)
 extern uint8_t sa_compile_pass;
+
+// Set to 1 after SA two-pass compile completes.  Suppresses the cache-
+// pressure auto-reset so the system doesn't endlessly cycle between
+// SA compile → dynamic fill → cache pressure → soft reset → SA compile.
+// Lives in WRAM so it resets to 0 on every soft reset (C startup re-inits).
+extern uint8_t sa_compile_completed;
 
 // Pass 2: forced exit PC for the current block being compiled.
 // When sa_compile_pass==2 and pc >= sa_block_exit_pc, the compile loop

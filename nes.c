@@ -203,11 +203,19 @@ void clear_recompile_signature_b21(void)
 static void check_recompile_triggers_b21(void)
 {
 	extern uint16_t sector_free_offset[];
+	extern uint8_t sa_compile_completed;
 
 	// --- Cache pressure auto-reset ---
 	// Count how many sectors are actually occupied (sector_free_offset > 0).
 	// next_free_sector is a wrapping cursor and cannot be used as a
 	// high-water mark — it wraps to 0 after reaching FLASH_CACHE_SECTORS.
+	//
+	// SKIP if SA two-pass compile already ran this boot.  The SA-compiled
+	// code covers the bulk of the game; any remaining blocks are compiled
+	// dynamically and, once flash is full, interpreted.  Without this
+	// guard the system endlessly cycles: SA compile → dynamic fill →
+	// cache pressure → soft reset → SA compile → ...
+	if (!sa_compile_completed)
 	{
 		uint8_t occupied = 0;
 		for (uint8_t i = 0; i < FLASH_CACHE_SECTORS; i++) {

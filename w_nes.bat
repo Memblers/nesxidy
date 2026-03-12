@@ -90,8 +90,16 @@ copy /y "roms\nes\%ROM_BASE%.chr" "roms\nes\_active.chr" >nul
 rem --- Clean old output ---
 del %OUTPUT% 2>nul
 
+rem --- Detect ENABLE_NATIVE_STACK from config.h (auto-sync C→asm) ---
+set VASM_NS=
+findstr /r /c:"^#define ENABLE_NATIVE_STACK" config.h >nul 2>&1
+if !errorlevel! equ 0 (
+    set VASM_NS=-DENABLE_NATIVE_STACK=1
+    echo [Native Stack mode enabled]
+)
+
 rem --- Assemble dynamos-asm.s separately with NES defines ---
-vasm6502_oldstyle -quiet -nowarn=62 -opt-branch -Fvobj -DGAME_NUMBER=10 -DPLATFORM_NES=1 dynamos-asm.s -o dynamos-asm-nes.o
+vasm6502_oldstyle -quiet -nowarn=62 -opt-branch -Fvobj -DGAME_NUMBER=10 -DPLATFORM_NES=1 !VASM_NS! dynamos-asm.s -o dynamos-asm-nes.o
 if %errorlevel% neq 0 (
     echo ASM FAILED
     exit /b %errorlevel%

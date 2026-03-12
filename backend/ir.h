@@ -236,7 +236,7 @@ typedef struct {
 #define IR_MAX_NODES     128    /* 96 × 4 = 384 bytes */
 #define IR_MAX_LABELS    16    /* intra-block branch target labels */
 #define IR_MAX_EXT       64    /* operand extension sidecar bytes */
-#define IR_MAX_TMPL_PATCHES 8  /* template patch entries */
+#define IR_MAX_TMPL_PATCHES 16 /* template patch entries (4 per JSR/NJSR) */
 #define IR_MAX_DEFERRED_PATCHES 4  /* Phase B: deferred pending-patch entries */
 
 /* Phase B: deferred pending-patch for patchable branch/JMP templates.
@@ -531,6 +531,12 @@ void ir_resolve_direct_branches(void);
 /* Rebuild block_ci_map[] from fence_native_offset[] after ir_lower().
  * Re-enables try_intra_block_branch for backward branches under IR. */
 void ir_rebuild_block_ci_map(void);
+
+/* Compute post-lowering native offsets for all SA-tracked instructions.
+ * Fills sa_ir_instr_native_off[] from the IR node list.  Must be called
+ * after ir_lower().  Used by SA pass 2 to publish mid-block PC table
+ * entries for instructions that survived IR optimization. */
+void ir_compute_instr_offsets(void);
 
 /* ===================================================================
  * IR API — buffer recording (see ir.c)

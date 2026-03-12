@@ -202,25 +202,48 @@ extern uint8_t read6502(uint16_t address);
 extern void write6502(uint16_t address, uint8_t value);
 
 //a few general functions used by various other functions
+//
+// ENABLE_NATIVE_STACK: push/pull access the hardware stack page ($0100)
+// directly, matching the compiled code's native PHA/PLA behavior.
+// Without NS, they go through write6502/read6502 → WRAM ($7100).
 void push16(uint16_t pushval) {
+#ifdef ENABLE_NATIVE_STACK
+    *(volatile uint8_t*)(BASE_STACK + sp) = (pushval >> 8) & 0xFF;
+    *(volatile uint8_t*)(BASE_STACK + ((sp - 1) & 0xFF)) = pushval & 0xFF;
+#else
     write6502(BASE_STACK + sp, (pushval >> 8) & 0xFF);
     write6502(BASE_STACK + ((sp - 1) & 0xFF), pushval & 0xFF);
+#endif
     sp -= 2;
 }
 
 void push8(uint8_t pushval) {
-    write6502(BASE_STACK + sp--, pushval);
+#ifdef ENABLE_NATIVE_STACK
+    *(volatile uint8_t*)(BASE_STACK + sp) = pushval;
+#else
+    write6502(BASE_STACK + sp, pushval);
+#endif
+    sp--;
 }
 
 uint16_t pull16() {
     uint16_t temp16;
+#ifdef ENABLE_NATIVE_STACK
+    temp16 = *(volatile uint8_t*)(BASE_STACK + ((sp + 1) & 0xFF))
+           | ((uint16_t)*(volatile uint8_t*)(BASE_STACK + ((sp + 2) & 0xFF)) << 8);
+#else
     temp16 = read6502(BASE_STACK + ((sp + 1) & 0xFF)) | ((uint16_t)read6502(BASE_STACK + ((sp + 2) & 0xFF)) << 8);
+#endif
     sp += 2;
     return(temp16);
 }
 
 uint8_t pull8() {
+#ifdef ENABLE_NATIVE_STACK
+    return *(volatile uint8_t*)(BASE_STACK + ++sp);
+#else
     return (read6502(BASE_STACK + ++sp));
+#endif
 }
 
 void reset6502() {
@@ -228,7 +251,16 @@ void reset6502() {
     a = 0;
     x = 0;
     y = 0;
+#ifdef ENABLE_NATIVE_STACK
+    // Native stack splits hardware stack page:
+    //   Guest: $0100-$017F (SP $7F→$00, 128 bytes)
+    //   Host:  $0180-$01FF (SP $FF→$80, 128 bytes)
+    // Guest SP starts at $7F (instead of $FD) to stay in guest region.
+    // Games that do LDX #$FF / TXS will be clamped at dispatch entry.
+    sp = 0x7F;
+#else
     sp = 0xFD;
+#endif
     status |= FLAG_CONSTANT;
 }
 
@@ -879,7 +911,13 @@ static void txa() {
 }
 
 static void txs() {
+#ifdef ENABLE_NATIVE_STACK
+    // Clamp SP to guest range ($00-$7F) to avoid host stack region.
+    // Match compiled TXS behavior: cap everything >= $80 to $7F.
+    sp = (x >= 0x80) ? 0x7F : x;
+#else
     sp = x;
+#endif
 }
 
 static void tya() {

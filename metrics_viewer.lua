@@ -194,4 +194,9 @@ emu.addEventCallback(function()
   emu.drawString(2, y, string.format("  RedundLoad:%d DeadStore:%d DeadLoad:%d", ir_rl, ir_ds, ir_dl), COL_IR2, COL_BG); y = y + 9
   emu.drawString(2, y, string.format("  PHP/PLP:%d PairRwrt:%d RMW:%d", ir_pp, ir_pr, ir_rmw), COL_IR2, COL_BG); y = y + 9
 
+  -- IR elimination / overflow metrics (offsets +$58, +$5A)
+  local ir_elim    = r16(0x58)
+  local ir_overflow = r16(0x5A)
+  emu.drawString(2, y, string.format("  InstrsElim:%d  InstrOverflow:%d", ir_elim, ir_overflow), COL_IR2, COL_BG); y = y + 9
+
 end, emu.eventType.endFrame)

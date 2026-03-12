@@ -505,6 +505,7 @@ void ir_resolve_direct_branches(void)
         uint16_t target_native = 0;
         uint8_t  target_bank = 0;
         uint8_t  resolved = 0;
+        uint8_t  intra_block = 0;
 
         /* Try intra-block: check fences for matching guest PC */
         {
@@ -517,18 +518,22 @@ void ir_resolve_direct_branches(void)
                                   + ir_ctx.fence_native_offset[f];
                     target_bank = flash_code_bank;
                     resolved = 1;
+                    intra_block = 1;
                     break;
                 }
             }
         }
 
-        /* Try inter-block: lookup compiled entry point */
+        /* Try inter-block: lookup compiled entry point.
+         * First try PC tables (current-session addresses), then fall
+         * back to the entry list (pass-1 addresses, which are valid
+         * because pass 2 uses max-stride allocation matching pass 1). */
         if (!resolved) {
-            if (lookup_entry_list(target_pc) && reserve_result_bank == flash_code_bank) {
+            if (lookup_native_addr_safe(target_pc) && reserve_result_bank == flash_code_bank) {
                 target_native = reserve_result_addr;
                 target_bank = reserve_result_bank;
                 resolved = 1;
-            } else if (lookup_native_addr_safe(target_pc) && reserve_result_bank == flash_code_bank) {
+            } else if (lookup_entry_list(target_pc) && reserve_result_bank == flash_code_bank) {
                 target_native = reserve_result_addr;
                 target_bank = reserve_result_bank;
                 resolved = 1;
@@ -542,6 +547,94 @@ void ir_resolve_direct_branches(void)
             int16_t branch_from = (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + p + 2);
             int16_t native_offset = (int16_t)target_native - branch_from;
 
+#ifdef PLATFORM_NES
+            if (intra_block && native_offset < 0) {
+                /* Counted backward branch stub for NES.
+                 * Intra-block backward branches can create tight loops that
+                 * never return to the dispatch loop, blocking NMI and PPU
+                 * updates.  This stub decrements a zero-page counter on each
+                 * backward-branch-take; every 256th take forces a dispatch
+                 * exit so the main loop can process NMI / rendering.
+                 *
+                 * Normal path (9 bytes, ~20 cycles per iteration):
+                 *   PHP / DEC loop_ctr / BEQ(+4) / PLP / JMP target
+                 * Dispatch exit (15 bytes, every 256th take):
+                 *   PLP / STA _a / PHP / LDA #pc / STA _pc / JMP dispatch
+                 *
+                 * Sentinel slot keeps Bxx_inv +3 / JMP stub_addr. */
+                extern __zpage uint8_t a;
+                extern __zpage uint16_t pc;
+                extern __zpage uint8_t loop_ctr;
+                extern void cross_bank_dispatch(void);
+
+                if ((uint16_t)code_index + 24 + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE
+                    <= CACHE_CODE_BUF_SIZE)
+                {
+                    uint16_t stub_addr = flash_code_address
+                                       + BLOCK_PREFIX_SIZE + code_index;
+                    /* --- Normal path --- */
+                    buf[code_index++] = 0x08;  /* PHP */
+                    buf[code_index++] = 0xC6;  /* DEC zp */
+                    buf[code_index++] = (uint8_t)((uint16_t)&loop_ctr);
+                    buf[code_index++] = 0xF0;  /* BEQ +4 → dispatch exit */
+                    buf[code_index++] = 4;
+                    buf[code_index++] = 0x28;  /* PLP */
+                    buf[code_index++] = 0x4C;  /* JMP target_native */
+                    buf[code_index++] = (uint8_t)(target_native & 0xFF);
+                    buf[code_index++] = (uint8_t)(target_native >> 8);
+                    /* --- Dispatch exit (counter expired) --- */
+                    buf[code_index++] = 0x28;  /* PLP (restore guest flags) */
+                    buf[code_index++] = 0x85;  /* STA _a */
+                    buf[code_index++] = (uint8_t)((uint16_t)&a);
+                    buf[code_index++] = 0x08;  /* PHP (push guest flags for dispatch) */
+                    buf[code_index++] = 0xA9;  /* LDA #<target_pc */
+                    buf[code_index++] = (uint8_t)(target_pc);
+                    buf[code_index++] = 0x85;  /* STA _pc */
+                    buf[code_index++] = (uint8_t)((uint16_t)&pc);
+                    buf[code_index++] = 0xA9;  /* LDA #>target_pc */
+                    buf[code_index++] = (uint8_t)(target_pc >> 8);
+                    buf[code_index++] = 0x85;  /* STA _pc+1 */
+                    buf[code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
+                    buf[code_index++] = 0x4C;  /* JMP cross_bank_dispatch */
+                    buf[code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+                    buf[code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+                    /* Patch sentinel JMP to point to stub */
+                    buf[p + 3] = (uint8_t)(stub_addr);
+                    buf[p + 4] = (uint8_t)(stub_addr >> 8);
+                }
+                else if ((uint16_t)code_index + 14 + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE
+                         <= CACHE_CODE_BUF_SIZE)
+                {
+                    /* Fallback: unconditional dispatch stub (no counter). */
+                    uint16_t stub_addr = flash_code_address
+                                       + BLOCK_PREFIX_SIZE + code_index;
+                    buf[code_index++] = 0x85;  /* STA _a */
+                    buf[code_index++] = (uint8_t)((uint16_t)&a);
+                    buf[code_index++] = 0x08;  /* PHP */
+                    buf[code_index++] = 0xA9;  /* LDA #<target_pc */
+                    buf[code_index++] = (uint8_t)(target_pc);
+                    buf[code_index++] = 0x85;  /* STA _pc */
+                    buf[code_index++] = (uint8_t)((uint16_t)&pc);
+                    buf[code_index++] = 0xA9;  /* LDA #>target_pc */
+                    buf[code_index++] = (uint8_t)(target_pc >> 8);
+                    buf[code_index++] = 0x85;  /* STA _pc+1 */
+                    buf[code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
+                    buf[code_index++] = 0x4C;  /* JMP cross_bank_dispatch */
+                    buf[code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+                    buf[code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+                    buf[p + 3] = (uint8_t)(stub_addr);
+                    buf[p + 4] = (uint8_t)(stub_addr >> 8);
+                }
+                else {
+                    /* No buffer space — NOP out the sentinel. */
+                    buf[p + 0] = 0xEA;
+                    buf[p + 1] = 0xEA;
+                    buf[p + 2] = 0xEA;
+                    buf[p + 3] = 0xEA;
+                    buf[p + 4] = 0xEA;
+                }
+            } else
+#endif
             if (native_offset >= -128 && native_offset <= 127) {
                 /* Fits in 2-byte native branch: Bxx rel + NOP NOP NOP */
                 buf[p + 0] = orig_branch;
@@ -558,7 +651,56 @@ void ir_resolve_direct_branches(void)
                 buf[p + 4] = (uint8_t)(target_native >> 8);
             }
         }
+#ifdef PLATFORM_NES
+        else {
+            /* NES: NEVER leave an unresolved JMP $FFFE sentinel.
+             * $FFFE on NES is the IRQ vector area — executing
+             * JMP $FFFE → RTI → pops 3 garbage bytes → crashes.
+             *
+             * Emit a 14-byte dispatch stub that safely returns to
+             * the dispatch loop with pc = target_pc, identical to
+             * the backward-branch stub above.  This handles ALL
+             * resolution failure modes: missing fence, wrong bank,
+             * lookup failure, etc. */
+            extern __zpage uint8_t a;
+            extern __zpage uint16_t pc;
+            extern void cross_bank_dispatch(void);
+            if ((uint16_t)code_index + 14 + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE
+                <= CACHE_CODE_BUF_SIZE)
+            {
+                uint16_t stub_addr = flash_code_address
+                                   + BLOCK_PREFIX_SIZE + code_index;
+                buf[code_index++] = 0x85;  /* STA _a */
+                buf[code_index++] = (uint8_t)((uint16_t)&a);
+                buf[code_index++] = 0x08;  /* PHP */
+                buf[code_index++] = 0xA9;  /* LDA #<target_pc */
+                buf[code_index++] = (uint8_t)(target_pc);
+                buf[code_index++] = 0x85;  /* STA _pc */
+                buf[code_index++] = (uint8_t)((uint16_t)&pc);
+                buf[code_index++] = 0xA9;  /* LDA #>target_pc */
+                buf[code_index++] = (uint8_t)(target_pc >> 8);
+                buf[code_index++] = 0x85;  /* STA _pc+1 */
+                buf[code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
+                buf[code_index++] = 0x4C;  /* JMP cross_bank_dispatch */
+                buf[code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+                buf[code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+                /* Patch sentinel JMP to point to stub */
+                buf[p + 3] = (uint8_t)(stub_addr);
+                buf[p + 4] = (uint8_t)(stub_addr >> 8);
+            }
+            else {
+                /* No buffer space — NOP out the 5-byte sentinel to prevent
+                 * executing JMP $FFFE.  Same last-resort as backward case. */
+                buf[p + 0] = 0xEA;  /* NOP */
+                buf[p + 1] = 0xEA;  /* NOP */
+                buf[p + 2] = 0xEA;  /* NOP */
+                buf[p + 3] = 0xEA;  /* NOP */
+                buf[p + 4] = 0xEA;  /* NOP */
+            }
+        }
+#else
         /* else: leave sentinel — will dispatch through epilogue (safe fallback) */
+#endif
 
         db_idx++;
     }
@@ -596,6 +738,94 @@ void ir_rebuild_block_ci_map(void)
         uint16_t fpc = ir_ctx.fence_guest_pc[f];
         uint8_t ci_slot = (uint8_t)(fpc - entry_pc) & 0x3F;
         block_ci_map[ci_slot] = ir_ctx.fence_native_offset[f] + 1;
+    }
+}
+
+/* ===================================================================
+ * ir_compute_instr_offsets — compute post-lowering native offsets for
+ * all SA-tracked guest instructions.
+ *
+ * During SA pass 2, the compile loop records each guest instruction's
+ * PC offset (from entry_pc) and starting IR node index in the
+ * sa_ir_instr_* arrays.  After ir_lower(), the pre-optimization
+ * code_index values are stale.  This function recomputes each node's
+ * lowered byte position and finds the first surviving (non-dead,
+ * non-fence) node for each instruction to determine its true native
+ * offset.
+ *
+ * Result: sa_ir_instr_native_off[i] = post-lowering byte offset.
+ *         If an instruction was entirely eliminated by IR, its offset
+ *         is forwarded to the NEXT surviving instruction so that
+ *         dispatch entering at that guest PC falls through correctly.
+ *         Trailing eliminated instructions (no successor) keep 0xFF.
+ *
+ * Also counts eliminated instructions in sa_ir_instrs_eliminated for
+ * metrics reporting.
+ *
+ * Must be called after ir_lower() while bank 1 is still mapped.
+ * =================================================================== */
+void ir_compute_instr_offsets(void)
+{
+    extern ir_ctx_t ir_ctx;
+    extern uint8_t sa_ir_instr_first_node[];
+    extern uint8_t sa_ir_instr_native_off[];
+    extern uint8_t sa_ir_instr_count;
+    extern uint8_t sa_ir_instrs_eliminated;
+    extern uint8_t sa_compile_pass;
+
+    if (sa_compile_pass != 2) return;
+    if (!ir_ctx.enabled) return;
+    if (sa_ir_instr_count == 0) return;
+
+    sa_ir_instrs_eliminated = 0;
+
+    /* Recompute per-node byte offsets (same pre-pass as ir_lower) */
+    uint8_t node_offsets[IR_MAX_NODES];
+    {
+        uint8_t offset = 0;
+        uint8_t i;
+        for (i = 0; i < ir_ctx.node_count; i++) {
+            node_offsets[i] = offset;
+            offset += node_byte_size(&ir_ctx, i);
+        }
+    }
+
+    /* For each tracked instruction, find its first surviving node */
+    {
+        uint8_t j;
+        for (j = 0; j < sa_ir_instr_count; j++) {
+            uint8_t first = sa_ir_instr_first_node[j];
+            /* Compute the upper bound: next instruction's first node,
+             * or total node count for the last instruction */
+            uint8_t limit = (j + 1 < sa_ir_instr_count)
+                          ? sa_ir_instr_first_node[j + 1]
+                          : ir_ctx.node_count;
+            uint8_t k;
+            sa_ir_instr_native_off[j] = 0xFF;  /* default: eliminated */
+            for (k = first; k < limit; k++) {
+                uint8_t op = ir_ctx.nodes[k].op;
+                if (op == IR_DEAD || op == IR_PC_MARK)
+                    continue;
+                sa_ir_instr_native_off[j] = node_offsets[k];
+                break;
+            }
+        }
+    }
+
+    /* Forward-fill: eliminated instructions (0xFF) inherit the next
+     * surviving instruction's offset so dispatch can enter there.
+     * Scan backwards so chains of eliminated instrs all resolve. */
+    {
+        uint8_t next_valid = 0xFF;
+        uint8_t j = sa_ir_instr_count;
+        while (j-- > 0) {
+            if (sa_ir_instr_native_off[j] != 0xFF) {
+                next_valid = sa_ir_instr_native_off[j];
+            } else {
+                sa_ir_instr_native_off[j] = next_valid;
+                sa_ir_instrs_eliminated++;
+            }
+        }
     }
 }
 

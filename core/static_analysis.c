@@ -33,6 +33,12 @@ extern uint8_t ir_opt_rmw_fusion(ir_ctx_t *ctx);
 extern void ir_resolve_deferred_patches(void);
 extern void ir_resolve_direct_branches(void);
 extern void ir_rebuild_block_ci_map(void);
+extern void ir_compute_instr_offsets(void);
+// SA pass 2 mid-block PC tracking arrays (defined in dynamos.c)
+extern uint8_t sa_ir_instr_pc_offset[];
+extern uint8_t sa_ir_instr_first_node[];
+extern uint8_t sa_ir_instr_native_off[];
+extern uint8_t sa_ir_instr_count;
 #endif
 
 // -------------------------------------------------------------------------
@@ -600,15 +606,11 @@ static uint8_t sa_compile_one_block(void)
 #endif
 
     // Allocate space in a flash sector for max-size block.
-    // BOTH passes use max-size so that flash_sector_alloc makes identical
-    // sector-skip decisions.  This guarantees every block lands at the
-    // same flash address in both passes, keeping entry list native_addr
-    // values correct.  The wasted space per block is reclaimed after
-    // pass 2 by a sector compaction sweep.
-    //
-    // Allocate space in a flash sector for max-size block.
-    // BOTH passes use max-size so that flash_sector_alloc makes identical
-    // sector-skip decisions, keeping entry list native_addr values correct.
+    // Both passes use max-size so the allocator makes identical sector-skip
+    // decisions regardless of actual code size — this guarantees a stable
+    // address assignment across the entire entry list.  The compaction
+    // sweep after pass 2 reclaims the tail gap of the last block per
+    // sector.
     //
     // Save allocator state to undo if the block produces no code (rare:
     // first instruction is interpreted).  Empty blocks must not appear in
@@ -644,6 +646,15 @@ static uint8_t sa_compile_one_block(void)
     for (uint8_t ci_i = 0; ci_i < 64; ci_i++)
         block_ci_map[ci_i] = 0;
 
+#ifdef ENABLE_IR
+    // Reset SA mid-block PC tracking for this block.
+    // sa_prev_node_count tracks the IR node count before each instruction.
+    // For the first instruction, IR_INIT (inside recompile_opcode_b2) resets
+    // ir_ctx.node_count to 0, so initialising to 0 here is correct.
+    sa_ir_instr_count = 0;
+    uint8_t sa_prev_node_count = 0;
+#endif
+
     setup_flash_pc_tables(pc);
 
     // Compile loop — same as in run_6502 but without dispatch
@@ -658,6 +669,19 @@ static uint8_t sa_compile_one_block(void)
         recompile_opcode();
 
         uint8_t instr_len = code_index - code_index_old;
+
+#ifdef ENABLE_IR
+        // Track this instruction for post-lowering mid-block PC publishing.
+        // Only record when IR is active in pass 2 — non-IR blocks write
+        // per-instruction PC flags directly in the loop below.
+        if (sa_compile_pass == 2 && ir_ctx.enabled
+            && sa_ir_instr_count < SA_IR_MAX_INSTRS) {
+            sa_ir_instr_pc_offset[sa_ir_instr_count] = (uint8_t)(pc_old - entry_pc);
+            sa_ir_instr_first_node[sa_ir_instr_count] = sa_prev_node_count;
+            sa_ir_instr_count++;
+            sa_prev_node_count = ir_ctx.node_count;
+        }
+#endif
 
         // Use recompile_instr_start (set inside recompile_opcode_b2 after
         // any deferred PLP flush) so dispatch/branch targets skip the PLP.
@@ -764,6 +788,10 @@ static uint8_t sa_compile_one_block(void)
         // dispatch can enter it.
         if (sa_compile_pass == 2) {
             if (ir_ctx.enabled) {
+                // Track blocks that exceeded the SA instr tracking limit
+                if (sa_ir_instr_count == SA_IR_MAX_INSTRS)
+                    metrics_ir_instr_overflow();
+
                 uint8_t ir_bytes_before = code_index;
                 // IR pipeline runs through WRAM trampoline because this
                 // function is in BANK_SA_CODE ($8000-$BFFF) and can't
@@ -774,6 +802,8 @@ static uint8_t sa_compile_one_block(void)
                 extern uint8_t sa_ir_lowered_size;
                 sa_ir_pipeline_full();
                 uint8_t lowered_size = sa_ir_lowered_size;
+
+                metrics_ir_instrs_eliminated(sa_ir_instrs_eliminated);
 
                 if (lowered_size) {
                     code_index = lowered_size;
@@ -932,8 +962,7 @@ static uint8_t sa_compile_one_block(void)
                         uint8_t  foff = ir_ctx.fence_native_offset[_f];
                         // Safety: don't publish fences past main code
                         if (foff >= epilogue_start) continue;
-                        setup_flash_pc_tables(fpc);
-                        flash_cache_pc_update(foff, RECOMPILED);
+                        setup_and_update_pc(fpc, foff, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
                         opt2_notify_block_compiled(fpc,
                             flash_code_address + BLOCK_HEADER_SIZE + foff,
@@ -941,12 +970,44 @@ static uint8_t sa_compile_one_block(void)
 #endif
                     }
                 }
+
+                // --- Publish ALL mid-block instruction PCs ---
+                // The fence loop above only covers branch targets (up to 16).
+                // sa_ir_instr_native_off[] was filled by ir_compute_instr_offsets()
+                // (called from sa_ir_pipeline_full → bank 1 trampoline) with
+                // true post-lowering byte offsets for every instruction.
+                // Eliminated instructions are forwarded to the NEXT surviving
+                // instruction's offset so dispatch entering at that guest PC
+                // falls through correctly.  Only trailing eliminated instrs
+                // with no successor keep 0xFF and are skipped here.
+                if (ir_ctx.enabled && sa_ir_instr_count > 0) {
+                    uint8_t _mi;
+                    for (_mi = 0; _mi < sa_ir_instr_count; _mi++) {
+                        uint8_t noff = sa_ir_instr_native_off[_mi];
+                        // Skip trailing eliminated instructions (no successor)
+                        if (noff == 0xFF) continue;
+                        if (noff >= epilogue_start) continue;
+                        // Skip entry PC (already published above at offset 0)
+                        if (noff == 0 && sa_ir_instr_pc_offset[_mi] == 0) continue;
+                        uint16_t mpc = entry_pc + sa_ir_instr_pc_offset[_mi];
+                        // Skip PLP guard: if the native code at this offset
+                        // starts with PLP ($28), dispatch entering here would
+                        // corrupt the stack.  Advance past it.
+                        if (noff < epilogue_start &&
+                            cache_code[0][noff] == 0x28)
+                            noff++;
+                        if (noff >= epilogue_start) continue;
+                        setup_and_update_pc(mpc, noff, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+                        opt2_notify_block_compiled(mpc,
+                            flash_code_address + BLOCK_HEADER_SIZE + noff,
+                            flash_code_bank);
+#endif
+                    }
+                }
             }
 #endif  /* ENABLE_IR */
         }
-
-        // After pass 2, a sector compaction sweep reclaims the wasted
-        // space by scanning block headers and adjusting sector_free_offset.
     }
 
     return 1;
@@ -1034,13 +1095,16 @@ void sa_record_subroutine(uint16_t target)
 }
 
 // -------------------------------------------------------------------------
-// Stack-safety analysis — walks each subroutine body checking for
-// TSX ($BA) or TXS ($9A).  A subroutine without these is "stack-clean"
-// and safe for native JSR/RTS.
+// Stack-safety analysis — walks each subroutine body checking for:
+//   1. TSX ($BA) or TXS ($9A) — direct SP manipulation
+//   2. Unbalanced PLA/PLP — pulls below entry stack depth, indicating
+//      a return-address discard trick (e.g. DK's PLA/PLA at $F33B)
+// A subroutine without these is "stack-clean" and safe for native JSR/RTS.
 //
 // Simple linear scan from entry to RTS.  Follows JMPs and branches
 // within the ROM range.  Does NOT recurse into nested JSRs (those have
-// their own entries and are analyzed separately).
+// their own entries and are analyzed separately).  Stack depth is tracked
+// per-path and propagated to branch targets.
 // -------------------------------------------------------------------------
 
 static uint8_t sa_analyze_subroutine_safety(uint16_t entry)
@@ -1048,9 +1112,11 @@ static uint8_t sa_analyze_subroutine_safety(uint16_t entry)
     // Linear scan with a small local stack for branch targets.
     // 16 pending branch targets should handle any reasonable subroutine.
     uint16_t pending[16];
+    int8_t   pending_depth[16];  // stack depth at each pending branch target
     uint8_t pending_count = 0;
     uint16_t cur = entry;
     uint16_t steps = 0;
+    int8_t stack_depth = 0;     // track push/pull balance (0 = entry level)
 
     for (;;)
     {
@@ -1062,6 +1128,24 @@ static uint8_t sa_analyze_subroutine_safety(uint16_t entry)
             // Check for TSX ($BA) or TXS ($9A)
             if (op == 0xBA || op == 0x9A)
                 return SA_SUB_DIRTY;
+
+            // Track push/pull depth to detect unbalanced stack tricks.
+            // A PLA/PLP that pulls below entry depth means the subroutine
+            // is discarding its caller's return address (e.g. DK's PLA/PLA
+            // trick at $F33B, $E107).  These are not safe for NJSR.
+            switch (op)
+            {
+                case 0x48:  // PHA
+                case 0x08:  // PHP
+                    stack_depth++;
+                    break;
+                case 0x68:  // PLA
+                case 0x28:  // PLP
+                    stack_depth--;
+                    if (stack_depth < 0)
+                        return SA_SUB_DIRTY;  // unbalanced pull
+                    break;
+            }
 
             if (sa_is_invalid_opcode(op))
                 break;
@@ -1094,8 +1178,11 @@ static uint8_t sa_analyze_subroutine_safety(uint16_t entry)
                 {
                     int8_t offset = (int8_t)read6502(cur + 1);
                     uint16_t bt = cur + 2 + offset;
-                    if (pending_count < 16)
-                        pending[pending_count++] = bt;
+                    if (pending_count < 16) {
+                        pending[pending_count] = bt;
+                        pending_depth[pending_count] = stack_depth;
+                        pending_count++;
+                    }
                     cur += 2;
                     continue;
                 }
@@ -1108,7 +1195,9 @@ static uint8_t sa_analyze_subroutine_safety(uint16_t entry)
 next_path:
         if (pending_count == 0)
             break;
-        cur = pending[--pending_count];
+        pending_count--;
+        cur = pending[pending_count];
+        stack_depth = pending_depth[pending_count];
     }
 
     return SA_SUB_CLEAN;
@@ -1506,66 +1595,25 @@ static void sa_run_b2(void)
         }
     }
 
-    // =====================================================================
-    // Sector compaction: reclaim wasted space from max-size allocations.
+    // Compaction sweep REMOVED — the original sweep only shrank
+    // sector_free_offset to the actual code end of the LAST block at
+    // max-stride positions.  This allowed the dynamic JIT (which runs
+    // after SA) to allocate new blocks + ROM data copies into the gap
+    // between the last block's actual end and the next max-stride
+    // position.  Those allocations AND-corrupted SA blocks at later
+    // max-stride positions (overlapping headers + code), causing
+    // dispatch-to-BRK crashes.
     //
-    // Both passes used max-size allocations (250 bytes of code space) to
-    // guarantee identical sector-skip decisions.  Now that pass 2 is
-    // complete, we scan each sector's block headers to find the actual
-    // end of the last block and adjust sector_free_offset accordingly.
-    // This lets the dynamic path (run_6502) pack new blocks tightly in
-    // the leftover space.
-    //
-    // CRITICAL: The walk must advance by the same max-size stride used
-    // during allocation, NOT by actual code_len.  Consecutive blocks are
-    // spaced (max-alloc + alignment) bytes apart; the gap between them
-    // is erased ($FF).  Advancing by actual code_len would land in the
-    // gap, read code_len=$FF, and stop — leaving sector_free_offset
-    // pointing into the middle of valid statically compiled blocks.
-    // The dynamic compiler would then write over them without erasing,
-    // producing AND-corrupted garbage (flash can only clear bits).
-    //
-    // Block header format: byte +4 = code_len (code + epilogue total).
-    // =====================================================================
+    // SA pass 2 max-stride sector_free_offsets are intentionally kept
+    // as-is.  The ~70% per-block waste is the price for address stability.
+
+    // Signal that SA two-pass compile ran to completion.  The cache-
+    // pressure auto-reset in check_recompile_triggers reads this to
+    // avoid endlessly cycling: SA compile → dynamic fill → pressure
+    // → soft reset → SA compile → ...
     {
-        extern uint16_t sector_free_offset[];
-        // Max-size code allocation used by sa_compile_one_block:
-        uint16_t sa_max_alloc = CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE;
-
-        for (uint8_t s = 0; s < FLASH_CACHE_SECTORS; s++)
-        {
-            if (sector_free_offset[s] == 0)
-                continue;  // empty sector
-
-            uint8_t bank = (s >> 2) + BANK_CODE;
-            uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(s & 3) << 12);
-
-            uint16_t offset = 0;
-            uint16_t last_end = 0;
-            while (offset < FLASH_ERASE_SECTOR_SIZE)
-            {
-                // Align to find next block's code_start (same formula as flash_sector_alloc)
-                uint16_t code_start = (offset + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT_MASK)
-                                    & ~BLOCK_ALIGNMENT_MASK;
-                uint16_t header_start = code_start - BLOCK_HEADER_SIZE;
-                if (code_start >= FLASH_ERASE_SECTOR_SIZE)
-                    break;
-
-                // Read code_len from header byte +4
-                uint8_t code_len = peek_bank_byte(bank, sector_base + header_start + 4);
-                if (code_len == 0xFF || code_len == 0)
-                    break;  // no more blocks (erased or empty)
-
-                last_end = code_start + code_len;
-                // Advance by max-size allocation stride (matching flash_sector_alloc)
-                // so the next iteration lands at the correct next block, not in
-                // the erased gap between max-size slots.
-                offset = code_start + sa_max_alloc;
-            }
-
-            if (last_end > 0 && last_end < sector_free_offset[s])
-                sector_free_offset[s] = last_end;
-        }
+        extern uint8_t sa_compile_completed;
+        sa_compile_completed = 1;
     }
 
   } // if (sa_do_compile)
@@ -1598,6 +1646,18 @@ static void sa_run_b2(void)
 
 uint8_t sa_subroutine_lookup(uint16_t target_pc)
 {
+#ifdef FORCE_DIRTY_SUBS
+    // Per-game blacklist: force-dirty specific addresses that the
+    // heuristic might miss.  Checked first for fast bail-out.
+    {
+        static const uint16_t force_dirty[] = { FORCE_DIRTY_SUBS };
+        for (uint8_t i = 0; force_dirty[i] != 0; i++) {
+            if (target_pc == force_dirty[i])
+                return SA_SUB_DIRTY;
+        }
+    }
+#endif
+
     uint8_t lo = (uint8_t)target_pc;
     uint8_t hi = (uint8_t)(target_pc >> 8);
 

@@ -628,7 +628,13 @@ batch_exit:  // case 1 (compile needed) jumps here
 	
 	if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
 	{
-		// No flash available, fall back to interpreter
+		// No flash available — mark this PC as INTERPRETED so future
+		// dispatches return case 2 (interpret) directly, avoiding the
+		// expensive full-sector scan on every subsequent visit.
+		// The PC flag table lives in separate flash banks (27-30) and
+		// doesn't use the sector allocator, so this write always works.
+		setup_flash_pc_tables(pc);
+		flash_cache_pc_update(0, INTERPRETED);
 		bankswitch_prg(0);
 		interpret_6502();
 		return;

@@ -404,6 +404,7 @@ int main(void)
 				}
 				// Always absorb counter changes to prevent re-triggering
 				last_nmi_frame = *(volatile uint8_t*)0x26;
+				nmi_yield = 0;  // VBlank processed — allow backward branches to loop
 			}
 			else if (++nmi_stuck_count >= 3)
 			{
@@ -412,12 +413,9 @@ int main(void)
 				// polling loop (BIT $2002 / BVC for sprite-0-hit, etc.),
 				// the batch dispatch loop exhausts without calling lnSync,
 				// leaving nmiCounter frozen.  Force a render_video() call
-				// — its lnSync re-arms lazynes so nmiCounter advances on
-				// the next VBlank, breaking the deadlock.
+				// — its manual NMI setup re-arms lazynes so nmiCounter
+				// advances on the next VBlank, breaking the deadlock.
 				nmi_stuck_count = 0;
-				// Safety: ensure NMI is enabled before the blocking lnSync
-				// inside render_video.  See comment in render_video().
-				IO8(0x2000) = lnPPUCTRL;
 				render_video();
 				cur_nmi = *(volatile uint8_t*)0x26;
 				if (cur_nmi != last_nmi_frame)
@@ -433,6 +431,7 @@ int main(void)
 						}
 					}
 					last_nmi_frame = cur_nmi;
+					nmi_yield = 0;  // VBlank processed (watchdog path)
 				}
 			}
 		}
@@ -449,6 +448,7 @@ int main(void)
 			if (PPUCTRL_soft & 0x80)
 				nmi6502();
 			last_nmi_frame = *(volatile uint8_t*)0x26;
+			nmi_yield = 0;
 		}
 		// NMI backstop
 		{
@@ -456,6 +456,7 @@ int main(void)
 			if (cur_nmi != last_nmi_frame)
 			{
 				last_nmi_frame = cur_nmi;
+				nmi_yield = 0;
 				if (!(status & FLAG_INTERRUPT))
 				{
 					frame_time = clockticks6502 + FRAME_LENGTH;
@@ -583,21 +584,78 @@ void render_video_noblock(void)
 
 // Flush the PPU queue AND block until VBlank completes.
 // Use sparingly — each call costs one real frame (~16.7ms).
+//
+// IMPORTANT: We avoid lnSync(0) entirely.  lnSync's blocking poll loop
+// at $C2AA waits for the NMI handler to clear nmiFlags bit 6.  On 2nd+
+// calls, lnSync skips the PPUCTRL write to real $2000 — so if bit 7
+// (NMI enable) was lost on the hardware, NMI never fires and lnSync
+// deadlocks.  Even writing lnPPUCTRL to $2000 beforehand doesn't help
+// if lnPPUCTRL itself was corrupted (bit 7 cleared).
+//
+// Instead, we manually set up the NMI handler state (like ln_fire_and_forget)
+// and poll nmiCounter with a timeout.  nmiCounter is incremented at the
+// very end of the NMI handler, guaranteeing the PPU list was consumed.
 void render_video(void)
 {
 	ppu_queue[ppu_queue_index] = lfEnd;
 	lnList(ppu_queue);
 	ppu_queue_index = 0;
 
-	// Defensive: ensure real PPUCTRL has NMI enabled (bit 7) before
-	// entering lnSync's blocking wait loop.  lnSync skips the PPUCTRL
-	// write on 2nd+ calls (when nmiFlags bit 3 is set), relying on the
-	// previous value.  If anything cleared bit 7 on the real register
-	// between NMI handler runs, the NMI never fires and lnSync loops
-	// forever at the sprite-0-hit / nmiFlags polling loop.
+	// --- Manual lnSync(0) replacement ---
+
+	// Enable bg+sprite rendering in PPUMASK shadow
+	lnPPUMASK |= 0x18;
+
+	// Clear split-mode flag (bit 1) in nmiFlags
+	*(volatile uint8_t*)0x25 &= ~0x02;
+
+	// Fill remaining OAM entries with $FF (hide unused sprites)
+	{
+		uint8_t pos = *(volatile uint8_t*)0x27;  // nmiOamPos
+		volatile uint8_t *oam = (volatile uint8_t*)0x0200;
+		while (pos != 0) {
+			oam[pos] = 0xFF;
+			pos += 4;
+		}
+		*(volatile uint8_t*)0x27 = 0;  // reset nmiOamPos
+	}
+
+	// Set sync request: clear bit 5, set bit 6
+	{
+		uint8_t flags = *(volatile uint8_t*)0x25;
+		flags = (flags & ~0x20) | 0x40;
+		*(volatile uint8_t*)0x25 = flags;
+	}
+
+	// Clear scroll counter
+	*(volatile uint8_t*)0x2F = 0;
+
+	// Force NMI enabled on real hardware.  OR with $80 in case lnPPUCTRL
+	// shadow ($22) was corrupted — this is the key difference from the
+	// previous fix which just wrote lnPPUCTRL as-is.
+	lnPPUCTRL |= 0x80;
 	IO8(0x2000) = lnPPUCTRL;
 
-	lnSync(0);
+	// Block until NMI handler completes (increments nmiCounter).
+	// nmiCounter ($26) is incremented AFTER the handler processes the
+	// PPU list, so the queue is safe to reuse when this exits.
+	// Timeout prevents permanent deadlock if NMI is truly stuck.
+	{
+		uint8_t prev_nmi = *(volatile uint8_t*)0x26;
+		uint16_t timeout = 0;
+		while (*(volatile uint8_t*)0x26 == prev_nmi) {
+			if (++timeout > 50000) {
+				// NMI didn't fire in ~50K iterations (~400K cycles ≈ 13 frames).
+				// Force-clear the sync request so the NMI handler doesn't
+				// process stale data, and bail out.
+				*(volatile uint8_t*)0x25 &= ~0x44;  // clear bits 6,2
+				// Re-force NMI enable in case of ongoing corruption
+				lnPPUCTRL |= 0x80;
+				IO8(0x2000) = lnPPUCTRL;
+				break;
+			}
+		}
+	}
 }
 
 

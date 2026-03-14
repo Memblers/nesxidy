@@ -1673,8 +1673,10 @@ _trigger_soft_reset:
 ;
 	if PLATFORM_NES
 SA_CODE_BANK = 19
+IR_OPT_BANK = 28
 	else
 SA_CODE_BANK = 24
+IR_OPT_BANK = 26
 	endif
 
 _sa_record_subroutine_runtime:
@@ -1709,8 +1711,8 @@ _sa_ir_lowered_size:
 	reserve 1
 
 _sa_ir_pipeline_full:
-	; Step 1: ir_optimize(&ir_ctx) in bank 0
-	lda #0
+	; Step 1: ir_optimize(&ir_ctx) in BANK_IR_OPT
+	lda #IR_OPT_BANK
 	sta _mapper_prg_bank
 	ora _mapper_chr_bank
 	sta $C000
@@ -1789,8 +1791,8 @@ _sa_ir_pipeline_full:
 ; On exit:   BANK_SA_CODE restored, ir_ctx.exit_* populated
 ;
 _sa_ir_capture_exit:
-	; Step 1: ir_optimize(&ir_ctx) in bank 0
-	lda #0
+	; Step 1: ir_optimize(&ir_ctx) in BANK_IR_OPT
+	lda #IR_OPT_BANK
 	sta _mapper_prg_bank
 	ora _mapper_chr_bank
 	sta $C000

@@ -528,13 +528,16 @@ _flash_dispatch_return_status_saved:
 ; If a block needs recompile/interpret, bails with A=non-zero.
 ;
 ; VBLANK HANDLING: Every iteration, compare lazyNES NMI counter (ZP $26)
-; with _last_nmi_frame.  If different, a real vblank has occurred.  Instead
-; of bailing to C (which destroys NJSR context and makes subsequent loop
-; iterations run at the slow C-dispatch rate), we simply absorb the vblank
-; by updating _last_nmi_frame and continue looping.  This means no rendering
-; or IRQ dispatch during the subroutine, but delay loops have static screens
-; and the IRQ handler just mutes audio during delays — both acceptable.
-; After the subroutine returns, the main loop catches up normally.
+; with _last_nmi_frame.  If different, a real vblank has occurred.
+; - If nmi_active != 0 (inside guest NMI handler): absorb the vblank by
+;   updating _last_nmi_frame and continue looping.  NMI handler delay loops
+;   have static screens and don't need C-level dispatch.
+; - If nmi_active == 0 (guest main loop): bail to C so render_video() and
+;   nmi6502() can fire.  Guest subroutines that poll for NMI-driven state
+;   (e.g. Golf's $C8F0 wait-for-VBlank-flag) would deadlock without this,
+;   because nmi6502() only runs from the C main loop.
+; After the subroutine returns (or after bail + C dispatch), the main loop
+; catches up normally.
 ;
 ; On entry:  _pc = target, _sp = post-push SP, _native_jsr_saved_sp = pre-push SP
 ; On exit:   A = 0 if subroutine completed, non-zero if needs C
@@ -570,11 +573,23 @@ _native_jsr_trampoline:
 	; Fall through to check vblank and continue loop
 
 .njsr_check_vblank:
-	; Check for vblank: if NMI counter ($26) != last_nmi_frame, absorb it
-	; and continue looping.
+	; Check for vblank: if NMI counter ($26) != last_nmi_frame, handle it.
 	lda $26					; lazyNES NMI counter (incremented every vblank)
 	cmp _last_nmi_frame		; has a new vblank occurred?
-	beq .njsr_no_vblank		; no → skip absorb
+	beq .njsr_no_vblank		; no → skip
+	; VBlank occurred.  If the guest NMI handler is active (nmi_active != 0),
+	; absorb it — NMI handler delay loops have static screens and don't need
+	; C-level NMI dispatch.  But if we're in the guest MAIN loop (nmi_active == 0),
+	; bail to C so render_video() + nmi6502() can fire.  Without this, guest
+	; subroutines that poll for NMI-driven state (e.g. Golf's $C8F0 wait-for-$08)
+	; deadlock because nmi6502() only runs from the C main loop.
+	ldy _nmi_active
+	bne .njsr_absorb		; NMI handler running → safe to absorb
+	; Guest main loop needs NMI dispatch — leave _last_nmi_frame stale
+	; so the C main loop detects the VBlank naturally.
+	lda #1					; "needs compile" → forces return to C main loop
+	jmp .njsr_exit
+.njsr_absorb:
 	sta _last_nmi_frame		; absorb vblank: update last_nmi_frame
 	lda #0
 	sta _nmi_yield			; clear VBlank yield flag (vblank absorbed here)

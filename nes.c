@@ -81,12 +81,32 @@ uint8_t PPUADDR_soft[2];
 uint8_t PPUADDR_latch = 0;
 uint8_t PPUSCROLL_soft[2];
 
+// Software VBlank flag: the lazynes NMI handler reads real $2002 on every
+// VBlank, clearing the hardware VBlank flag before the guest can see it.
+// We set this flag after each render_video() (VBlank sync) and return it
+// to the guest on the first $2002 read, then clear it — matching real NES
+// behaviour where reading $2002 clears the VBlank bit.
+uint8_t guest_vblank_pending = 0;
+
+// Software $2007 (PPUDATA) read buffer.  On real NES hardware, reads from
+// $2007 for addresses $0000-$3EFF return the PREVIOUS contents of an
+// internal buffer, then load the addressed byte into the buffer.  Palette
+// reads ($3F00-$3F1F) return immediately.  We emulate this for CHR-ROM
+// ($0000-$1FFF) by reading from the CHR flash bank, and track the read
+// buffer + auto-increment in software — the real PPU's address register
+// is managed by lazynes and can't be shared with the guest.
+uint8_t ppudata_read_buffer = 0;
+
 extern void bankswitch_prg(__reg("a") uint8_t bank);
 extern uint8_t mapper_prg_bank;
 extern void flash_sector_erase(uint16_t addr, uint8_t bank);
 extern void flash_byte_program(uint16_t addr, uint8_t bank, uint8_t data);
 extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
 extern void flash_cache_init_sectors(void);
+
+// Forward declarations (defined later, in BANK_RENDER segment)
+void render_video(void);
+void render_video_noblock(void);
 
 __zpage uint8_t last_nmi_frame;  // __zpage: ASM dispatch references it directly
 
@@ -147,10 +167,23 @@ void nes_register_write(uint16_t address, uint8_t value)
 			// (mirrors, or auto-incremented past $3FFF) would be misinterpreted
 			// as bulk-write commands, desynchronising the VRU stream and
 			// causing the NMI handler to loop forever.
-			ppu_queue[ppu_queue_index + 0] = PPUADDR_soft[0] & 0x3F;
+			uint8_t addr_hi = PPUADDR_soft[0] & 0x3F;
+			ppu_queue[ppu_queue_index + 0] = addr_hi;
 			ppu_queue[ppu_queue_index + 1] = PPUADDR_soft[1];
 			ppu_queue[ppu_queue_index + 2] = value;
 			ppu_queue_index += 3;
+
+#ifdef NES_MIRROR_VERTICAL
+			// Vertical mirroring emulation for four-screen VRAM hardware.
+			// The guest expects NT0/NT2 and NT1/NT3 to be mirrors (XOR $0800).
+			// Duplicate nametable writes ($2000-$2FFF) to the mirror address.
+			if (addr_hi >= 0x20 && addr_hi < 0x30) {
+				ppu_queue[ppu_queue_index + 0] = addr_hi ^ 0x08;
+				ppu_queue[ppu_queue_index + 1] = PPUADDR_soft[1];
+				ppu_queue[ppu_queue_index + 2] = value;
+				ppu_queue_index += 3;
+			}
+#endif
 
 			if (PPUCTRL_soft & 0x4)	// inc by 32
 			{
@@ -164,6 +197,12 @@ void nes_register_write(uint16_t address, uint8_t value)
 					PPUADDR_soft[0] = (PPUADDR_soft[0] + 1) & 0x3F;
 			}
 
+			// Flush threshold: keep <=96 to avoid overrunning VBlank.
+			// The lazynes NMI handler must process the entire VRU list
+			// within ~2270 PPU cycles.  With NES_MIRROR_VERTICAL doubling
+			// nametable writes (6 bytes each), 96 bytes ≈ 16 writes —
+			// safe.  Higher thresholds (e.g. 240) cause PPU corruption
+			// because the NMI handler bleeds into active rendering.
 			if (ppu_queue_index >= 96)
 				render_video();
 			break;
@@ -186,6 +225,15 @@ void nes_register_write(uint16_t address, uint8_t value)
 
 static void write_recompile_signature_b21(void)
 {
+	// Erase the 4KB sector containing the signature before programming.
+	// RECOMPILE_SIG_ADDRESS ($83C8) falls inside cache_bit_array, which
+	// is actively written by the dynamic JIT (clearing bits).  NOR flash
+	// byte-program can only clear bits (AND), so writing $55 over a byte
+	// that already has bits cleared by cache_bit_array produces garbage
+	// instead of $55.  Erasing the sector restores all bits to $FF first.
+	// This destroys 4KB of cache_bit_array, but we're about to soft-reset
+	// and flash_format will erase the entire sector anyway.
+	flash_sector_erase(RECOMPILE_SIG_ADDRESS & 0xF000, BANK_FLASH_BLOCK_FLAGS);
 	flash_byte_program(RECOMPILE_SIG_ADDRESS, BANK_FLASH_BLOCK_FLAGS, RECOMPILE_SIG_VALUE);
 }
 
@@ -370,9 +418,12 @@ int main(void)
 		if (nmi_active && sp == nmi_sp_guard)
 			nmi_active = 0;
 
-		// Execute deferred OAM DMA: JIT-compiled STA $4014 set the flag,
-		// now write to the real hardware register during the main loop
-		// where VBlank timing is appropriate.
+		// Execute deferred OAM DMA: the guest wrote a source page number
+		// via STA $4014, but both the JIT-compiled code and the interpreter
+		// read from the PATCHED guest ROM (patch_oam_dma.py already
+		// translates the page to account for RAM_BASE relocation).
+		// So oam_dma_request already contains the correct real page —
+		// just forward it directly to the hardware.
 		if (oam_dma_request) {
 			IO8(0x4014) = oam_dma_request;
 			oam_dma_request = 0;
@@ -394,7 +445,20 @@ int main(void)
 #ifdef ENABLE_METRICS
 					{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
-					render_video();
+					// Always flush the PPU queue.  Many games temporarily
+					// disable NMI at the start of their NMI handler (STA $2000
+					// with bit 7 clear), so checking PPUCTRL_soft here would
+					// race with the guest and skip the flush, corrupting
+					// nametable/palette data.  When the queue is empty,
+					// skip the blocking render_video() — nmiCounter already
+					// advanced (that’s how we entered this path), so no NMI
+					// sync is needed.  This keeps init fast (no blocking on
+					// empty queues) while ensuring gameplay PPU data is
+					// always flushed.
+					if (ppu_queue_index > 0)
+						render_video();
+					else
+						guest_vblank_pending = 1;
 					if (PPUCTRL_soft & 0x80)
 					{
 						nmi_sp_guard = sp;
@@ -489,7 +553,71 @@ uint8_t read6502(uint16_t address)
 		return RAM_BASE[address & 0x7FF];	// 2KB RAM mirrored
 
 	if (address < 0x4000)
+	{
+		if ((address & 7) == 2)
+		{
+			PPUADDR_latch = 0;	// Reading $2002 resets the w register
+			// Read real hardware for bits 0-6 (sprite overflow, sprite-0-hit, etc.)
+			// but substitute the software-tracked VBlank flag for bit 7.
+			// The lazynes NMI handler reads $2002 every VBlank, clearing the
+			// hardware flag before the guest can see it.  guest_vblank_pending
+			// is set by render_video() after each VBlank sync.
+			uint8_t val = IO8(0x2002);
+			if (guest_vblank_pending)
+			{
+				val |= 0x80;
+				guest_vblank_pending = 0;
+			}
+			return val;
+		}
+		if ((address & 7) == 7)
+		{
+			// $2007 PPUDATA read — emulate in software.
+			// The real PPU's address register is managed by lazynes and
+			// isn't synced with the guest's $2006 writes.  For CHR-ROM
+			// reads ($0000-$1FFF), return data from the flash CHR bank.
+			// NES read buffer: non-palette reads return the previous buffer
+			// contents, then load the new byte into the buffer.
+			uint16_t ppu_addr = ((uint16_t)PPUADDR_soft[0] << 8) | PPUADDR_soft[1];
+			uint8_t result;
+
+			if ((ppu_addr & 0x3FFF) < 0x2000)
+			{
+				// CHR-ROM: read from the CHR flash bank
+				result = ppudata_read_buffer;
+				uint8_t saved_bank = mapper_prg_bank;
+				bankswitch_prg(BANK_NES_CHR);
+				ppudata_read_buffer = chr_nes[ppu_addr & 0x1FFF];
+				bankswitch_prg(saved_bank);
+			}
+			else
+			{
+				// Nametable/palette: return buffered value but do NOT
+				// read real $2007 — that auto-increments the PPU's
+				// internal address register, which lazynes manages for
+				// VRU list processing.  Reading here desyncs the PPU
+				// address and corrupts subsequent nametable/palette writes.
+				result = ppudata_read_buffer;
+				// ppudata_read_buffer = IO8(0x2007);  // DISABLED — causes PPU desync
+			}
+
+			// Auto-increment PPUADDR_soft (same logic as write path)
+			if (PPUCTRL_soft & 0x4)
+			{
+				if ((PPUADDR_soft[1] & 0xE0) == 0xE0)
+					PPUADDR_soft[0] = (PPUADDR_soft[0] + 1) & 0x3F;
+				PPUADDR_soft[1] += 32;
+			}
+			else
+			{
+				if (++PPUADDR_soft[1] == 0)
+					PPUADDR_soft[0] = (PPUADDR_soft[0] + 1) & 0x3F;
+			}
+
+			return result;
+		}
 		return IO8(0x2000 + (address & 7));	// PPU registers mirrored
+	}
 
 	if (address < 0x4020)
 		return IO8(address);	// APU/IO
@@ -656,6 +784,12 @@ void render_video(void)
 			}
 		}
 	}
+
+	// Signal software VBlank: the lazynes NMI handler has consumed the
+	// hardware $2002 VBlank flag, but the guest expects to see it on
+	// the next $2002 read.  This is the key fix for games whose reset
+	// code polls BIT $2002 / BPL waiting for VBlank (e.g. Galaxian).
+	guest_vblank_pending = 1;
 }
 
 
@@ -686,6 +820,7 @@ static void flash_format_b19(void)
 		if (bank == BANK_NES_CHR) continue;
 		if (bank == BANK_SA_CODE) continue;
 		if (bank == BANK_INIT_CODE) continue;
+		if (bank == BANK_IR_OPT) continue;   // IR optimizer lives here now
 
 		for (uint16_t sector = 0x8000; sector < 0xC000; sector += 0x1000)
 		{

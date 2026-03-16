@@ -1,4 +1,4 @@
-//#define DEBUG_AUDIO 1
+#define DEBUG_AUDIO 1
 
 //#define DEBUG_CPU_WRITE 1
 //#define DEBUG_CPU_READ 1
@@ -241,8 +241,20 @@
 #define GAME_IDLE_PC  0xCFE1
 #endif
 
+#ifdef GAME_BALLOON_FIGHT
+// No known idle PC.
+#endif
+
+#ifdef GAME_BASEBALL
+// No known idle PC.
+#endif
+
 #ifdef GAME_BATTLE_CITY
 // No known idle PC — main loop processes input every frame.
+#endif
+
+#ifdef GAME_BINARY_LAND
+// No known idle PC.
 #endif
 
 #ifdef GAME_BURGER_TIME
@@ -250,6 +262,14 @@
 #endif
 
 #ifdef GAME_DEFENDER
+// No known idle PC.
+#endif
+
+#ifdef GAME_EXCITEBIKE
+// No known idle PC.
+#endif
+
+#ifdef GAME_EXERION
 // No known idle PC.
 #endif
 
@@ -262,6 +282,10 @@
 #endif
 
 #ifdef GAME_LODE_RUNNER
+// No known idle PC.
+#endif
+
+#ifdef GAME_LUNAR_POOL
 // No known idle PC.
 #endif
 
@@ -280,6 +304,7 @@
 
 #ifdef GAME_GOLF
 // No known idle PC.
+#define NES_MIRROR_VERTICAL
 #endif
 
 #ifdef GAME_KARATEKA
@@ -291,6 +316,7 @@
 #endif
 
 #ifdef GAME_MILLIPEDE
+#define GAME_IDLE_PC  0xF09B
 // No known idle PC.
 #endif
 
@@ -303,6 +329,14 @@
 #endif
 
 #ifdef GAME_RAID_BUNG
+// No known idle PC.
+// Original ROM uses vertical mirroring, but DynaMoS hardware has
+// four-screen VRAM.  Emulate vertical mirroring in software by
+// duplicating nametable writes: NT0 ↔ NT2, NT1 ↔ NT3.
+#define NES_MIRROR_VERTICAL
+#endif
+
+#ifdef GAME_ROAD_FIGHTER
 // No known idle PC.
 #endif
 

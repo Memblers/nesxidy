@@ -816,6 +816,7 @@ static void flash_format_b2(void)
 		if (bank == BANK_PLATFORM_ROM) continue;  // ROM incbin data
 		if (bank == BANK_SA_CODE)      continue;  // static analysis code
 		if (bank == BANK_INIT_CODE)    continue;  // this function + convert_chr_b2
+		if (bank == BANK_IR_OPT)       continue;  // IR optimizer lives here now
 
 		for (uint16_t sector = 0x8000; sector < 0xC000; sector += 0x1000)
 		{

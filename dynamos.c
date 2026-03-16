@@ -557,6 +557,27 @@ void run_6502(void)
 batch_exit:  // case 1 (compile needed) jumps here
 #endif
 
+	// Guard: skip compile if _pc is already recompiled (e.g., from SA).
+	// When the native JSR trampoline hits an INTERPRETED-flagged PC, it
+	// inline-interprets and advances _pc.  If a VBlank fires right after,
+	// the trampoline bails with result=1 (compile).  But _pc may now point
+	// to an already-compiled adjacent PC.  Without this guard, the same
+	// block is compiled 20+ times (each copy unreachable because the
+	// AND-corruption guard prevents updating the flag), exhausting the
+	// flash cache on a static title screen.
+	{
+		extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+		uint8_t flag_bank = ((pc >> 14) + BANK_PC_FLAGS);
+		uint16_t flag_addr = (pc & FLASH_BANK_MASK);
+		uint8_t existing_flag = peek_bank_byte(flag_bank,
+			(uint16_t)&flash_cache_pc_flags[flag_addr]);
+		if (existing_flag && !(existing_flag & RECOMPILED)) {
+			// non-zero with bit 7 clear → already compiled, re-dispatch next iteration
+			// ($00 = AND-corrupted/uninitialized → still needs compile)
+			return;
+		}
+	}
+
 	// Guard: don't compile addresses outside the ROM range.
 	// Transient stack corruption (or IO-space PCs) can produce
 	// out-of-range addresses.  Compiling them would read garbage
@@ -566,13 +587,18 @@ batch_exit:  // case 1 (compile needed) jumps here
 	// is data, never executable code.  Note: pc > ROM_ADDR_MAX is
 	// always false when ROM_ADDR_MAX == 0xFFFF (uint16_t max), so the
 	// vector-table check is the only effective upper-bound guard.
-	if (pc < ROM_ADDR_MIN || pc > ROM_ADDR_MAX || pc >= 0xFFFA)
+	//
+	// IMPORTANT: volatile prevents VBCC -O2 from optimizing away this
+	// comparison (observed: entire guard removed, causing JMP-$0000
+	// crashes on Exidy when out-of-range PCs reach the compile path).
+	{ volatile uint16_t pc_v = pc;
+	if (pc_v < ROM_ADDR_MIN || pc_v > ROM_ADDR_MAX || pc_v >= 0xFFFA)
 	{
 		cache_interpret++;
 		bankswitch_prg(0);
 		interpret_6502();
 		return;
-	}
+	} }
 	
 	// Compile directly to flash
 	cache_misses++;
@@ -822,11 +848,16 @@ batch_exit:  // case 1 (compile needed) jumps here
 #endif  /* ENABLE_IR */
 		}
 
-		// Guard: stop block if pc advanced into the 6502 vector table
-		// ($FFFA-$FFFF) or wrapped past $FFFF into low memory.
-		// These addresses are NMI/RESET/IRQ vectors (data, not code).
-		if (pc >= 0xFFFA || pc < ROM_ADDR_MIN)
-			cache_flag[0] &= ~READY_FOR_NEXT;
+		// Guard: stop block if pc advanced outside the ROM range or into
+		// the 6502 vector table ($FFFA-$FFFF).  Without the upper bound
+		// check, blocks at the end of ROM can overflow into non-ROM
+		// address space, writing bogus PC-flag entries into banks that
+		// are repurposed for code (e.g. BANK_RENDER on Exidy).
+		//
+		// IMPORTANT: volatile prevents VBCC -O2 from optimizing this away.
+		{ volatile uint16_t pc_v = pc;
+		if (pc_v >= 0xFFFA || pc_v < ROM_ADDR_MIN || pc_v > ROM_ADDR_MAX)
+			cache_flag[0] &= ~READY_FOR_NEXT; }
 		
 	} while (cache_flag[0] & READY_FOR_NEXT);
 
@@ -1088,6 +1119,15 @@ batch_exit:  // case 1 (compile needed) jumps here
 
 		// --- Write block header to flash ---
 		// flash_code_address points to header start; code starts at +BLOCK_HEADER_SIZE
+		//
+		// IMPORTANT: Reload entry_pc from the global arrays that were set
+		// at compile start (line ~595).  VBCC -O2 stores the local
+		// 'entry_pc' in a ZP register pair (r22:r23) but reuses those
+		// registers for temporaries during the ~37000-instruction compile
+		// process, corrupting the value.  The cache_entry_pc arrays live
+		// in ZP globals that survive function calls.
+		entry_pc = (uint16_t)cache_entry_pc_lo[0]
+		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
 		flash_byte_program(flash_code_address + 0, flash_code_bank, (uint8_t)entry_pc);        // entry_pc lo
 		flash_byte_program(flash_code_address + 1, flash_code_bank, (uint8_t)(entry_pc >> 8));  // entry_pc hi
 		flash_byte_program(flash_code_address + 2, flash_code_bank, (uint8_t)exit_pc);          // exit_pc lo
@@ -1118,6 +1158,11 @@ batch_exit:  // case 1 (compile needed) jumps here
 		//  - Partial flash writes (power loss, programming failure)
 		//  - Any future bugs that create premature table entries
 		flash_byte_program(flash_code_address + 7, flash_code_bank, BLOCK_SENTINEL);
+
+		// Reload entry_pc again — the flash write loop above involves many
+		// function calls that may clobber VBCC's register allocation.
+		entry_pc = (uint16_t)cache_entry_pc_lo[0]
+		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
 
 #ifdef ENABLE_STATIC_ANALYSIS
 		// Record this entry PC in the SA bitmap so the next boot's BFS walk
@@ -1206,7 +1251,11 @@ batch_exit:  // case 1 (compile needed) jumps here
 		}
 #endif
 		
-		// Restore PC to entry point and execute from flash
+		// Restore PC to entry point and execute from flash.
+		// Reload: VBCC may have clobbered entry_pc's register during
+		// the optimizer/sweep/fence calls above.
+		entry_pc = (uint16_t)cache_entry_pc_lo[0]
+		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
 		pc = entry_pc;
 		
 		result = dispatch_on_pc();
@@ -1634,17 +1683,18 @@ uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
 // Returns the emit length (2 or 5) on success, 0 if unable to resolve.
 // The caller provides the branch opcode and code buffer pointer.
 //============================================================================================================
-#pragma section bank2
 #ifdef ENABLE_IR
 //============================================================================================================
-// ir_emit_direct_branch_placeholder — bank2 helper (called from recompile_opcode_b2_inner).
+// ir_emit_direct_branch_placeholder — moved to bank17 (BANK_COMPILE).
 // Records a direct-branch entry in ir_ctx and writes the 5-byte placeholder
 // (Bxx_inv +3 / JMP $FFFE) into cache_code[].  The wrapper recompile_opcode_b2()
 // will see code_index advanced, pick up these bytes, and record them as
 // IR_RAW_BYTE nodes during normal IR recording.
 // Returns cache_flag[cache_index] for the caller to return, or 0 if unable.
+// Called from bank2 via fixed-bank trampoline (compilation speed not critical).
 //============================================================================================================
-uint8_t ir_emit_direct_branch_placeholder(uint16_t target_pc, uint8_t branch_opcode)
+#pragma section bank17
+static uint8_t ir_emit_direct_branch_placeholder_b17(uint16_t target_pc, uint8_t branch_opcode)
 {
 	/* Common capacity/space checks — returns 0 if cannot emit */
 	if ((code_index + 5 + EPILOGUE_SIZE + 6) >= CODE_SIZE ||
@@ -1671,7 +1721,19 @@ uint8_t ir_emit_direct_branch_placeholder(uint16_t target_pc, uint8_t branch_opc
 	cache_flag[cache_index] |= READY_FOR_NEXT;
 	return cache_flag[cache_index];
 }
-#else
+#pragma section default
+uint8_t ir_emit_direct_branch_placeholder(uint16_t target_pc, uint8_t branch_opcode)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = ir_emit_direct_branch_placeholder_b17(target_pc, branch_opcode);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+#endif
+
+#pragma section bank2
+#ifndef ENABLE_IR
 uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *code_ptr)
 {
 	if (!lookup_native_addr_safe(target_pc))
@@ -3716,12 +3778,12 @@ uint8_t recompile_opcode(void)
 
 //============================================================================================================
 // ==========================================================================
-// cache_bit_enable / cache_bit_check — moved to bank 2.
+// cache_bit_enable / cache_bit_check — moved to bank 17 (BANK_COMPILE).
 // Not performance-critical. Saves ~506 bytes of fixed-bank space.
 // ==========================================================================
-#pragma section bank2
+#pragma section bank17
 
-static void cache_bit_enable_b2(uint16_t addr)
+static void cache_bit_enable_b17(uint16_t addr)
 {	
 	uint8_t bit_mask = ~(1 << (addr & 3));
 	addr = addr >> 3;
@@ -3730,7 +3792,7 @@ static void cache_bit_enable_b2(uint16_t addr)
 }
 
 //============================================================================================================
-static uint8_t cache_bit_check_b2(uint16_t addr)
+static uint8_t cache_bit_check_b17(uint16_t addr)
 {
 	uint8_t bit_number = addr & 3;
 	uint8_t value;
@@ -3764,8 +3826,8 @@ static uint8_t cache_bit_check_b2(uint16_t addr)
 void cache_bit_enable(uint16_t addr)
 {
 	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(2);
-	cache_bit_enable_b2(addr);
+	bankswitch_prg(BANK_COMPILE);
+	cache_bit_enable_b17(addr);
 	bankswitch_prg(saved_bank);
 }
 
@@ -3773,8 +3835,8 @@ void cache_bit_enable(uint16_t addr)
 uint8_t cache_bit_check(uint16_t addr)
 {
 	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(2);
-	uint8_t result = cache_bit_check_b2(addr);
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = cache_bit_check_b17(addr);
 	bankswitch_prg(saved_bank);
 	return result;
 }

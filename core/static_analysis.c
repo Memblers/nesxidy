@@ -720,6 +720,14 @@ static uint8_t sa_compile_one_block(void)
             cache_flag[0] &= ~READY_FOR_NEXT;
         }
 
+        // Guard: stop block if pc advanced outside the ROM range or into
+        // the vector table.  Mirrors the guard in run_6502's compile loop.
+        //
+        // IMPORTANT: volatile prevents VBCC -O2 from optimizing this away.
+        { volatile uint16_t pc_v = pc;
+        if (pc_v >= 0xFFFA || pc_v < ROM_ADDR_MIN || pc_v > ROM_ADDR_MAX)
+            cache_flag[0] &= ~READY_FOR_NEXT; }
+
         // Pass 2: force block termination at the same exit_pc as pass 1.
         // This prevents block boundary drift when shorter forward branches
         // leave more room in the code buffer.
@@ -916,6 +924,10 @@ static uint8_t sa_compile_one_block(void)
         if (sa_compile_pass == 2)
         {
             // Pass 2: write header + epilogue to flash
+            // Reload entry_pc from global arrays — VBCC -O2 may have
+            // corrupted the local via register reuse during compile.
+            entry_pc = (uint16_t)cache_entry_pc_lo[0]
+                     | ((uint16_t)cache_entry_pc_hi[0] << 8);
             flash_byte_program(flash_code_address + 0, flash_code_bank, (uint8_t)entry_pc);
             flash_byte_program(flash_code_address + 1, flash_code_bank, (uint8_t)(entry_pc >> 8));
             flash_byte_program(flash_code_address + 2, flash_code_bank, (uint8_t)exit_pc);
@@ -945,6 +957,9 @@ static uint8_t sa_compile_one_block(void)
             // instructions, but the entry PC must still be published so
             // dispatch can find this block.
             {
+                // Reload: flash writes above may have clobbered entry_pc.
+                entry_pc = (uint16_t)cache_entry_pc_lo[0]
+                         | ((uint16_t)cache_entry_pc_hi[0] << 8);
                 setup_flash_pc_tables(entry_pc);
                 flash_cache_pc_update(0, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
@@ -980,6 +995,9 @@ static uint8_t sa_compile_one_block(void)
                 // instruction's offset so dispatch entering at that guest PC
                 // falls through correctly.  Only trailing eliminated instrs
                 // with no successor keep 0xFF and are skipped here.
+                // Reload: fence loop above may have clobbered entry_pc.
+                entry_pc = (uint16_t)cache_entry_pc_lo[0]
+                         | ((uint16_t)cache_entry_pc_hi[0] << 8);
                 if (ir_ctx.enabled && sa_ir_instr_count > 0) {
                     uint8_t _mi;
                     for (_mi = 0; _mi < sa_ir_instr_count; _mi++) {
@@ -1024,7 +1042,7 @@ static uint8_t sa_compile_one_block(void)
 // -------------------------------------------------------------------------
 // Subroutine table helpers — moved to BANK_SA_CODE (compile-time only).
 // sa_record_subroutine is called from sa_walk_b2 (same bank, direct call).
-// sa_subroutine_lookup is kept in bank2 (called from recompile_opcode_b2).
+// sa_subroutine_lookup has a fixed-bank trampoline (callable from any bank).
 // sa_run has a fixed-bank trampoline below.
 // sa_record_indirect_target has a fixed-bank trampoline below.
 // -------------------------------------------------------------------------
@@ -1439,6 +1457,7 @@ static void sa_run_b2(void)
 #ifdef PLATFORM_NES
         if (bank == BANK_NES_PRG_LO) continue;   // NES PRG-ROM low bank
 #endif
+        if (bank == BANK_IR_OPT) continue;        // IR optimizer code
         for (uint16_t sector = FLASH_BANK_BASE; sector < FLASH_BANK_BASE + FLASH_BANK_SIZE; sector += FLASH_ERASE_SECTOR_SIZE)
             flash_sector_erase(sector, bank);
     }
@@ -1446,6 +1465,7 @@ static void sa_run_b2(void)
     // Erase PC flag sectors (banks 27-30)
     for (uint8_t bank = BANK_PC_FLAGS; bank < BANK_PC_FLAGS + 4; bank++)
     {
+        if (bank == BANK_IR_OPT) continue;    // IR optimizer code
         for (uint16_t sector = FLASH_BANK_BASE; sector < FLASH_BANK_BASE + FLASH_BANK_SIZE; sector += FLASH_ERASE_SECTOR_SIZE)
             flash_sector_erase(sector, bank);
     }
@@ -1639,12 +1659,17 @@ static void sa_run_b2(void)
 
 // -------------------------------------------------------------------------
 // Subroutine lookup — check if a JSR target is stack-clean.
-// Lives in bank2 so recompile_opcode_b2 (also bank2) can call it directly.
+// Moved to BANK_SA_CODE to free bank2 space.  Called from bank2 via
+// fixed-bank trampoline (compilation speed is not critical).
 // Returns SA_SUB_CLEAN, SA_SUB_DIRTY, or SA_SUB_EMPTY (not found).
 // -------------------------------------------------------------------------
-#pragma section bank2
+#ifdef PLATFORM_NES
+#pragma section bank19
+#else
+#pragma section bank24
+#endif
 
-uint8_t sa_subroutine_lookup(uint16_t target_pc)
+static uint8_t sa_subroutine_lookup_impl(uint16_t target_pc)
 {
 #ifdef FORCE_DIRTY_SUBS
     // Per-game blacklist: force-dirty specific addresses that the
@@ -1682,6 +1707,17 @@ uint8_t sa_subroutine_lookup(uint16_t target_pc)
         }
     }
     return SA_SUB_EMPTY;
+}
+
+#pragma section default
+
+uint8_t sa_subroutine_lookup(uint16_t target_pc)
+{
+    uint8_t saved_bank = mapper_prg_bank;
+    bankswitch_prg(BANK_SA_CODE);
+    uint8_t result = sa_subroutine_lookup_impl(target_pc);
+    bankswitch_prg(saved_bank);
+    return result;
 }
 
 // -------------------------------------------------------------------------

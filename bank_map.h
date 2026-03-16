@@ -28,9 +28,10 @@
  *   Bank 31       Fixed bank (text/rodata, always mapped at $C000)
  *
  * Repurposed dead banks (platform-dependent):
- *   Bank 19       NES-dead ($0000-$1FFF = RAM, NES never executes from RAM)
+ *   Bank 19       NES-dead ($0000-$1FFF = RAM) → SA code + init code (NES)
  *   Bank 20       NES-dead ($2000-$3FFF = PPU/IO, no code) → NES PRG-ROM lo
- *   Bank 21       Shared-dead ($4000-$5FFF = no code on either platform)
+ *   Bank 21       NES-dead ($4000-$5FFF = PPU/IO, no NES code)
+ *                 Exidy-LIVE ($4000-$5FFF has guest code — do NOT use for Exidy)
  *   Bank 22       Exidy-dead ($6000-$7FFF = no Exidy code here)
  *                 NES-LIVE (PRG-RAM can have code) — do NOT use for NES
  *   Bank 23       Exidy-dead ($8000-$9FFF, Exidy ROM < $8000) → platform ROM
@@ -39,8 +40,12 @@
  *                 NES-LIVE ($A000-$BFFF = PRG-ROM mirror on NROM)
  *   Bank 25       Exidy-dead ($C000-$DFFF, Exidy ROM < $8000) → init code
  *                 NES-LIVE ($C000-$DFFF = PRG-ROM)
- *   Bank 26       NES-LIVE ($E000-$FFFF = PRG-ROM), Exidy-dead
- *   Banks 28-30   Flag-table dead (future headroom)
+ *   Bank 26       NES-LIVE ($E000-$FFFF = PRG-ROM), Exidy PC-table LIVE
+ *                 WARNING: do NOT repurpose — it's BANK_PCTABLE_START+7
+ *   Bank 28       NES-dead flag table ($4000-$7FFF) → IR optimizer (NES)
+ *                 Exidy-LIVE ($4000-$7FFF has guest code)
+ *   Bank 29       Exidy-dead flag table ($8000-$BFFF) → IR optimizer (Exidy)
+ *                 NES-LIVE ($8000-$BFFF = PRG-ROM)
  */
 
 #ifndef BANK_MAP_H
@@ -49,7 +54,13 @@
 /* ---- Core system banks ---- */
 #define BANK_INTERP             0       /* Interpreter, boot data image */
 #define BANK_EMIT               1       /* Emit helpers, optimizer V2 */
-#define BANK_IR_OPT             0       /* IR optimizer (shares bank with interpreter) */
+#ifdef PLATFORM_NES
+#define BANK_IR_OPT             28      /* NES: dead flag-table bank $4000-$7FFF (no NES guest code there) */
+#else
+#define BANK_IR_OPT             29      /* Exidy: dead flag-table bank $8000-$BFFF (no Exidy guest code there) */
+#endif
+                                        /* WARNING: bank 26 = BANK_PCTABLE_START+7, LIVE on Exidy */
+                                        /* WARNING: bank 28 = BANK_PCFLAGS_START+1, LIVE on Exidy ($4000-$7FFF) */
 #define BANK_RECOMPILE          2       /* Recompiler (recompile_opcode_b2) */
 #define BANK_META               3       /* Block flags, SA bitmap, cache bits */
 #define BANK_CACHE_START        4       /* First code-cache bank */

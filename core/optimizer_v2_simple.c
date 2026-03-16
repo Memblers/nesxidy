@@ -401,87 +401,6 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
         opt2_stat_direct++;
     }
 }
-#define EPILOGUE_FULL_SCAN_MAX 255
-
-static void opt2_full_epilogue_scan_b2(void) {
-    // Exhaustive scan: process ALL sectors and ALL blocks in one pass.
-    // Unlike the batched scan (EPILOGUE_SCAN_BATCH=32), this walks every
-    // block in every sector.  Expensive (~50-200ms) but resolves ALL
-    // pending epilogue chains at once.
-    uint8_t patches_applied = 0;
-    
-    for (uint8_t sector = 0; sector < FLASH_CACHE_SECTORS; sector++) {
-        uint16_t free_off = sector_free_offset[sector];
-        if (free_off == 0) continue;  // empty sector
-        
-        uint8_t code_bank = (sector >> 2) + BANK_CODE;
-        uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(sector & 3) << 12);
-        uint16_t offset = SECTOR_FIRST_HEADER;
-        
-        while (offset < free_off) {
-            uint16_t hdr_addr = sector_base + offset;
-            
-            uint8_t code_len = peek_bank_byte(code_bank, hdr_addr + 4);
-            uint8_t epi_off = peek_bank_byte(code_bank, hdr_addr + 5);
-            
-            if (code_len == 0 || code_len == 0xFF) break;  // end of valid blocks
-            
-            // Advance cursor past this block
-            uint16_t cur_end = offset + BLOCK_HEADER_SIZE + code_len;
-            uint16_t next_code = (cur_end + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(uint16_t)(BLOCK_ALIGNMENT - 1);
-            offset = next_code - BLOCK_HEADER_SIZE;
-            
-            if (epi_off == 0xFF || epi_off == 0) continue;
-            
-            uint16_t code_base = hdr_addr + BLOCK_HEADER_SIZE;
-            
-            // Check if fast-path JMP operand is still unpatched ($FFFF)
-            uint8_t jmp_lo = peek_bank_byte(code_bank, code_base + epi_off + 6);
-            uint8_t jmp_hi = peek_bank_byte(code_bank, code_base + epi_off + 7);
-            if (jmp_lo != 0xFF || jmp_hi != 0xFF) continue;  // already patched
-            
-            // Read exit_pc from header
-            uint16_t exit_pc = peek_bank_byte(code_bank, hdr_addr + 2)
-                    | ((uint16_t)peek_bank_byte(code_bank, hdr_addr + 3) << 8);
-            
-            // Check if exit_pc is compiled
-            uint8_t flag = peek_bank_byte(
-                (exit_pc >> 14) + BANK_PC_FLAGS,
-                (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
-            if (flag & RECOMPILED) continue;
-            
-            // Read native address
-            uint16_t pc_addr = (exit_pc << 1) & FLASH_BANK_MASK;
-            uint8_t pc_bank = (exit_pc >> 13) + BANK_PC;
-            uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr])
-                        | (peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr+1]) << 8);
-            
-            // Don't patch self-loops
-            if (na >= code_base && na < code_base + code_len) continue;
-            
-            uint8_t target_bank = flag & 0x1F;
-            
-            if (target_bank == code_bank) {
-                // Same-bank: patch fast-path JMP directly
-                flash_byte_program(code_base + epi_off + 3, code_bank, 0);
-                flash_byte_program(code_base + epi_off + 6, code_bank, na & 0xFF);
-                flash_byte_program(code_base + epi_off + 7, code_bank, (na >> 8) & 0xFF);
-            } else {
-                // Cross-bank: patch to xbank setup code
-                uint16_t setup_addr = code_base + epi_off + 21;
-                flash_byte_program(code_base + epi_off + 3, code_bank, 0);
-                flash_byte_program(code_base + epi_off + 6, code_bank, setup_addr & 0xFF);
-                flash_byte_program(code_base + epi_off + 7, code_bank, (setup_addr >> 8) & 0xFF);
-                flash_byte_program(code_base + epi_off + 25, code_bank, na & 0xFF);
-                flash_byte_program(code_base + epi_off + 30, code_bank, (na >> 8) & 0xFF);
-                flash_byte_program(code_base + epi_off + 35, code_bank, target_bank);
-            }
-            patches_applied++;
-            if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) return;
-        }
-    }
-    opt2_stat_direct += patches_applied;
-}
 
 #endif  // ENABLE_PATCHABLE_EPILOGUE
 
@@ -505,10 +424,15 @@ void opt2_scan_and_patch_epilogues(void) {
     bankswitch_prg(saved_bank);
 }
 
-// Forward declaration: lives in bank1 (defined below).
-// Note: vbcc warns about section mismatch — the definition's bank1 pragma
+// Forward declarations: live in BANK_IR_OPT (bank28 NES / bank29 Exidy).
+// Note: vbcc warns about section mismatch — the definition's pragma
 // takes precedence for actual placement, warning is harmless.
-#pragma section bank1
+#ifdef PLATFORM_NES
+#pragma section bank28
+#else
+#pragma section bank29
+#endif
+void opt2_full_epilogue_scan_b1(void);
 void opt2_full_branch_scan_b1(void);
 #pragma section default
 
@@ -518,10 +442,10 @@ void opt2_full_link_resolve(void) {
     bankswitch_prg(2);
     opt2_sweep_pending_patches_b2();
     // Phase 2: exhaustive epilogue scan (all sectors, all blocks)
-    opt2_full_epilogue_scan_b2();
+    // Lives in BANK_IR_OPT (bank28 NES / bank29 Exidy) — compile-time only.
+    bankswitch_prg(BANK_IR_OPT);
+    opt2_full_epilogue_scan_b1();
     // Phase 3: exhaustive inline branch scan (JMP $FFFF in code bodies)
-    // Lives in bank1 to reduce bank2 pressure.
-    bankswitch_prg(1);
     opt2_full_branch_scan_b1();
     // Phase 4: sweep again in case branch scan freed queue slots
     bankswitch_prg(2);
@@ -608,14 +532,101 @@ void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t 
 }
 
 #ifdef ENABLE_PATCHABLE_EPILOGUE
+// Full scan of ALL patchable epilogues across all sectors and blocks.
+// Lives in BANK_IR_OPT (bank28 NES / bank29 Exidy) — uses only
+// peek_bank_byte (WRAM) and flash_byte_program (WRAM), neither of
+// which calls bankswitch_prg, so this is safe from any switchable bank.
+#ifdef PLATFORM_NES
+#pragma section bank28
+#else
+#pragma section bank29
+#endif
+#define EPILOGUE_FULL_SCAN_MAX 255
+
+void opt2_full_epilogue_scan_b1(void) {
+    uint8_t patches_applied = 0;
+    
+    for (uint8_t sector = 0; sector < FLASH_CACHE_SECTORS; sector++) {
+        uint16_t free_off = sector_free_offset[sector];
+        if (free_off == 0) continue;  // empty sector
+        
+        uint8_t code_bank = (sector >> 2) + BANK_CODE;
+        uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(sector & 3) << 12);
+        uint16_t offset = SECTOR_FIRST_HEADER;
+        
+        while (offset < free_off) {
+            uint16_t hdr_addr = sector_base + offset;
+            
+            uint8_t code_len = peek_bank_byte(code_bank, hdr_addr + 4);
+            uint8_t epi_off = peek_bank_byte(code_bank, hdr_addr + 5);
+            
+            if (code_len == 0 || code_len == 0xFF) break;  // end of valid blocks
+            
+            // Advance cursor past this block
+            uint16_t cur_end = offset + BLOCK_HEADER_SIZE + code_len;
+            uint16_t next_code = (cur_end + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT - 1) & ~(uint16_t)(BLOCK_ALIGNMENT - 1);
+            offset = next_code - BLOCK_HEADER_SIZE;
+            
+            if (epi_off == 0xFF || epi_off == 0) continue;
+            
+            uint16_t code_base = hdr_addr + BLOCK_HEADER_SIZE;
+            
+            // Check if fast-path JMP operand is still unpatched ($FFFF)
+            uint8_t jmp_lo = peek_bank_byte(code_bank, code_base + epi_off + 6);
+            uint8_t jmp_hi = peek_bank_byte(code_bank, code_base + epi_off + 7);
+            if (jmp_lo != 0xFF || jmp_hi != 0xFF) continue;  // already patched
+            
+            // Read exit_pc from header
+            uint16_t exit_pc = peek_bank_byte(code_bank, hdr_addr + 2)
+                    | ((uint16_t)peek_bank_byte(code_bank, hdr_addr + 3) << 8);
+            
+            // Check if exit_pc is compiled
+            uint8_t flag = peek_bank_byte(
+                (exit_pc >> 14) + BANK_PC_FLAGS,
+                (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
+            if (flag & RECOMPILED) continue;
+            
+            // Read native address
+            uint16_t pc_addr = (exit_pc << 1) & FLASH_BANK_MASK;
+            uint8_t pc_bank = (exit_pc >> 13) + BANK_PC;
+            uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr])
+                        | (peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr+1]) << 8);
+            
+            // Don't patch self-loops
+            if (na >= code_base && na < code_base + code_len) continue;
+            
+            uint8_t target_bank = flag & 0x1F;
+            
+            if (target_bank == code_bank) {
+                // Same-bank: patch fast-path JMP directly
+                flash_byte_program(code_base + epi_off + 3, code_bank, 0);
+                flash_byte_program(code_base + epi_off + 6, code_bank, na & 0xFF);
+                flash_byte_program(code_base + epi_off + 7, code_bank, (na >> 8) & 0xFF);
+            } else {
+                // Cross-bank: patch to xbank setup code
+                uint16_t setup_addr = code_base + epi_off + 21;
+                flash_byte_program(code_base + epi_off + 3, code_bank, 0);
+                flash_byte_program(code_base + epi_off + 6, code_bank, setup_addr & 0xFF);
+                flash_byte_program(code_base + epi_off + 7, code_bank, (setup_addr >> 8) & 0xFF);
+                flash_byte_program(code_base + epi_off + 25, code_bank, na & 0xFF);
+                flash_byte_program(code_base + epi_off + 30, code_bank, (na >> 8) & 0xFF);
+                flash_byte_program(code_base + epi_off + 35, code_bank, target_bank);
+            }
+            patches_applied++;
+            if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) return;
+        }
+    }
+    opt2_stat_direct += patches_applied;
+}
+
 // Full scan of ALL 21-byte branch patterns across all sectors.
 // Looks for JMP $FFFF ($4C $FF $FF) inside blocks and resolves them
 // against the current PC table — catches branches that were never
 // queued (IR path, queue overflow) or whose queue entry was evicted.
 //
-// Moved to bank1 to reduce bank2 code pressure.  Uses only
+// Lives in BANK_IR_OPT alongside epilogue scan.  Uses only
 // peek_bank_byte (WRAM) and flash_byte_program (WRAM), neither of
-// which calls bankswitch_prg, so this is safe to run from bank1.
+// which calls bankswitch_prg, so this is safe from any switchable bank.
 void opt2_full_branch_scan_b1(void) {
     uint8_t patches_applied = 0;
     

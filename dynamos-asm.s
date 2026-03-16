@@ -624,7 +624,25 @@ not_recompiled:
 	rts
 
 .needs_compile:
+	; --- Range guard (defensive: VBCC -O2 optimizes away the C-side check) ---
+	; Don't return "compile" for PCs outside the guest ROM address range.
+	; Compiling garbage addresses (screen RAM, I/O space) writes bogus
+	; PC-flag entries into flash, causing JMP-to-$0000 crashes on the
+	; next dispatch to that address.
+	lda _pc+1                    ; guest PC high byte
+	cmp #(_ROM_OFFSET/256)       ; < ROM_ADDR_MIN high byte?
+	bcc .out_of_range
+	if PLATFORM_NES == 0
+	cmp #$40                     ; >= $4000? (all Exidy: ROM_ADDR_MAX = $3FFF)
+	bcs .out_of_range
+	else
+	; NES: ROM_ADDR_MAX = $FFFF, only lower bound matters.
+	; (vector table $FFFA-$FFFF is harmless to compile — just data.)
+	endif
 	lda #1 ; needs recompile
+	rts
+.out_of_range:
+	lda #2 ; out of range — interpret instead
 	rts
 
 

@@ -8,10 +8,16 @@
  * Port of patterns from opt65.c (opti1/opti2/opti3) and
  * peephole_patterns.txt, adapted for the IR node representation.
  *
- * Lives in bank 2 (compile-time only, alongside recompile_opcode_b2).
+ * Lives in BANK_IR_OPT:
+ *   NES:   bank 28 (dead flag-table for $4000-$7FFF)
+ *   Exidy: bank 29 (dead flag-table for $8000-$BFFF)
  */
 
-#pragma section bank0
+#ifdef PLATFORM_NES
+#pragma section bank28
+#else
+#pragma section bank29
+#endif
 
 #include <stdint.h>
 #include "ir.h"
@@ -278,7 +284,7 @@ static uint8_t flags_safe(ir_ctx_t *ctx, uint8_t start)
 
 /* Scratch variables for ir_opt_redundant_load — placed in BSS (WRAM)
  * via #pragma section default, instead of the software stack.
- * Under #pragma section bank0, static locals go to ROM (bank0 flash),
+ * Under a banked section pragma, static locals go to ROM (flash),
  * where writes trigger flash programming — completely wrong.
  * These MUST be in a RAM-backed section.
  *
@@ -288,7 +294,11 @@ static uint8_t flags_safe(ir_ctx_t *ctx, uint8_t start)
 static uint8_t addr8;
 static uint16_t addr16;
 static uint8_t reg_known, reg_val, s, slot, val, imm;
-#pragma section bank0
+#ifdef PLATFORM_NES
+#pragma section bank28
+#else
+#pragma section bank29
+#endif
 
 uint8_t ir_opt_redundant_load(ir_ctx_t *ctx)
 {

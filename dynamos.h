@@ -119,7 +119,10 @@
 #define CACHE_SIG_SIZE          8      // 4 magic + 4 ROM hash
 
 // Recompile-requested signature
-// Stored at offset $3C8 in bank 3 (gap between flash_block_flags and cache_sig).
+// Stored at offset $3C8 in bank 3.  WARNING: this address falls inside
+// cache_bit_array ($8000-$9FFF), which is actively written by the JIT.
+// The write routine (write_recompile_signature_b21) must sector-erase
+// before programming to avoid NOR-flash AND-corruption from stale bits.
 // Written by reset triggers (cache pressure / Select+Start hold) before
 // soft-reset; checked by boot code to detect a deliberate recompile cycle.
 // Value $55 = "recompile requested".  Cleared by writing $00 (burn bits).

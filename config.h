@@ -1,4 +1,4 @@
-#define DEBUG_AUDIO 1
+//#define DEBUG_AUDIO 1
 
 //#define DEBUG_CPU_WRITE 1
 //#define DEBUG_CPU_READ 1
@@ -61,18 +61,30 @@
 #define ENABLE_IR_OPT_PAIR_REWRITE     // 27 pair rewrite rules from peephole_patterns.txt
 #endif
 
+// Skip IR optimisation passes during dynamic (JIT) compilation.
+// The dynamic code cache is thrown away before the static analysis
+// two-pass compile, which re-runs the full IR pipeline from scratch.
+// Skipping optimisation during the dynamic pass saves ~78 M NES cycles
+// (~9% of boot) at the cost of slightly larger JIT code in the cache.
+// The static pass is unaffected — it always optimises.
+#define SKIP_DYNAMIC_IR_OPT
+
 // Peephole PLP/PHP elimination - elide redundant PLP/PHP pairs between
 // consecutive PHA/PLA templates.  Saves 2 bytes + 2 cycles per pair.
 // NOTE: When ENABLE_IR + ENABLE_IR_OPT_PHP_PLP are active, this legacy
 // pass is superseded — the IR pass handles it in a more general way.
-#define ENABLE_PEEPHOLE
+// Disabled: IR_OPT_PHP_PLP covers both dynamic and static paths.
+// The peephole adds ~4 M cycles of inline overhead for results that
+// are either redundant (static pass re-optimises) or discarded
+// (dynamic cache erased before static compile).
+//#define ENABLE_PEEPHOLE
 // Sub-option: defer trailing PLP (trim).  Without this, the peephole
 // codepath is compiled but never activates — tests for vbcc miscompilation.
-#define ENABLE_PEEPHOLE_TRIM
+//#define ENABLE_PEEPHOLE_TRIM
 // Sub-option: skip leading PHP when flags already saved (full optimisation).
 // Requires TRIM.  Without this, trim defers PLP but every PHP is still
 // emitted — tests the defer/flush machinery in isolation.
-#define ENABLE_PEEPHOLE_SKIP
+//#define ENABLE_PEEPHOLE_SKIP
 
 // Patchable epilogue - block chaining via patchable epilogues (requires V2)
 #ifdef ENABLE_OPTIMIZER_V2

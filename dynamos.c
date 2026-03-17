@@ -915,6 +915,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 				lowered_size = 0;
 				bankswitch_prg(BANK_EMIT);  /* bank1 needed for patches below */
 			} else {
+#ifndef SKIP_DYNAMIC_IR_OPT
 			bankswitch_prg(BANK_IR_OPT);
 			ir_optimize(&ir_ctx);
 			bankswitch_prg(BANK_COMPILE);
@@ -922,6 +923,12 @@ batch_exit:  // case 1 (compile needed) jumps here
 			bankswitch_prg(BANK_EMIT);
 			/* Pass 5+6: RMW fusion + register substitution in bank1 */
 			ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
+#else
+			/* SKIP_DYNAMIC_IR_OPT: skip optimise passes during JIT.
+			 * ir_lower still runs to populate fence_native_offset[]
+			 * (needed by ir_resolve_direct_branches). */
+			bankswitch_prg(BANK_EMIT);
+#endif
 			lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
 			/* DIAG: dirty flag is now JSR-based (no inline PHP/INC/PLP).
 			 * Verify that no stale inline PHP/INC $32 without PLP remains

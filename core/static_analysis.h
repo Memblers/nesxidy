@@ -131,10 +131,7 @@ void sa_record_subroutine_runtime(uint16_t target);
 
 // Check if a JSR target is stack-clean.  Returns SA_SUB_CLEAN,
 // SA_SUB_DIRTY, or SA_SUB_EMPTY (target not found in subroutine table).
-// Lives in bank2 — called from recompile_opcode_b2 (also bank2).
-// Declaration must match the definition's section to avoid vbcc warning 371.
-#pragma section bank2
+// Fixed-bank trampoline — callable from any bank.
 uint8_t sa_subroutine_lookup(uint16_t target_pc);
-#pragma section default
 
 #endif // STATIC_ANALYSIS_H

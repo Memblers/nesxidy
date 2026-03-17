@@ -1685,50 +1685,50 @@ uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
 //============================================================================================================
 #ifdef ENABLE_IR
 //============================================================================================================
-// ir_emit_direct_branch_placeholder — moved to bank17 (BANK_COMPILE).
+// ir_emit_direct_branch_placeholder — FIXED-BANK implementation.
 // Records a direct-branch entry in ir_ctx and writes the 5-byte placeholder
 // (Bxx_inv +3 / JMP $FFFE) into cache_code[].  The wrapper recompile_opcode_b2()
 // will see code_index advanced, pick up these bytes, and record them as
 // IR_RAW_BYTE nodes during normal IR recording.
 // Returns cache_flag[cache_index] for the caller to return, or 0 if unable.
-// Called from bank2 via fixed-bank trampoline (compilation speed not critical).
+//
+// IMPORTANT: This was previously split into a bank17 _b17 function + trampoline,
+// but vbcc -O2 optimized away ALL the cache_code writes, ir_ctx writes,
+// code_index/pc updates from the bank17 function (only the pc_jump_*
+// address computations survived, making it identical to setup_flash_pc_tables_b17).
+// Moving everything into the fixed bank with volatile writes prevents this.
+// All accessed data is in WRAM ($6000-$7FFF), so no bankswitch is needed.
 //============================================================================================================
-#pragma section bank17
-static uint8_t ir_emit_direct_branch_placeholder_b17(uint16_t target_pc, uint8_t branch_opcode)
+uint8_t ir_emit_direct_branch_placeholder(uint16_t target_pc, uint8_t branch_opcode)
 {
-	/* Common capacity/space checks — returns 0 if cannot emit */
+	/* Capacity / space checks */
 	if ((code_index + 5 + EPILOGUE_SIZE + 6) >= CODE_SIZE ||
 	    ir_ctx.direct_branch_count >= IR_MAX_DIRECT_BRANCHES)
 		return 0;
 
-	ir_direct_branch_t *db = &ir_ctx.direct_branches[ir_ctx.direct_branch_count];
-	db->target_pc = target_pc;
-	db->branch_opcode = branch_opcode;
-	db->pad = 0;
-	ir_ctx.direct_branch_count++;
+	/* Record direct-branch entry in ir_ctx.
+	 * Use volatile casts to prevent vbcc -O2 dead-store elimination. */
+	uint8_t idx = ir_ctx.direct_branch_count;
+	*(volatile uint16_t *)&ir_ctx.direct_branches[idx].target_pc = target_pc;
+	*(volatile uint8_t  *)&ir_ctx.direct_branches[idx].branch_opcode = branch_opcode;
+	*(volatile uint8_t  *)&ir_ctx.direct_branches[idx].pad = 0;
+	*(volatile uint8_t  *)&ir_ctx.direct_branch_count = idx + 1;
 
-	/* Write 5-byte placeholder to code buffer (wrapper records as IR) */
-	uint8_t *p = &cache_code[cache_index][code_index];
-	p[0] = branch_opcode ^ 0x20;             /* inverted branch */
-	p[1] = 3;                                /* skip next JMP */
-	p[2] = 0x4C;                             /* JMP */
-	p[3] = (uint8_t)(DIRECT_BRANCH_SENTINEL & 0xFF);
-	p[4] = (uint8_t)(DIRECT_BRANCH_SENTINEL >> 8);
+	/* Write 5-byte placeholder to code buffer.
+	 * Direct array access (not through pointer) + volatile to ensure
+	 * vbcc emits all five stores. */
+	uint8_t ci = code_index;
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 0] = branch_opcode ^ 0x20;  /* inverted branch */
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 1] = 3;                     /* skip next JMP */
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 2] = 0x4C;                  /* JMP */
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 3] = (uint8_t)(DIRECT_BRANCH_SENTINEL & 0xFF);
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 4] = (uint8_t)(DIRECT_BRANCH_SENTINEL >> 8);
 
 	pc += 2;
 	code_index += 5;
 	cache_branches++;
 	cache_flag[cache_index] |= READY_FOR_NEXT;
 	return cache_flag[cache_index];
-}
-#pragma section default
-uint8_t ir_emit_direct_branch_placeholder(uint16_t target_pc, uint8_t branch_opcode)
-{
-	uint8_t saved_bank = mapper_prg_bank;
-	bankswitch_prg(BANK_COMPILE);
-	uint8_t result = ir_emit_direct_branch_placeholder_b17(target_pc, branch_opcode);
-	bankswitch_prg(saved_bank);
-	return result;
 }
 #endif
 
@@ -2340,6 +2340,11 @@ static uint8_t recompile_opcode_b2_inner()
 				if (lookup_native_addr_safe(target_pc) &&
 				    reserve_result_bank == flash_code_bank)
 				{
+					// IMPORTANT: Reload op_buffer_0 from guest ROM.
+					// VBCC -O2 may corrupt the ZP register holding it
+					// during the lookup_native_addr_safe cross-bank call
+					// (same class of bug as the entry_pc corruption).
+					op_buffer_0 = read6502(pc);
 					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
 					if (r) return r;
 				}
@@ -2722,6 +2727,8 @@ static uint8_t recompile_opcode_b2_inner()
 					uint16_t blk_entry = (uint16_t)cache_entry_pc_lo[cache_index]
 					                   | ((uint16_t)cache_entry_pc_hi[cache_index] << 8);
 					if (target_pc >= blk_entry && target_pc < pc) {
+						// Reload op_buffer_0 — vbcc register corruption safety
+						op_buffer_0 = read6502(pc);
 						uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
 						if (r) return r;
 					}
@@ -2745,6 +2752,8 @@ static uint8_t recompile_opcode_b2_inner()
 				if ((target_flag & 0x1F) == flash_code_bank &&
 				    lookup_native_addr_safe(target_pc))
 				{
+					// Reload op_buffer_0 — vbcc register corruption safety
+					op_buffer_0 = read6502(pc);
 					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
 					if (r) return r;
 				}
@@ -3258,6 +3267,7 @@ static uint8_t recompile_opcode_b2_inner()
 			// BRK triggers interrupt - must be interpreted
 			IO8(0x4021) = 0;	// debug marker?
 			enable_interpret();
+			break;  // safety: enable_interpret() returns, but guard against macro changes
 		}
 
 		default:
@@ -3594,7 +3604,7 @@ static uint8_t recompile_opcode_b2()
 		uint8_t *buf = cache_code[cache_index] + ci_before;
 		uint8_t delta = (uint8_t)(code_index - ci_before);
 
-		/* Scan emitted bytes for patchable JMP $FFFF or JMP $FFF0 */
+		/* Scan emitted bytes for patchable JMP $FFFF, JMP $FFF0, or JMP $FFFE */
 		uint8_t patchable_jmp_pos = 0xFF; /* 0xFF = not found */
 		uint8_t patchable_is_fff0 = 0;
 		{
@@ -3609,6 +3619,16 @@ static uint8_t recompile_opcode_b2()
 					if (buf[j+1] == (FFF0_DISPATCH & 0xFF)) {
 						patchable_jmp_pos = j;
 						patchable_is_fff0 = 1;
+						break;
+					}
+#endif
+#ifdef ENABLE_IR
+					/* IR direct branch placeholder: JMP $FFFE.
+					 * Must be recorded as IR_RAW_BYTE (not structured
+					 * IR) so the optimizer cannot decompose or corrupt
+					 * the 5-byte Bxx_inv+JMP sentinel sequence. */
+					if (buf[j+1] == (DIRECT_BRANCH_SENTINEL & 0xFF)) {
+						patchable_jmp_pos = j;
 						break;
 					}
 #endif
@@ -3669,7 +3689,24 @@ static uint8_t recompile_opcode_b2()
 			for (j = 0; j < delta; j++)
 				IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)buf[j]);
 
-			/* Extract and store deferred patch info */
+			/* Extract and store deferred patch info.
+			 * JMP $FFFE (IR direct branch sentinel) is resolved by
+			 * ir_resolve_direct_branches(), not the deferred patch
+			 * system — skip deferred patch creation to avoid reading
+			 * out-of-bounds from the 5-byte placeholder.  Still set
+			 * carry_live_at_exit for the optimizer. */
+#ifdef ENABLE_IR
+			if (patchable_jmp_pos != 0xFF &&
+			    (uint8_t)(patchable_jmp_pos + 1) < delta &&
+			    buf[patchable_jmp_pos + 1] == (DIRECT_BRANCH_SENTINEL & 0xFF)) {
+				/* $FFFE sentinel: set carry_live from inverted branch */
+				if (patchable_jmp_pos >= 2) {
+					uint8_t bop = buf[patchable_jmp_pos - 2];
+					ir_ctx.carry_live_at_exit = (bop == 0x90 || bop == 0xB0) ? 1 : 0;
+				}
+				/* No deferred patch — ir_resolve_direct_branches handles it */
+			} else
+#endif
 			if (ir_ctx.deferred_patch_count < IR_MAX_DEFERRED_PATCHES) {
 				ir_deferred_patch_t *dp = &ir_ctx.deferred_patches[ir_ctx.deferred_patch_count];
 				uint8_t p = patchable_jmp_pos;

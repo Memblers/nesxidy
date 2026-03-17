@@ -215,7 +215,80 @@ static void get_template(uint8_t tmpl_id, uint8_t **out_data, uint8_t *out_size)
 
 /* ===================================================================
  * Determine native byte size of an IR node (for offset calculation)
+ *
+ * CRITICAL: This function MUST return correct sizes.  A wrong size
+ * causes ir_lower() to write too many/few bytes, corrupting all
+ * subsequent code in the block.
+ *
+ * The previous implementation used cascaded if/range-check chains
+ * that vbcc -O2 incorrectly optimized — it eliminated the immediate
+ * instruction range check (IR_ADC_IMM..IR_CPY_IMM = $32..$39),
+ * causing all immediate ALU instructions (CMP #imm, ADC #imm, etc.)
+ * to return size 3 instead of 2.  This wrote an extra $00 byte
+ * (operand high) into the output buffer, shifting all subsequent
+ * code by one byte and producing a BRK ($00) crash.
+ *
+ * Fix: use a const lookup table indexed by IR opcode.  The table is
+ * stored in ROM (flash) and vbcc cannot misoptimize a table read.
  * =================================================================== */
+
+/* Byte size table for IR opcodes $00..$73 (IR_BIT_ABS).
+ * 0 = not a standard instruction (handled specially),
+ * 1 = implied, 2 = immediate/zp/branch, 3 = absolute.
+ * Opcodes above $73 are either ABSX/ABSY (3-byte) or pseudo-ops. */
+static const uint8_t ir_node_size_table[] = {
+    /* $00       */ 0,
+    /* $01 LDA_IMM */ 2, /* $02 LDA_ZP  */ 2, /* $03 LDA_ABS */ 3,
+    /* $04 LDX_IMM */ 2, /* $05 LDX_ZP  */ 2, /* $06 LDX_ABS */ 3,
+    /* $07 LDY_IMM */ 2, /* $08 LDY_ZP  */ 2, /* $09 LDY_ABS */ 3,
+    /* $0A STA_ZP  */ 2, /* $0B STA_ABS */ 3,
+    /* $0C STX_ZP  */ 2, /* $0D STX_ABS */ 3,
+    /* $0E STY_ZP  */ 2, /* $0F STY_ABS */ 3,
+    /* $10 JMP_ABS */ 3, /* $11 JSR     */ 3,
+    /* $12 RTS     */ 1, /* $13 PHP     */ 1, /* $14 PLP     */ 1,
+    /* $15 PHA     */ 1, /* $16 PLA     */ 1, /* $17 NOP     */ 1,
+    /* $18 CLC     */ 1, /* $19 SEC     */ 1, /* $1A CLD     */ 1,
+    /* $1B SED     */ 1, /* $1C CLI     */ 1, /* $1D SEI     */ 1,
+    /* $1E CLV     */ 1, /* $1F BRK     */ 1,
+    /* $20 BPL     */ 2, /* $21 BMI     */ 2, /* $22 BVC     */ 2,
+    /* $23 BVS     */ 2, /* $24 BCC     */ 2, /* $25 BCS     */ 2,
+    /* $26 BNE     */ 2, /* $27 BEQ     */ 2,
+    /* $28 TAX     */ 1, /* $29 TAY     */ 1, /* $2A TXA     */ 1,
+    /* $2B TYA     */ 1, /* $2C TSX     */ 1, /* $2D TXS     */ 1,
+    /* $2E INX     */ 1, /* $2F INY     */ 1,
+    /* $30 DEX     */ 1, /* $31 DEY     */ 1,
+    /* $32 ADC_IMM */ 2, /* $33 SBC_IMM */ 2, /* $34 AND_IMM */ 2,
+    /* $35 ORA_IMM */ 2, /* $36 EOR_IMM */ 2, /* $37 CMP_IMM */ 2,
+    /* $38 CPX_IMM */ 2, /* $39 CPY_IMM */ 2,
+    /* $3A ADC_ZP  */ 2, /* $3B SBC_ZP  */ 2, /* $3C AND_ZP  */ 2,
+    /* $3D ORA_ZP  */ 2, /* $3E EOR_ZP  */ 2, /* $3F CMP_ZP  */ 2,
+    /* $40 CPX_ZP  */ 2, /* $41 CPY_ZP  */ 2,
+    /* $42 ADC_ABS */ 3, /* $43 SBC_ABS */ 3, /* $44 AND_ABS */ 3,
+    /* $45 ORA_ABS */ 3, /* $46 EOR_ABS */ 3, /* $47 CMP_ABS */ 3,
+    /* $48 CPX_ABS */ 3, /* $49 CPY_ABS */ 3,
+    /* $4A INC_ZP  */ 2, /* $4B DEC_ZP  */ 2,
+    /* $4C ASL_ZP  */ 2, /* $4D LSR_ZP  */ 2,
+    /* $4E ROL_ZP  */ 2, /* $4F ROR_ZP  */ 2,
+    /* $50 INC_ABS */ 3, /* $51 DEC_ABS */ 3,
+    /* $52 ASL_ABS */ 3, /* $53 LSR_ABS */ 3,
+    /* $54 ROL_ABS */ 3, /* $55 ROR_ABS */ 3,
+    /* $56 ASL_A   */ 1, /* $57 LSR_A   */ 1,
+    /* $58 ROL_A   */ 1, /* $59 ROR_A   */ 1,
+    /* $5A LDA_ABSX*/ 3, /* $5B LDA_ABSY*/ 3,
+    /* $5C STA_ABSX*/ 3, /* $5D STA_ABSY*/ 3,
+    /* $5E ADC_ABSX*/ 3, /* $5F SBC_ABSX*/ 3,
+    /* $60 AND_ABSX*/ 3, /* $61 ORA_ABSX*/ 3,
+    /* $62 EOR_ABSX*/ 3, /* $63 CMP_ABSX*/ 3,
+    /* $64 ADC_ABSY*/ 3, /* $65 SBC_ABSY*/ 3, /* $66 AND_ABSY*/ 3,
+    /* $67 ORA_ABSY*/ 3, /* $68 EOR_ABSY*/ 3, /* $69 CMP_ABSY*/ 3,
+    /* $6A LDX_ABSY*/ 3, /* $6B LDY_ABSX*/ 3,
+    /* $6C INC_ABSX*/ 3, /* $6D DEC_ABSX*/ 3,
+    /* $6E ASL_ABSX*/ 3, /* $6F LSR_ABSX*/ 3,
+    /* $70 ROL_ABSX*/ 3, /* $71 ROR_ABSX*/ 3,
+    /* $72 BIT_ZP  */ 2, /* $73 BIT_ABS */ 3,
+};
+#define IR_NODE_SIZE_TABLE_COUNT (sizeof(ir_node_size_table) / sizeof(ir_node_size_table[0]))
+
 static uint8_t node_byte_size(const ir_ctx_t *ctx, uint8_t idx)
 {
     const ir_node_t *n = &ctx->nodes[idx];
@@ -233,30 +306,15 @@ static uint8_t node_byte_size(const ir_ctx_t *ctx, uint8_t idx)
         return size;
     }
 
-    /* Standard instructions: 1-byte implied, 2-byte imm/zp/branch, 3-byte abs */
-    if (op >= 0x01 && op < IR_TO_NATIVE_COUNT) {
-        /* Implied (1-byte) */
-        if ((op >= IR_RTS && op <= IR_BRK) ||     /* 0x12..0x1F */
-            (op >= IR_TAX && op <= IR_DEY) ||      /* 0x28..0x31 */
-            (op >= IR_ASL_A && op <= IR_ROR_A))    /* 0x56..0x59 */
-            return 1;
-        /* Branch (2-byte) */
-        if (op >= IR_BPL && op <= IR_BEQ)
-            return 2;
-        /* Immediate (2-byte) */
-        if (op == IR_LDA_IMM || op == IR_LDX_IMM || op == IR_LDY_IMM ||
-            (op >= IR_ADC_IMM && op <= IR_CPY_IMM))
-            return 2;
-        /* ZP (2-byte) */
-        if (op == IR_LDA_ZP || op == IR_LDX_ZP || op == IR_LDY_ZP ||
-            op == IR_STA_ZP || op == IR_STX_ZP || op == IR_STY_ZP ||
-            (op >= IR_ADC_ZP && op <= IR_CPY_ZP) ||
-            (op >= IR_INC_ZP && op <= IR_ROR_ZP) ||
-            op == IR_BIT_ZP)
-            return 2;
-        /* Everything else: ABS (3-byte) */
-        return 3;
+    /* Standard instructions: look up in const table (immune to vbcc -O2
+     * misoptimization of cascaded range checks). */
+    if (op < IR_NODE_SIZE_TABLE_COUNT) {
+        uint8_t sz = ir_node_size_table[op];
+        if (sz) return sz;
     }
+    /* ABSX/ABSY opcodes above the table range are all 3-byte */
+    if (op >= 0x01 && op < IR_TO_NATIVE_COUNT)
+        return 3;
 
     /* RAW_OP_ABS: 1 (opcode was emitted as RAW_BYTE) + 2 (addr as RAW_WORD) = handled separately */
     if (op == IR_RAW_OP_ABS) return 3;

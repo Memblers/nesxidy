@@ -6,10 +6,11 @@ rem w_nes.bat — Build DynaMoS for an NES (NROM-128) game.
 rem
 rem Usage:   w_nes.bat [game]
 rem
-rem   game = donkeykong (default), battlecity, burgertime, defender,
-rem          galaxian, hypersports, loderunner, m82, zippyrace,
-rem          door, golf, karateka, mariobros, millipede, pooyan,
-rem          popeye, raidbung, skydestroyer, urbanchamp, warpman, yiear
+rem   game = donkeykong (default), balloonfight, baseball, battlecity, binaryland,
+rem          burgertime, defender, excitebike, exerion, galaxian, hypersports,
+rem          loderunner, lunarpool, m82, zippyrace, door, golf, karateka,
+rem          mariobros, millipede, pooyan, popeye, raidbung, roadfighter,
+rem          skydestroyer, urbanchamp, warpman, yiear
 rem
 rem The script:
 rem   1. Splits the .nes file to .prg/.chr if needed
@@ -28,12 +29,18 @@ set ROM_BASE=
 
 if /i "%GAME%"=="donkeykong"  set GAME_DEFINE=GAME_DONKEY_KONG&  set ROM_BASE=donkeykong
 if /i "%GAME%"=="dk"          set GAME_DEFINE=GAME_DONKEY_KONG&  set ROM_BASE=donkeykong
+if /i "%GAME%"=="balloonfight" set GAME_DEFINE=GAME_BALLOON_FIGHT& set ROM_BASE=balloonfight
+if /i "%GAME%"=="baseball"    set GAME_DEFINE=GAME_BASEBALL&     set ROM_BASE=baseball
 if /i "%GAME%"=="battlecity"  set GAME_DEFINE=GAME_BATTLE_CITY&  set ROM_BASE=battlecity
+if /i "%GAME%"=="binaryland"  set GAME_DEFINE=GAME_BINARY_LAND&  set ROM_BASE=binaryland
 if /i "%GAME%"=="burgertime"  set GAME_DEFINE=GAME_BURGER_TIME&  set ROM_BASE=burgertime
 if /i "%GAME%"=="defender"    set GAME_DEFINE=GAME_DEFENDER&     set ROM_BASE=defender
+if /i "%GAME%"=="excitebike"  set GAME_DEFINE=GAME_EXCITEBIKE&   set ROM_BASE=excitebike
+if /i "%GAME%"=="exerion"     set GAME_DEFINE=GAME_EXERION&      set ROM_BASE=exerion
 if /i "%GAME%"=="galaxian"    set GAME_DEFINE=GAME_GALAXIAN&     set ROM_BASE=galaxian
 if /i "%GAME%"=="hypersports" set GAME_DEFINE=GAME_HYPER_SPORTS& set ROM_BASE=hypersports
 if /i "%GAME%"=="loderunner"  set GAME_DEFINE=GAME_LODE_RUNNER&  set ROM_BASE=loderunner
+if /i "%GAME%"=="lunarpool"   set GAME_DEFINE=GAME_LUNAR_POOL&   set ROM_BASE=lunarpool
 if /i "%GAME%"=="m82"         set GAME_DEFINE=GAME_M82&          set ROM_BASE=m82
 if /i "%GAME%"=="zippyrace"   set GAME_DEFINE=GAME_ZIPPY_RACE&   set ROM_BASE=zippyrace
 if /i "%GAME%"=="door"        set GAME_DEFINE=GAME_DOOR&         set ROM_BASE=door
@@ -44,6 +51,7 @@ if /i "%GAME%"=="millipede"   set GAME_DEFINE=GAME_MILLIPEDE&    set ROM_BASE=mi
 if /i "%GAME%"=="pooyan"      set GAME_DEFINE=GAME_POOYAN&       set ROM_BASE=pooyan
 if /i "%GAME%"=="popeye"      set GAME_DEFINE=GAME_POPEYE&       set ROM_BASE=popeye
 if /i "%GAME%"=="raidbung"    set GAME_DEFINE=GAME_RAID_BUNG&    set ROM_BASE=raidbung
+if /i "%GAME%"=="roadfighter" set GAME_DEFINE=GAME_ROAD_FIGHTER& set ROM_BASE=roadfighter
 if /i "%GAME%"=="skydestroyer" set GAME_DEFINE=GAME_SKY_DESTROYER& set ROM_BASE=skydestroyer
 if /i "%GAME%"=="urbanchamp"  set GAME_DEFINE=GAME_URBAN_CHAMP&  set ROM_BASE=urbanchamp
 if /i "%GAME%"=="warpman"     set GAME_DEFINE=GAME_WARPMAN&      set ROM_BASE=warpman
@@ -51,10 +59,11 @@ if /i "%GAME%"=="yiear"       set GAME_DEFINE=GAME_YIEAR&        set ROM_BASE=yi
 
 if "%GAME_DEFINE%"=="" (
     echo ERROR: Unknown game "%GAME%"
-    echo Valid games: donkeykong battlecity burgertime defender
-    echo              galaxian hypersports loderunner m82 zippyrace
-    echo              door golf karateka mariobros millipede pooyan
-    echo              popeye raidbung skydestroyer urbanchamp warpman yiear
+    echo Valid games: donkeykong balloonfight baseball battlecity binaryland
+    echo              burgertime defender excitebike exerion galaxian hypersports
+    echo              loderunner lunarpool m82 zippyrace door golf karateka
+    echo              mariobros millipede pooyan popeye raidbung roadfighter
+    echo              skydestroyer urbanchamp warpman yiear
     exit /b 1
 )
 

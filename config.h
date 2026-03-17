@@ -121,6 +121,18 @@
 #define ENABLE_IDLE_DETECT
 #define IDLE_DETECT_THRESHOLD  8   // backward branches to same PC before activating
 
+// Automatic idle-loop detection via static analysis.
+// After the BFS ROM walk, scan for short backward-branch loops whose bodies
+// consist solely of loads/compares/branches with no side effects — the
+// classic "poll RAM/IO and wait for interrupt" pattern.  Detected idle PCs
+// are stored in a small flash table (sa_idle_list) and checked at dispatch
+// time, replacing (or supplementing) the manual GAME_IDLE_PC define.
+// Requires ENABLE_STATIC_ANALYSIS.
+#ifdef ENABLE_STATIC_ANALYSIS
+#define ENABLE_AUTO_IDLE_DETECT
+#define SA_IDLE_MAX  8    // max auto-detected idle PCs per game
+#endif
+
 // Native JSR mode - for stack-clean subroutines (no TSX/TXS, no unbalanced
 // PLA/PLP), JSR calls a WRAM trampoline that dispatches subroutine blocks
 // in a tight assembly loop until RTS, avoiding C round-trips for each block

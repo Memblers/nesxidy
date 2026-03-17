@@ -34,8 +34,13 @@
 --         +$52  ir_pass_php_plp        u16  (Pass 3)
 --         +$54  ir_pass_pair_rewrite   u16  (Pass 4: pair rewrite + CMP#0)
 --         +$56  ir_pass_rmw_fusion    u16  (Pass 5+6: shift/inc/dec fusion)
+--         +$58  ir_instrs_eliminated  u16
+--         +$5A  ir_instr_overflow     u16
+--         +$5C  idle_detect_count     u8   (auto-detected idle PCs)
+--         +$5D  idle_cache_count      u8   (total incl. GAME_IDLE_PC)
+--         +$5E  idle_pc[0..7]         u16  (up to 8 idle PC addresses)
 
-local BASE = 0x7FA0   -- CPU address (WRAM $6000-$7FFF mapped)
+local BASE = 0x7F90   -- CPU address (WRAM $6000-$7FFF mapped)
 local MEM  = emu.memType.nesDebug  -- side-effect-free reads
 
 -- helpers
@@ -198,5 +203,34 @@ emu.addEventCallback(function()
   local ir_elim    = r16(0x58)
   local ir_overflow = r16(0x5A)
   emu.drawString(2, y, string.format("  InstrsElim:%d  InstrOverflow:%d", ir_elim, ir_overflow), COL_IR2, COL_BG); y = y + 9
+
+  -- Idle-loop detection metrics
+  local idle_detect = r8(0x5C)
+  local idle_cache  = r8(0x5D)
+  local COL_IDLE    = 0x80FF80  -- light green
+  local COL_IDLE2   = 0x60CC60  -- dim green for detail
+
+  emu.drawString(2, y, "=== Idle Detection ===", COL_TITLE, COL_BG); y = y + 10
+  emu.drawString(2, y, string.format("Auto-detected: %d  Cache total: %d", idle_detect, idle_cache), COL_IDLE, COL_BG); y = y + 9
+
+  if idle_cache > 0 then
+    local pc_strs = {}
+    for i = 0, idle_cache - 1 do
+      local pc = r16(0x5E + i * 2)
+      if pc ~= 0 then
+        table.insert(pc_strs, string.format("$%04X", pc))
+      end
+    end
+    if #pc_strs > 0 then
+      -- Show up to 4 per line
+      for row = 1, #pc_strs, 4 do
+        local line = "  "
+        for col = row, math.min(row + 3, #pc_strs) do
+          line = line .. pc_strs[col] .. " "
+        end
+        emu.drawString(2, y, line, COL_IDLE2, COL_BG); y = y + 9
+      end
+    end
+  end
 
 end, emu.eventType.endFrame)

@@ -802,6 +802,9 @@ void convert_chr(uint8_t *source)
 extern uint8_t sa_code_bitmap[];
 extern uint8_t sa_indirect_list[];
 extern uint8_t sa_subroutine_list[];
+#ifdef ENABLE_AUTO_IDLE_DETECT
+extern uint8_t sa_idle_list[];
+#endif
 #endif
 
 static void flash_format_b2(void)

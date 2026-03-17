@@ -545,7 +545,9 @@ void run_6502(void)
 	//    periodically so its stuck-frame watchdog can re-arm lazynes.
 	if (++batch_count >= 64) break;
 	// 3. Known idle loop — stop dispatching, let main loop poll VBlank
-#ifdef GAME_IDLE_PC
+#ifdef ENABLE_AUTO_IDLE_DETECT
+	if (sa_is_idle_pc(pc)) break;
+#elif defined(GAME_IDLE_PC)
 	if (pc == GAME_IDLE_PC) break;
 #endif
 	// 4. RTI completed — NMI handler finished, return for state update

@@ -403,7 +403,9 @@ int main(void)
 			}
 		}
 
-#ifdef GAME_IDLE_PC
+#ifdef ENABLE_AUTO_IDLE_DETECT
+		if (!sa_is_idle_pc(pc))
+#elif defined(GAME_IDLE_PC)
 		if (pc != GAME_IDLE_PC)
 #endif
 		{
@@ -808,6 +810,9 @@ static void flash_format_b19(void)
 	// Extern refs for SA_SECTOR_FIRST/LAST macros (defined in static_analysis.c)
 	extern uint8_t sa_code_bitmap[];
 	extern uint8_t sa_subroutine_list[];
+#ifdef ENABLE_AUTO_IDLE_DETECT
+	extern uint8_t sa_idle_list[];
+#endif
 #endif
 
 	for (uint8_t bank = 3; bank < 31; bank++)

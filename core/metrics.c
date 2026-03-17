@@ -14,6 +14,7 @@
 #ifdef ENABLE_METRICS
 
 #include "metrics.h"
+#include "static_analysis.h"
 
 /* ================================================================
  * Global storage (WRAM BSS - no section pragma, linker places in RAM)
@@ -28,7 +29,7 @@ extern uint8_t  mapper_prg_bank;
 extern void     bankswitch_prg(uint8_t bank);
 
 /* ================================================================
- * WRAM dump layout at $7E30
+ * WRAM dump layout at $7F90
  *
  * SA metrics (written once after sa_run):
  *   +$00  bfs_addresses_visited  u16
@@ -54,7 +55,11 @@ extern void     bankswitch_prg(uint8_t bank);
  *   +$39  magic  'M' 'E'
  * ================================================================ */
 
-#define METRICS_WRAM  ((volatile uint8_t *)0x7FA0)
+/* METRICS_WRAM base: must be low enough so the last field (+$6D)
+ * stays within WRAM ($6000-$7FFF).  $7F90 + $6D = $7FFD.
+ * Do NOT use $7FA0 — the idle-pc array at +$5E would overflow
+ * into the Mapper-30 bank-select register at $8000.           */
+#define METRICS_WRAM  ((volatile uint8_t *)0x7F90)
 
 // Must match dynamos.h:  13 banks × 4 sectors = 52 sectors, 4KB each
 #define FLASH_CACHE_SECTORS 52
@@ -80,6 +85,23 @@ void metrics_dump_sa_b2(void)
     *(volatile uint16_t *)(p + 0x0E) = sa_metrics.flash_sectors_used;
     *(volatile uint32_t *)(p + 0x10) = sa_metrics.bfs_end_cycle
                                      - sa_metrics.bfs_start_cycle;
+
+#ifdef ENABLE_AUTO_IDLE_DETECT
+    /* Idle-loop detection results — appended after IR metrics block.
+     *   +$5C  idle_detect_count  u8  (auto-detected by SA scanner)
+     *   +$5D  idle_cache_count   u8  (total in WRAM cache incl. GAME_IDLE_PC)
+     *   +$5E  idle_pc[0..7]      u16 each (up to SA_IDLE_MAX entries)
+     */
+    p[0x5C] = sa_idle_count;
+    p[0x5D] = sa_idle_cache_count;
+    {
+        uint8_t i;
+        for (i = 0; i < SA_IDLE_MAX; i++) {
+            uint16_t pc = (i < sa_idle_cache_count) ? sa_idle_cache[i] : 0;
+            *(volatile uint16_t *)(p + 0x5E + i * 2) = pc;
+        }
+    }
+#endif
 }
 
 void metrics_dump_runtime_b2(void)

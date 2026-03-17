@@ -126,6 +126,12 @@ uint8_t sa_indirect_list[SA_INDIRECT_MAX * 3];
 // Populated during BFS walk, flags set during stack-safety analysis.
 uint8_t sa_subroutine_list[SA_SUBROUTINE_MAX * 3];
 
+// Auto-detected idle loop table: 2 bytes each (addr_lo, addr_hi)
+// Populated by sa_scan_idle_loops after the BFS walk.
+#ifdef ENABLE_AUTO_IDLE_DETECT
+uint8_t sa_idle_list[SA_IDLE_MAX * SA_IDLE_ENTRY_SIZE];
+#endif
+
 #pragma section default
 
 // Shorthand macros for the flash addresses of the bank3 variables.
@@ -134,6 +140,10 @@ uint8_t sa_subroutine_list[SA_SUBROUTINE_MAX * 3];
 #define SA_HEADER_BASE      ((uint16_t)&sa_header[0])
 #define SA_INDIRECT_BASE    ((uint16_t)&sa_indirect_list[0])
 #define SA_SUBROUTINE_BASE  ((uint16_t)&sa_subroutine_list[0])
+
+#ifdef ENABLE_AUTO_IDLE_DETECT
+#define SA_IDLE_BASE        ((uint16_t)&sa_idle_list[0])
+#endif
 
 // -------------------------------------------------------------------------
 // Bitmap helpers (fixed bank) — called from sa_record_indirect_target
@@ -179,6 +189,11 @@ void sa_bitmap_mark(uint16_t addr)
 static uint8_t q_head;
 static uint8_t q_tail;
 static uint8_t q_count;
+
+#ifdef ENABLE_AUTO_IDLE_DETECT
+// Count of auto-detected idle PCs (lives in BSS/WRAM, set during SA walk).
+uint8_t sa_idle_count = 0;
+#endif
 
 // =========================================================================
 // Bank 2 section — BFS walker, header helpers, queue, opcode helpers
@@ -353,6 +368,299 @@ static uint8_t is_invalid_opcode(uint8_t op)
 }
 
 // -------------------------------------------------------------------------
+// Idle loop scanner (bank2) — detect tight polling loops.
+//
+// Called after the BFS walk has populated the code bitmap.  For every
+// conditional branch in the ROM whose displacement is backward (negative),
+// inspects the loop body from branch_target to branch_instruction.  If
+// ALL opcodes in the body are side-effect-free (loads, compares, bit-tests,
+// branches, NOP), the branch target is flagged as an idle PC.
+//
+// Typical NES idle patterns detected:
+//   LDA $xx    / BNE *-3   (wait for RAM flag cleared by NMI)
+//   LDA $xx    / BEQ *-3   (wait for RAM flag set by NMI)
+//   BIT $2002  / BPL *-3   (wait for VBlank bit 7 of PPU status)
+//   LDA zp     / CMP zp    / BNE *-5  (wait for counter match)
+//   LDA $xxxx  / BNE *-5   (absolute RAM poll)
+//
+// Constraints:
+//   - Loop body ≤ 12 bytes (prevents false positives on larger loops)
+//   - No stores (STA/STX/STY), increments (INC/DEC), shifts, JSR, JMP
+//   - No stack manipulation (PHA/PLA/PHP/PLP/TSX/TXS)
+//   - Body must contain at least one load/compare/bit-test (reads memory)
+//   - The backward branch must target a known-code address
+// -------------------------------------------------------------------------
+#ifdef ENABLE_AUTO_IDLE_DETECT
+
+#define IDLE_LOOP_MAX_BYTES  12   // max loop body size in bytes
+
+// Check if an opcode is side-effect-free for idle-loop purposes.
+// Returns 1 if the opcode only reads memory and/or modifies registers/flags.
+static uint8_t is_idle_safe_opcode(uint8_t op)
+{
+    switch (op)
+    {
+        // --- Loads (read-only, set A/X/Y + flags) ---
+        case 0xA5: case 0xB5:              // LDA zp, zpx
+        case 0xAD: case 0xBD: case 0xB9:  // LDA abs, absx, absy
+        case 0xA1: case 0xB1:              // LDA indx, indy
+        case 0xA9:                          // LDA imm
+        case 0xA6: case 0xB6:              // LDX zp, zpy
+        case 0xAE: case 0xBE:              // LDX abs, absy
+        case 0xA2:                          // LDX imm
+        case 0xA4: case 0xB4:              // LDY zp, zpx
+        case 0xAC: case 0xBC:              // LDY abs, absx
+        case 0xA0:                          // LDY imm
+
+        // --- Compares (read-only, set flags) ---
+        case 0xC5: case 0xD5:              // CMP zp, zpx
+        case 0xCD: case 0xDD: case 0xD9:  // CMP abs, absx, absy
+        case 0xC1: case 0xD1:              // CMP indx, indy
+        case 0xC9:                          // CMP imm
+        case 0xE4: case 0xEC:              // CPX zp, abs
+        case 0xE0:                          // CPX imm
+        case 0xC4: case 0xCC:              // CPY zp, abs
+        case 0xC0:                          // CPY imm
+
+        // --- Bit test (read-only, set flags) ---
+        case 0x24: case 0x2C:              // BIT zp, abs
+
+        // --- Branches (control flow only) ---
+        case 0x10: case 0x30:              // BPL, BMI
+        case 0x50: case 0x70:              // BVC, BVS
+        case 0x90: case 0xB0:              // BCC, BCS
+        case 0xD0: case 0xF0:              // BNE, BEQ
+
+        // --- Register transfers (no memory access) ---
+        case 0xAA: case 0xA8:              // TAX, TAY
+        case 0x8A: case 0x98:              // TXA, TYA
+
+        // --- No-op ---
+        case 0xEA:                          // NOP
+
+        // --- Flag manipulation (no memory side effects) ---
+        case 0x18: case 0x38:              // CLC, SEC
+        case 0xD8: case 0xF8:              // CLD, SED
+        case 0x58: case 0x78:              // CLI, SEI
+        case 0xB8:                          // CLV
+
+        // --- AND/ORA/EOR (read-only, modify A + flags) ---
+        case 0x25: case 0x35:              // AND zp, zpx
+        case 0x2D: case 0x3D: case 0x39:  // AND abs, absx, absy
+        case 0x29:                          // AND imm
+        case 0x05: case 0x15:              // ORA zp, zpx
+        case 0x0D: case 0x1D: case 0x19:  // ORA abs, absx, absy
+        case 0x09:                          // ORA imm
+        case 0x45: case 0x55:              // EOR zp, zpx
+        case 0x4D: case 0x5D: case 0x59:  // EOR abs, absx, absy
+        case 0x49:                          // EOR imm
+
+            return 1;
+
+        default:
+            return 0;
+    }
+}
+
+// Check if an opcode reads memory (as opposed to register-only ops).
+// Used to require at least one memory read in the loop body — a loop
+// of pure register ops (TAX/NOP/BNE) is a delay loop, not an idle wait.
+static uint8_t is_memory_read_opcode(uint8_t op)
+{
+    switch (op)
+    {
+        // LDA from memory (not imm)
+        case 0xA5: case 0xB5:
+        case 0xAD: case 0xBD: case 0xB9:
+        case 0xA1: case 0xB1:
+        // LDX from memory (not imm)
+        case 0xA6: case 0xB6:
+        case 0xAE: case 0xBE:
+        // LDY from memory (not imm)
+        case 0xA4: case 0xB4:
+        case 0xAC: case 0xBC:
+        // CMP from memory (not imm)
+        case 0xC5: case 0xD5:
+        case 0xCD: case 0xDD: case 0xD9:
+        case 0xC1: case 0xD1:
+        // CPX from memory (not imm)
+        case 0xE4: case 0xEC:
+        // CPY from memory (not imm)
+        case 0xC4: case 0xCC:
+        // BIT (memory)
+        case 0x24: case 0x2C:
+        // AND/ORA/EOR from memory (not imm)
+        case 0x25: case 0x35:
+        case 0x2D: case 0x3D: case 0x39:
+        case 0x05: case 0x15:
+        case 0x0D: case 0x1D: case 0x19:
+        case 0x45: case 0x55:
+        case 0x4D: case 0x5D: case 0x59:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+// Check if an opcode uses absolute addressing (3-byte instruction with
+// a 16-bit operand address).  Used to extract the target address and
+// reject idle-loop reads that hit NES hardware registers ($2000-$5FFF).
+static uint8_t is_absolute_read(uint8_t op)
+{
+    switch (op)
+    {
+        case 0xAD: case 0xBD: case 0xB9:  // LDA abs, absx, absy
+        case 0xAE: case 0xBE:              // LDX abs, absy
+        case 0xAC: case 0xBC:              // LDY abs, absx
+        case 0xCD: case 0xDD: case 0xD9:  // CMP abs, absx, absy
+        case 0xEC:                          // CPX abs
+        case 0xCC:                          // CPY abs
+        case 0x2C:                          // BIT abs
+        case 0x2D: case 0x3D: case 0x39:  // AND abs, absx, absy
+        case 0x0D: case 0x1D: case 0x19:  // ORA abs, absx, absy
+        case 0x4D: case 0x5D: case 0x59:  // EOR abs, absx, absy
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+// Record an idle PC in the flash table.  Returns 1 on success, 0 if full.
+static uint8_t sa_record_idle_pc(uint16_t idle_pc)
+{
+    if (sa_idle_count >= SA_IDLE_MAX)
+        return 0;
+
+    // Check for duplicates
+    for (uint8_t i = 0; i < sa_idle_count; i++)
+    {
+        uint16_t entry_addr = SA_IDLE_BASE + i * SA_IDLE_ENTRY_SIZE;
+        uint8_t lo = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 0);
+        uint8_t hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+        if (lo == (uint8_t)idle_pc && hi == (uint8_t)(idle_pc >> 8))
+            return 1;  // already recorded
+    }
+
+    uint16_t entry_addr = SA_IDLE_BASE + sa_idle_count * SA_IDLE_ENTRY_SIZE;
+    flash_byte_program(entry_addr + 0, BANK_FLASH_BLOCK_FLAGS, (uint8_t)idle_pc);
+    flash_byte_program(entry_addr + 1, BANK_FLASH_BLOCK_FLAGS, (uint8_t)(idle_pc >> 8));
+    sa_idle_count++;
+    return 1;
+}
+
+// Scan the entire ROM for idle polling loops.
+// Called once after the BFS walk has populated the code bitmap.
+static void sa_scan_idle_loops(void)
+{
+    sa_idle_count = 0;
+
+    // Count any idle PCs already persisted from a previous run
+    // (flash survives soft reset; sa_idle_list is in bank 3).
+    for (uint8_t i = 0; i < SA_IDLE_MAX; i++)
+    {
+        uint16_t entry_addr = SA_IDLE_BASE + i * SA_IDLE_ENTRY_SIZE;
+        uint8_t lo = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 0);
+        uint8_t hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+        if (lo == 0xFF && hi == 0xFF)
+            break;  // end sentinel (erased flash)
+        sa_idle_count++;
+    }
+
+    // If we already have a full table from a prior run, skip re-scan
+    if (sa_idle_count >= SA_IDLE_MAX)
+        return;
+
+    // Scan the ROM address space for backward conditional branches.
+    // We only check addresses marked as known code in the SA bitmap.
+    for (uint16_t scan = ROM_ADDR_MIN; scan != (uint16_t)(ROM_ADDR_MAX + 1u); scan++)
+    {
+        // Skip unknown addresses (not in code bitmap)
+        if (sa_bitmap_is_unknown(scan))
+            continue;
+
+        uint8_t op = read6502(scan);
+
+        // Only look at conditional branch instructions
+        if (op != 0x10 && op != 0x30 &&   // BPL, BMI
+            op != 0x50 && op != 0x70 &&    // BVC, BVS
+            op != 0x90 && op != 0xB0 &&    // BCC, BCS
+            op != 0xD0 && op != 0xF0)      // BNE, BEQ
+            continue;
+
+        // Read displacement — must be backward (negative)
+        int8_t disp = (int8_t)read6502(scan + 1);
+        if (disp >= 0)
+            continue;   // forward branch, not a loop
+
+        uint16_t target = scan + 2 + (int16_t)disp;
+
+        // Target must be in ROM range and known code
+        if (target < ROM_ADDR_MIN || target > ROM_ADDR_MAX)
+            continue;
+        if (sa_bitmap_is_unknown(target))
+            continue;
+
+        // Loop body: [target .. scan+1] inclusive
+        // (scan = branch opcode, scan+1 = displacement byte)
+        uint16_t body_len = (scan + 2) - target;   // includes branch itself
+        if (body_len > IDLE_LOOP_MAX_BYTES || body_len < 3)
+            continue;   // too large or degenerate
+
+        // Walk the loop body and check every opcode
+        uint8_t all_safe = 1;
+        uint8_t has_mem_read = 0;
+        uint8_t has_hw_read = 0;
+        uint16_t body_pc = target;
+
+        while (body_pc < scan + 2)
+        {
+            uint8_t body_op = read6502(body_pc);
+            if (!is_idle_safe_opcode(body_op))
+            {
+                all_safe = 0;
+                break;
+            }
+            if (is_memory_read_opcode(body_op))
+            {
+                if (is_absolute_read(body_op))
+                {
+                    // Decode the 16-bit operand address
+                    uint16_t addr = read6502(body_pc + 1)
+                                  | ((uint16_t)read6502(body_pc + 2) << 8);
+                    // Reject reads from NES hardware registers ($2000-$5FFF).
+                    // These are PPU/APU/IO polls (e.g. LDA $2002 for VBlank),
+                    // NOT idle waits for an interrupt handler to set a RAM flag.
+                    if (addr >= 0x2000 && addr < 0x6000)
+                        has_hw_read = 1;
+                    else
+                        has_mem_read = 1;
+                }
+                else
+                {
+                    // ZP or indirect — always targets RAM
+                    has_mem_read = 1;
+                }
+            }
+
+            uint8_t len = opcode_length(body_op);
+            body_pc += len;
+        }
+
+        // Must end exactly at the byte after the branch displacement
+        if (body_pc != scan + 2)
+            all_safe = 0;
+
+        if (all_safe && has_mem_read && !has_hw_read)
+        {
+            if (!sa_record_idle_pc(target))
+                return;  // table full
+        }
+    }
+}
+
+#endif // ENABLE_AUTO_IDLE_DETECT
+
+// -------------------------------------------------------------------------
 // BFS walker + header init (bank 2 implementation)
 // Checks header, erases SA sectors if ROM changed, then does BFS walk.
 // -------------------------------------------------------------------------
@@ -364,10 +672,15 @@ static void sa_walk_b2(void)
     if (!sa_check_header())
     {
         // Erase the SA sectors in bank 3.
-        // Range covers bitmap + header + indirect list + subroutine table.
+        // Range covers bitmap + header + indirect list + subroutine table
+        // + idle list (if enabled).
         {
             uint16_t base = SA_BITMAP_BASE & 0xF000;
+#ifdef ENABLE_AUTO_IDLE_DETECT
+            uint16_t end  = (SA_IDLE_BASE + SA_IDLE_MAX * SA_IDLE_ENTRY_SIZE - 1) | 0x0FFF;
+#else
             uint16_t end  = (SA_SUBROUTINE_BASE + SA_SUBROUTINE_MAX * 3 - 1) | 0x0FFF;
+#endif
             for (uint16_t sector = base; sector <= end; sector += 0x1000)
                 flash_sector_erase(sector, BANK_FLASH_BLOCK_FLAGS);
         }
@@ -1281,6 +1594,12 @@ static void sa_run_b2(void)
     // Uses peek_bank_byte/flash_byte_program (WRAM) and read6502 (fixed bank).
     sa_analyze_all_subroutines();
 
+#ifdef ENABLE_AUTO_IDLE_DETECT
+    // Scan for idle polling loops (backward branches with side-effect-free bodies).
+    // Must run after BFS walk so the code bitmap is fully populated.
+    sa_scan_idle_loops();
+#endif
+
 #ifdef ENABLE_STATIC_COMPILE
   if (sa_do_compile) {
     // =====================================================================
@@ -1776,6 +2095,13 @@ void sa_run(void)
     uint8_t saved_bank = mapper_prg_bank;
     bankswitch_prg(BANK_SA_CODE);
     sa_run_b2();
+#ifdef ENABLE_AUTO_IDLE_DETECT
+    // Load the flash idle list into a WRAM cache for fast runtime lookup.
+    // Must happen after sa_run_b2 (which populates the flash table) and
+    // before the main dispatch loop starts.  sa_load_idle_cache reads
+    // flash via peek_bank_byte (WRAM) — no bank dependency.
+    sa_load_idle_cache();
+#endif
 #ifdef ENABLE_METRICS
     bankswitch_prg(BANK_METRICS);
     metrics_dump_sa_b2();
@@ -1790,6 +2116,64 @@ void sa_record_indirect_target(uint16_t target_pc, uint8_t type)
     sa_record_indirect_target_b2(target_pc, type);
     bankswitch_prg(saved_bank);
 }
+
+// -------------------------------------------------------------------------
+// sa_is_idle_pc — fixed-bank idle PC lookup.
+// Checks the WRAM-cached idle table and the compile-time GAME_IDLE_PC.
+// Called from the dispatch loop and main loop — must be fast.
+// The WRAM cache (sa_idle_cache) is populated by sa_load_idle_cache()
+// which runs once at the end of sa_run().
+// -------------------------------------------------------------------------
+#ifdef ENABLE_AUTO_IDLE_DETECT
+
+// WRAM cache of auto-detected idle PCs — loaded once from flash,
+// checked every dispatch iteration.  Avoids per-dispatch flash reads.
+// Non-static so metrics.c can read them for the WRAM metrics dump.
+uint16_t sa_idle_cache[SA_IDLE_MAX];
+uint8_t  sa_idle_cache_count = 0;
+
+// Load the flash idle list into the WRAM cache.
+// Called once at the end of sa_run().
+void sa_load_idle_cache(void)
+{
+    sa_idle_cache_count = 0;
+
+#ifdef GAME_IDLE_PC
+    // Prepend the manual override so it's checked first
+    sa_idle_cache[sa_idle_cache_count++] = GAME_IDLE_PC;
+#endif
+
+    // Load auto-detected entries from flash
+    for (uint8_t i = 0; i < SA_IDLE_MAX && sa_idle_cache_count < SA_IDLE_MAX; i++)
+    {
+        uint16_t entry_addr = SA_IDLE_BASE + i * SA_IDLE_ENTRY_SIZE;
+        uint8_t lo = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 0);
+        uint8_t hi = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS, entry_addr + 1);
+        if (lo == 0xFF && hi == 0xFF)
+            break;   // end of list
+
+        uint16_t idle_pc = lo | ((uint16_t)hi << 8);
+
+        // Skip duplicates (e.g. if GAME_IDLE_PC was also auto-detected)
+        uint8_t dup = 0;
+        for (uint8_t j = 0; j < sa_idle_cache_count; j++) {
+            if (sa_idle_cache[j] == idle_pc) { dup = 1; break; }
+        }
+        if (!dup)
+            sa_idle_cache[sa_idle_cache_count++] = idle_pc;
+    }
+}
+
+uint8_t sa_is_idle_pc(uint16_t addr)
+{
+    for (uint8_t i = 0; i < sa_idle_cache_count; i++)
+    {
+        if (sa_idle_cache[i] == addr)
+            return 1;
+    }
+    return 0;
+}
+#endif // ENABLE_AUTO_IDLE_DETECT
 
 // sa_record_subroutine_runtime — moved to WRAM assembly stub in
 // dynamos-asm.s to save fixed-bank space.  The asm version does the

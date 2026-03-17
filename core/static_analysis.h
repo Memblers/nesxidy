@@ -97,8 +97,23 @@
 // Sectors are 4KB aligned ($x000).  sa_code_bitmap is the first SA variable
 // placed in bank3; sa_subroutine_list is the last.
 // Usage: declare extern for sa_code_bitmap and sa_subroutine_list first.
+#ifdef ENABLE_AUTO_IDLE_DETECT
+#define SA_SECTOR_FIRST  ((uint16_t)&sa_code_bitmap[0] & 0xF000)
+#define SA_SECTOR_LAST   (((uint16_t)&sa_idle_list[0] + SA_IDLE_MAX * SA_IDLE_ENTRY_SIZE - 1) & 0xF000)
+#else
 #define SA_SECTOR_FIRST  ((uint16_t)&sa_code_bitmap[0] & 0xF000)
 #define SA_SECTOR_LAST   (((uint16_t)&sa_subroutine_list[0] + SA_SUBROUTINE_MAX * 3 - 1) & 0xF000)
+#endif
+
+// -------------------------------------------------------------------------
+// Auto-detected idle loop table — persisted in flash bank 3.
+// Each entry is a 2-byte guest PC identified by the static analysis idle
+// scanner as a tight polling loop (load/compare/branch, no side effects).
+// Terminated by 0xFFFF (erased flash).
+// -------------------------------------------------------------------------
+#ifdef ENABLE_AUTO_IDLE_DETECT
+#define SA_IDLE_ENTRY_SIZE  2               // 2 bytes per entry (addr_lo, addr_hi)
+#endif
 
 // -------------------------------------------------------------------------
 // Public API  (all in bank 2)
@@ -133,5 +148,27 @@ void sa_record_subroutine_runtime(uint16_t target);
 // SA_SUB_DIRTY, or SA_SUB_EMPTY (target not found in subroutine table).
 // Fixed-bank trampoline — callable from any bank.
 uint8_t sa_subroutine_lookup(uint16_t target_pc);
+
+// -------------------------------------------------------------------------
+// Auto idle-loop detection (requires ENABLE_AUTO_IDLE_DETECT)
+// -------------------------------------------------------------------------
+#ifdef ENABLE_AUTO_IDLE_DETECT
+// Check if a guest PC is a known idle-polling loop.
+// Checks the WRAM-cached idle table (loaded from flash + GAME_IDLE_PC).
+// Returns 1 if idle, 0 otherwise.
+// Fixed-bank — callable from any context.  Fast: WRAM-only, no flash reads.
+uint8_t sa_is_idle_pc(uint16_t addr);
+
+// Load auto-detected idle PCs from flash into WRAM cache.
+// Called once at the end of sa_run().
+void sa_load_idle_cache(void);
+
+// Number of auto-detected idle PCs found during the last SA pass.
+extern uint8_t sa_idle_count;
+
+// WRAM cache (loaded by sa_load_idle_cache, read by metrics dump).
+extern uint16_t sa_idle_cache[];
+extern uint8_t  sa_idle_cache_count;
+#endif
 
 #endif // STATIC_ANALYSIS_H

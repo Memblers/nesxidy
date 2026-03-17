@@ -1,0 +1,13 @@
+with open(r'c:\proj\c\NES\nesxidy-co\nesxidy\exidy.nes', 'rb') as f:
+    h = f.read(16)
+print('iNES header:')
+print(f'  Bytes: {" ".join(f"{b:02X}" for b in h)}')
+print(f'  PRG-ROM banks: {h[4]} (x16KB = {h[4]*16}KB)')
+print(f'  CHR-ROM banks: {h[5]} (x8KB = {h[5]*8}KB)')
+print(f'  Flags 6: {h[6]:08b} = 0x{h[6]:02X}')
+print(f'    Battery/SRAM: {"YES" if h[6] & 0x02 else "no"}')
+print(f'    Mapper lo: {(h[6] >> 4) & 0x0F}')
+print(f'  Flags 7: {h[7]:08b} = 0x{h[7]:02X}')
+print(f'    Mapper hi: {(h[7] >> 4) & 0x0F}')
+mapper = ((h[7] & 0xF0) | ((h[6] >> 4) & 0x0F))
+print(f'  Mapper: {mapper}')

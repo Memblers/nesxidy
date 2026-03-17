@@ -739,8 +739,8 @@ static uint8_t sa_compile_one_block(void)
 #ifdef ENABLE_IR
         /* When IR is active in pass 2, skip per-instruction PC flag writes.
          * The pre-optimization native offsets would be wrong after ir_lower.
-         * Block entry + fence PCs are published after lowering instead.
-         * The interpreted-flag repair pass catches remaining mid-block PCs.
+         * Block entry + fence + all mid-block PCs are published after
+         * lowering instead (see "Publish ALL mid-block instruction PCs").
          * Pass 1 and non-IR blocks still write per-instruction flags. */
         if (!(sa_compile_pass == 2 && ir_ctx.enabled))
 #endif
@@ -1578,42 +1578,23 @@ static void sa_run_b2(void)
     opt2_drain_static_patches();
 #endif
 
-    // =====================================================================
-    // Interpreted-flag repair pass.
+    // Interpreted-flag repair pass REMOVED.
     //
-    // Pass 0 flagged all known-code PCs (RECOMPILED or INTERPRETED).
-    // Between passes, ALL flag banks were erased.  Pass 2 rewrote flags
-    // for entry-list blocks, but blocks with code_index==0 (first
-    // instruction is always-interpreted, e.g. CLI/SEI/PHP/PLP/SED or
-    // I/O access) were NOT in the entry list.  Their flags are still $FF.
+    // The old pass scanned the SA bitmap and wrote $80 (INTERPRETED) to
+    // every known-code PC still at $FF after pass 2.  This was intended
+    // to avoid a one-time flash_sector_alloc cost (~7K cycles) for PCs
+    // whose first instruction is always-interpreted (CLI/SEI/I/O).
     //
-    // Without this repair, each such PC triggers a wasted flash_sector_alloc
-    // at runtime (~7,285 cycles + 258 bytes of flash per PC).
+    // Problem: in IR mode, pass 2 intentionally leaves mid-block PCs at
+    // $FF so they can be published with correct post-lowering native
+    // offsets.  The repair pass clobbered those $FF slots with $80,
+    // permanently trapping compilable mid-block code in interpret mode.
+    // For DK, this affected 43 PCs (~33% of all dispatches).
     //
-    // Fix: scan the bitmap and mark any remaining $FF-flagged known-code
-    // PCs as INTERPRETED ($80).  We don't need the native address — the
-    // dispatcher will return 2 (interpret) for $80 flags.
-    // =====================================================================
-    {
-        for (uint16_t scan_addr = ROM_ADDR_MIN;
-             scan_addr != (uint16_t)(ROM_ADDR_MAX + 1u);
-             scan_addr++)
-        {
-            if (sa_bitmap_is_unknown(scan_addr))
-                continue;
-
-            uint8_t flag_bank = (scan_addr >> 14) + BANK_PC_FLAGS;
-            uint16_t flag_addr = (uint16_t)&flash_cache_pc_flags[scan_addr & FLASH_BANK_MASK];
-
-            uint8_t flag = peek_bank_byte(flag_bank, flag_addr);
-            if (flag != 0xFF)
-                continue;   // already programmed by pass 2
-
-            // This PC is known code but has no flag — mark it INTERPRETED.
-            // Flag byte $80 = bit 7 set, bit 6 clear → dispatch returns 2.
-            flash_byte_program(flag_addr, flag_bank, RECOMPILED);
-        }
-    }
+    // The dynamic JIT handles both cases correctly at runtime:
+    //   - Always-interpreted PCs: compile loop writes INTERPRETED flag,
+    //     undoes flash allocation — one-time ~7K cycle cost per PC.
+    //   - Normal code PCs: compiles and writes RECOMPILED flag.
 
     // Compaction sweep REMOVED — the original sweep only shrank
     // sector_free_offset to the actual code end of the LAST block at

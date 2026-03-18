@@ -310,7 +310,23 @@
 #endif
 
 #ifdef GAME_LUNAR_POOL
-// No known idle PC.
+// Lunar Pool's NMI handler does PPU work (OAM DMA $CB25, nametable
+// flush $CC8F, scroll restore $CA52), sets $01C8=1, then calls the
+// main game loop (JSR $C003).  $C003 spins on $01C8 for N frames;
+// on real hardware each spin is broken by the next reentrant NMI
+// which re-runs the PPU flush and sets the flag.  The $68-bit-1
+// guard prevents recursive game logic — inner $C003 returns at once.
+//
+// In DynaMoS the guest runs much slower so NMIs must be selective:
+// fire reentrant nmi6502() ONLY when the guest has cleared the flag
+// and entered a spin loop (safe to re-enter), not while the NMI
+// handler's own PPU work is in progress.  This avoids corrupting
+// PPU state while still giving the guest the reentrant NMI it needs.
+#define NES_NMI_VBLANK_FLAG  0x01C8
+// Lunar Pool is NROM with horizontal mirroring.  DynaMoS hardware
+// has four-screen VRAM — emulate horizontal mirroring by duplicating
+// nametable writes: NT0 ↔ NT1, NT2 ↔ NT3 (XOR $0400).
+#define NES_MIRROR_HORIZONTAL
 #endif
 
 #ifdef GAME_M82

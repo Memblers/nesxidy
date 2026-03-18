@@ -125,3 +125,4 @@ echo BUILD OK: %OUTPUT%
 python convertlabels.py vicemap.map nes_%ROM_BASE%.mlb
 python patch_oam_dma.py %OUTPUT% vicemap.map
 python patch_nmi_yield.py %OUTPUT% vicemap.map
+python patch_lnlist.py %OUTPUT%

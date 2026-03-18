@@ -114,8 +114,14 @@ __zpage uint8_t last_nmi_frame;  // __zpage: ASM dispatch references it directly
 // dispatches and may span several real VBlanks.  Without a guard, each
 // VBlank would fire nmi6502() again, corrupting the guest stack.
 // We detect RTI completion by monitoring the guest stack pointer.
+//
+// NES_NMI_VBLANK_FLAG games (e.g. Lunar Pool) call their main game
+// loop FROM the NMI handler, then spin-wait for the next NMI.  We fire
+// selective reentrant NMI: only when the guest has cleared the VBlank
+// flag and entered a spin loop (safe to re-enter NMI handler), not
+// while the NMI handler's own PPU work is still in progress.
 uint8_t nmi_active = 0;
-uint8_t nmi_sp_guard;  // sp value just before nmi6502()
+uint8_t nmi_sp_guard;  // sp value just before outermost nmi6502()
 
 // OAM DMA deferred execution: JIT-compiled STA $4014 writes the source
 // page here instead of hitting the hardware register directly.  The main
@@ -151,7 +157,7 @@ void nes_register_write(uint16_t address, uint8_t value)
 		case 1: // $2001 PPUMASK
 			lnPPUMASK = value;
 			PPUMASK_soft = value;
-			// Same — shadow applied by NMI handler at next VBlank.
+			// Shadow applied by NMI handler at next VBlank.
 			break;
 		case 5: // $2005 PPUSCROLL
 			PPUSCROLL_soft[PPUADDR_latch++ & 1] = value;
@@ -179,6 +185,17 @@ void nes_register_write(uint16_t address, uint8_t value)
 			// Duplicate nametable writes ($2000-$2FFF) to the mirror address.
 			if (addr_hi >= 0x20 && addr_hi < 0x30) {
 				ppu_queue[ppu_queue_index + 0] = addr_hi ^ 0x08;
+				ppu_queue[ppu_queue_index + 1] = PPUADDR_soft[1];
+				ppu_queue[ppu_queue_index + 2] = value;
+				ppu_queue_index += 3;
+			}
+#endif
+#ifdef NES_MIRROR_HORIZONTAL
+			// Horizontal mirroring emulation for four-screen VRAM hardware.
+			// The guest expects NT0/NT1 and NT2/NT3 to be mirrors (XOR $0400).
+			// Duplicate nametable writes ($2000-$2FFF) to the mirror address.
+			if (addr_hi >= 0x20 && addr_hi < 0x30) {
+				ppu_queue[ppu_queue_index + 0] = addr_hi ^ 0x04;
 				ppu_queue[ppu_queue_index + 1] = PPUADDR_soft[1];
 				ppu_queue[ppu_queue_index + 2] = value;
 				ppu_queue_index += 3;
@@ -309,7 +326,15 @@ static void check_recompile_triggers(void)
 int main(void)
 {
 	lnSync(1);
-	lnPush(0x3F00, 32, palette);
+
+	// --- Suppress NMI for bulk PPU uploads ---
+	// lnPush/lnSync may leave VRU data queued for the next NMI.
+	// If NMI fires during the $2007 upload loop below, the handler
+	// processes the VRU command (changes $2006 for palette writes),
+	// then RTI returns mid-loop with the PPU address register pointing
+	// at the wrong address.  This corrupts CHR-RAM, leaving pattern
+	// tables blank (all-zero tiles).
+	IO8(0x2000) = lnPPUCTRL & 0x7F;  // disable NMI
 
 	// Upload 8KB CHR-ROM to PPU pattern tables ($0000-$1FFF)
 	IO8(0x2006) = 0x00;
@@ -332,8 +357,9 @@ int main(void)
 	IO8(0x2006) = 0xC0;
 	for (uint8_t i = 0; i < 64; i++) IO8(0x2007) = 0;
 
-	// Enable NMI + sprites + background
+	// Re-enable NMI and push initial palette
 	IO8(0x2000) = lnPPUCTRL;
+	lnPush(0x3F00, 32, palette);
 
 	lnSync(0);
 	reset6502();
@@ -404,7 +430,15 @@ int main(void)
 		}
 
 #ifdef ENABLE_AUTO_IDLE_DETECT
+#ifdef NES_NMI_VBLANK_FLAG
+		// When the guest VBlank flag is set, the guest MUST run even at
+		// the idle PC ($FF5B) so it can read the flag and exit its spin
+		// loop.  Without this, setting $01C8=1 has no effect because the
+		// idle detection prevents the guest from ever executing.
+		if (!sa_is_idle_pc(pc) || RAM_BASE[NES_NMI_VBLANK_FLAG])
+#else
 		if (!sa_is_idle_pc(pc))
+#endif
 #elif defined(GAME_IDLE_PC)
 		if (pc != GAME_IDLE_PC)
 #endif
@@ -416,9 +450,17 @@ int main(void)
 #endif
 		}
 
-		// Detect guest NMI handler completion: RTI restores sp to pre-NMI value
+		// Detect guest NMI handler completion: RTI restores sp to pre-NMI value.
+		// NES_NMI_VBLANK_FLAG: use a small unsigned window (<8) to catch RTI +
+		// subsequent RTS within a single run_6502() batch, without the signed-
+		// overflow false-positive that (int8_t)>= has on deep stacks.
+#ifdef NES_NMI_VBLANK_FLAG
+		if (nmi_active && (uint8_t)(sp - nmi_sp_guard) < 8)
+			nmi_active = 0;
+#else
 		if (nmi_active && sp == nmi_sp_guard)
 			nmi_active = 0;
+#endif
 
 		// Execute deferred OAM DMA: the guest wrote a source page number
 		// via STA $4014, but both the JIT-compiled code and the interpreter
@@ -439,6 +481,42 @@ int main(void)
 			if (cur_nmi != last_nmi_frame)
 			{
 				nmi_stuck_count = 0;
+#ifdef NES_NMI_VBLANK_FLAG
+				// Selective reentrant NMI: always refresh gamepad
+				// (game reads it inside NMI handler's JSR $C003).
+				nes_gamepad_refresh();
+				check_recompile_triggers();
+#ifdef ENABLE_METRICS
+				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
+#endif
+				if (ppu_queue_index > 0)
+					render_video();
+				else
+					guest_vblank_pending = 1;
+				if (PPUCTRL_soft & 0x80)
+				{
+					if (!nmi_active)
+					{
+						// First NMI — fire normally
+						nmi_sp_guard = sp;
+						nmi6502();
+						nmi_active = 1;
+					}
+					else
+					{
+						// Guest NMI handler calls the main game loop
+						// recursively (JSR $C003).  DO NOT fire reentrant
+						// nmi6502() — that creates infinite recursive NMI
+						// frames that corrupt the guest stack and variables.
+						// Instead, just set the guest's software VBlank
+						// flag so the spin loop inside JSR $C003 releases.
+						// The existing NMI handler will finish naturally:
+						// $C003 returns → NMI restores regs → RTI →
+						// sp returns to nmi_sp_guard → nmi_active clears.
+						RAM_BASE[NES_NMI_VBLANK_FLAG] = 1;
+					}
+				}
+#else
 				if (!nmi_active)
 				{
 					// Guest main loop — safe to render and fire NMI
@@ -468,6 +546,7 @@ int main(void)
 						nmi_active = 1;
 					}
 				}
+#endif
 				// Always absorb counter changes to prevent re-triggering
 				last_nmi_frame = *(volatile uint8_t*)0x26;
 				nmi_yield = 0;  // VBlank processed — allow backward branches to loop
@@ -486,6 +565,24 @@ int main(void)
 				cur_nmi = *(volatile uint8_t*)0x26;
 				if (cur_nmi != last_nmi_frame)
 				{
+#ifdef NES_NMI_VBLANK_FLAG
+					nes_gamepad_refresh();
+					if (PPUCTRL_soft & 0x80)
+					{
+						if (!nmi_active)
+						{
+							nmi_sp_guard = sp;
+							nmi6502();
+							nmi_active = 1;
+						}
+						else
+						{
+							// Same as normal VBlank path: release the
+							// guest's spin loop instead of recursive NMI.
+							RAM_BASE[NES_NMI_VBLANK_FLAG] = 1;
+						}
+					}
+#else
 					if (!nmi_active)
 					{
 						nes_gamepad_refresh();
@@ -496,6 +593,7 @@ int main(void)
 							nmi_active = 1;
 						}
 					}
+#endif
 					last_nmi_frame = cur_nmi;
 					nmi_yield = 0;  // VBlank processed (watchdog path)
 				}
@@ -760,26 +858,17 @@ void render_video(void)
 	// Clear scroll counter
 	*(volatile uint8_t*)0x2F = 0;
 
-	// Force NMI enabled on real hardware.  OR with $80 in case lnPPUCTRL
-	// shadow ($22) was corrupted — this is the key difference from the
-	// previous fix which just wrote lnPPUCTRL as-is.
+	// Force NMI enabled on real hardware.
 	lnPPUCTRL |= 0x80;
 	IO8(0x2000) = lnPPUCTRL;
 
 	// Block until NMI handler completes (increments nmiCounter).
-	// nmiCounter ($26) is incremented AFTER the handler processes the
-	// PPU list, so the queue is safe to reuse when this exits.
-	// Timeout prevents permanent deadlock if NMI is truly stuck.
 	{
 		uint8_t prev_nmi = *(volatile uint8_t*)0x26;
 		uint16_t timeout = 0;
 		while (*(volatile uint8_t*)0x26 == prev_nmi) {
 			if (++timeout > 50000) {
-				// NMI didn't fire in ~50K iterations (~400K cycles ≈ 13 frames).
-				// Force-clear the sync request so the NMI handler doesn't
-				// process stale data, and bail out.
-				*(volatile uint8_t*)0x25 &= ~0x44;  // clear bits 6,2
-				// Re-force NMI enable in case of ongoing corruption
+				*(volatile uint8_t*)0x25 &= ~0x44;
 				lnPPUCTRL |= 0x80;
 				IO8(0x2000) = lnPPUCTRL;
 				break;
@@ -787,10 +876,7 @@ void render_video(void)
 		}
 	}
 
-	// Signal software VBlank: the lazynes NMI handler has consumed the
-	// hardware $2002 VBlank flag, but the guest expects to see it on
-	// the next $2002 read.  This is the key fix for games whose reset
-	// code polls BIT $2002 / BPL waiting for VBlank (e.g. Galaxian).
+	// Signal software VBlank
 	guest_vblank_pending = 1;
 }
 

@@ -546,7 +546,13 @@ void run_6502(void)
 	if (++batch_count >= 64) break;
 	// 3. Known idle loop — stop dispatching, let main loop poll VBlank
 #ifdef ENABLE_AUTO_IDLE_DETECT
+#ifdef NES_NMI_VBLANK_FLAG
+	// Don't break at idle PC when the VBlank flag is set — the guest
+	// must run to read the flag and exit its spin loop.
+	if (sa_is_idle_pc(pc) && !RAM_BASE[NES_NMI_VBLANK_FLAG]) break;
+#else
 	if (sa_is_idle_pc(pc)) break;
+#endif
 #elif defined(GAME_IDLE_PC)
 	if (pc == GAME_IDLE_PC) break;
 #endif

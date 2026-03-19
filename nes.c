@@ -484,6 +484,7 @@ int main(void)
 #ifdef NES_NMI_VBLANK_FLAG
 				// Selective reentrant NMI: always refresh gamepad
 				// (game reads it inside NMI handler's JSR $C003).
+				cached_raw_pad = lnGetPad(1);
 				nes_gamepad_refresh();
 				check_recompile_triggers();
 #ifdef ENABLE_METRICS
@@ -519,7 +520,7 @@ int main(void)
 #else
 				if (!nmi_active)
 				{
-					// Guest main loop — safe to render and fire NMI
+					cached_raw_pad = lnGetPad(1);
 					nes_gamepad_refresh();
 					check_recompile_triggers();
 #ifdef ENABLE_METRICS
@@ -546,8 +547,23 @@ int main(void)
 						nmi_active = 1;
 					}
 				}
+#ifdef ENABLE_AUTO_IDLE_DETECT
+				else if (sa_is_idle_pc(pc))
+				{
+					// NMI handler never returns (e.g. Millipede) but guest
+					// is at its idle loop, not mid-$4016 read — safe to
+					// read controller for B+Select detection.
+					cached_raw_pad = lnGetPad(1);
+					check_recompile_triggers();
+				}
+#elif defined(GAME_IDLE_PC)
+				else if (pc == GAME_IDLE_PC)
+				{
+					cached_raw_pad = lnGetPad(1);
+					check_recompile_triggers();
+				}
 #endif
-				// Always absorb counter changes to prevent re-triggering
+#endif
 				last_nmi_frame = *(volatile uint8_t*)0x26;
 				nmi_yield = 0;  // VBlank processed — allow backward branches to loop
 			}
@@ -566,6 +582,7 @@ int main(void)
 				if (cur_nmi != last_nmi_frame)
 				{
 #ifdef NES_NMI_VBLANK_FLAG
+					cached_raw_pad = lnGetPad(1);
 					nes_gamepad_refresh();
 					if (PPUCTRL_soft & 0x80)
 					{
@@ -585,6 +602,7 @@ int main(void)
 #else
 					if (!nmi_active)
 					{
+						cached_raw_pad = lnGetPad(1);
 						nes_gamepad_refresh();
 						if (PPUCTRL_soft & 0x80)
 						{
@@ -593,6 +611,19 @@ int main(void)
 							nmi_active = 1;
 						}
 					}
+#ifdef ENABLE_AUTO_IDLE_DETECT
+					else if (sa_is_idle_pc(pc))
+					{
+						cached_raw_pad = lnGetPad(1);
+						check_recompile_triggers();
+					}
+#elif defined(GAME_IDLE_PC)
+					else if (pc == GAME_IDLE_PC)
+					{
+						cached_raw_pad = lnGetPad(1);
+						check_recompile_triggers();
+					}
+#endif
 #endif
 					last_nmi_frame = cur_nmi;
 					nmi_yield = 0;  // VBlank processed (watchdog path)
@@ -603,6 +634,7 @@ int main(void)
 		if (clockticks6502 > frame_time)
 		{
 			frame_time += FRAME_LENGTH;
+			cached_raw_pad = lnGetPad(1);
 			nes_gamepad_refresh();
 			check_recompile_triggers();
 #ifdef ENABLE_METRICS
@@ -777,8 +809,11 @@ static uint8_t cached_gamepad = 0xFF;  // all buttons released
 void nes_gamepad_refresh(void)
 {
 	uint8_t targ = 0;
-	uint8_t joypad = lnGetPad(1);
-	cached_raw_pad = joypad;  // store raw for recompile trigger detection
+	// cached_raw_pad must be set by the caller (via lnGetPad(1))
+	// before calling this function.  Calling lnGetPad twice per
+	// frame returns corrupt data on the second read, causing
+	// phantom button presses (e.g. repeated Start in DK).
+	uint8_t joypad = cached_raw_pad;
 	targ |= (joypad & lfR) ? TARG_RIGHT : 0;
 	targ |= (joypad & lfL) ? TARG_LEFT  : 0;
 	targ |= (joypad & lfU) ? TARG_UP    : 0;

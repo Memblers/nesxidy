@@ -266,7 +266,7 @@ uint8_t flash_cache_search(uint16_t emulated_pc);
 
 #ifdef ENABLE_IR
 // SA pass 2 mid-block PC tracking (see dynamos.c for details)
-#define SA_IR_MAX_INSTRS 64
+#define SA_IR_MAX_INSTRS 96
 extern uint8_t sa_ir_instr_pc_offset[SA_IR_MAX_INSTRS];
 extern uint8_t sa_ir_instr_first_node[SA_IR_MAX_INSTRS];
 extern uint8_t sa_ir_instr_native_off[SA_IR_MAX_INSTRS];
@@ -281,7 +281,8 @@ extern uint8_t sa_compile_pass;
 // pressure auto-reset so the system doesn't endlessly cycle between
 // SA compile → dynamic fill → cache pressure → soft reset → SA compile.
 // Lives in WRAM so it resets to 0 on every soft reset (C startup re-inits).
-extern uint8_t sa_compile_completed;
+// volatile: VBCC -O2 must not optimise away the cross-unit write/read.
+extern volatile uint8_t sa_compile_completed;
 
 // Pass 2: forced exit PC for the current block being compiled.
 // When sa_compile_pass==2 and pc >= sa_block_exit_pc, the compile loop

@@ -583,9 +583,11 @@ void ir_resolve_direct_branches(void)
         }
 
         /* Try inter-block: lookup compiled entry point.
-         * First try PC tables (current-session addresses), then fall
-         * back to the entry list (pass-1 addresses, which are valid
-         * because pass 2 uses max-stride allocation matching pass 1). */
+         * PC tables are the primary source — they contain the correct
+         * tight-allocation addresses (pre-populated between passes).
+         * The entry list fallback is kept for non-SA (dynamic JIT) use
+         * but should never fire during SA pass 2 since pre-population
+         * covers all entry_pc addresses in the PC tables. */
         if (!resolved) {
             if (lookup_native_addr_safe(target_pc) && reserve_result_bank == flash_code_bank) {
                 target_native = reserve_result_addr;
@@ -834,7 +836,8 @@ void ir_compute_instr_offsets(void)
     extern uint8_t sa_ir_instrs_eliminated;
     extern uint8_t sa_compile_pass;
 
-    if (sa_compile_pass != 2) return;
+    /* Run during both SA pass 2 (sa_compile_pass==2) and dynamic JIT
+     * (sa_compile_pass==0) — both paths now populate sa_ir_instr_*. */
     if (!ir_ctx.enabled) return;
     if (sa_ir_instr_count == 0) return;
 

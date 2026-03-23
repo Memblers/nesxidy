@@ -899,10 +899,12 @@ uint16_t sa_blocks_total = 0;
 //   in the entry list (entry_pc, exit_pc, native_addr, bank, code_len).
 //
 // Pass 2 (sa_compile_pass == 2):
-//   Recompile with full knowledge of all block entry addresses (via
-//   lookup_entry_list).  Allocates max-size (same as pass 1) to keep
-//   sector-skip decisions identical.  Forward branches can now use
-//   2-byte native branches or 5-byte direct JMP for same-bank targets.
+//   Recompile with tight allocation (sa_block_alloc_size = pass 1's
+//   code_len).  Backward branches resolve via lookup_native_addr_safe
+//   (target already compiled, same iteration order as pass 1).  Forward
+//   branches use 21-byte patchable templates (same as pass 1, so
+//   code_len matches tight allocation).  opt2_drain_static_patches
+//   resolves them post-compile.
 //   Write code + header to flash.  Write PC tables fresh (they were
 //   erased between passes).  Block termination is forced at
 //   sa_block_exit_pc to match pass 1's block boundaries.
@@ -918,22 +920,32 @@ static uint8_t sa_compile_one_block(void)
     *(volatile uint8_t*)0x2001 = lnPPUMASK;
 #endif
 
-    // Allocate space in a flash sector for max-size block.
-    // Both passes use max-size so the allocator makes identical sector-skip
-    // decisions regardless of actual code size — this guarantees a stable
-    // address assignment across the entire entry list.  The compaction
-    // sweep after pass 2 reclaims the tail gap of the last block per
-    // sector.
+    // Allocate space in a flash sector.
+    //
+    // Pass 1 (sa_compile_pass==0): max-size allocation.  We don't know
+    //   actual code_len yet; forward branches use 21-byte templates.
+    //   code_len is recorded in the entry list after compilation.
+    //
+    // Pass 2 (sa_compile_pass==2): tight allocation using pass 1's
+    //   code_len (set in sa_block_alloc_size by the caller).  Backward
+    //   branches resolve via lookup_native_addr_safe (target already
+    //   compiled in same iteration order).  Forward branches use 21-byte
+    //   patchable templates (same as pass 1) — patched post-compile.
     //
     // Save allocator state to undo if the block produces no code (rare:
     // first instruction is interpreted).  Empty blocks must not appear in
-    // the entry list or consume flash, or pass 1/2 addresses will diverge.
+    // the entry list or consume flash.
     extern uint16_t sector_free_offset[];
     extern uint8_t next_free_sector;
     uint8_t pre_alloc_next_free = next_free_sector;
 
-    if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
-        return 0;           // cache full
+    {
+        uint8_t alloc_sz = (sa_compile_pass == 2 && sa_block_alloc_size > 0)
+                         ? sa_block_alloc_size
+                         : CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE;
+        if (!flash_sector_alloc(alloc_sz))
+            return 0;       // cache full
+    }
 
     // For undo: restore allocated sector's free pointer to header_start
     // (conservative — may waste a few alignment bytes, but correct).
@@ -991,6 +1003,16 @@ static uint8_t sa_compile_one_block(void)
             && sa_ir_instr_count < SA_IR_MAX_INSTRS) {
             sa_ir_instr_pc_offset[sa_ir_instr_count] = (uint8_t)(pc_old - entry_pc);
             sa_ir_instr_first_node[sa_ir_instr_count] = sa_prev_node_count;
+            // Seed raw (pre-IR) native offset.  ir_compute_instr_offsets()
+            // overwrites with post-lowering offset when IR succeeds.  When
+            // IR overflows mid-block (enabled→0), the raw offset remains
+            // and the deferred publish section uses it as-is — correct
+            // because IR lowering never ran for this block.
+#ifdef ENABLE_PEEPHOLE
+            sa_ir_instr_native_off[sa_ir_instr_count] = recompile_instr_start;
+#else
+            sa_ir_instr_native_off[sa_ir_instr_count] = code_index_old;
+#endif
             sa_ir_instr_count++;
             sa_prev_node_count = ir_ctx.node_count;
         }
@@ -1052,8 +1074,12 @@ static uint8_t sa_compile_one_block(void)
 #ifdef ENABLE_IR
         /* When IR is active in pass 2, skip per-instruction PC flag writes.
          * The pre-optimization native offsets would be wrong after ir_lower.
-         * Block entry + fence + all mid-block PCs are published after
-         * lowering instead (see "Publish ALL mid-block instruction PCs").
+         * All mid-block PCs are published in the deferred section after
+         * lowering (see "Publish ALL mid-block instruction PCs").
+         * When IR overflows mid-block (enabled→0), this guard falls
+         * through for POST-overflow instructions; PRE-overflow PCs are
+         * covered by the deferred section using raw native offsets seeded
+         * in the tracking section above.
          * Pass 1 and non-IR blocks still write per-instruction flags. */
         if (!(sa_compile_pass == 2 && ir_ctx.enabled))
 #endif
@@ -1300,10 +1326,13 @@ static uint8_t sa_compile_one_block(void)
                 }
 
                 // --- Publish ALL mid-block instruction PCs ---
-                // The fence loop above only covers branch targets (up to 16).
-                // sa_ir_instr_native_off[] was filled by ir_compute_instr_offsets()
-                // (called from sa_ir_pipeline_full → bank 1 trampoline) with
-                // true post-lowering byte offsets for every instruction.
+                // sa_ir_instr_native_off[] holds either:
+                //  (a) post-lowering offsets from ir_compute_instr_offsets()
+                //      when IR succeeded (enabled=1), or
+                //  (b) raw pre-IR native offsets seeded in the compile loop
+                //      when IR overflowed mid-block (enabled=0).
+                // Case (b) is correct because IR lowering never ran, so the
+                // un-optimised native code is what's actually in flash.
                 // Eliminated instructions are forwarded to the NEXT surviving
                 // instruction's offset so dispatch entering at that guest PC
                 // falls through correctly.  Only trailing eliminated instrs
@@ -1311,7 +1340,7 @@ static uint8_t sa_compile_one_block(void)
                 // Reload: fence loop above may have clobbered entry_pc.
                 entry_pc = (uint16_t)cache_entry_pc_lo[0]
                          | ((uint16_t)cache_entry_pc_hi[0] << 8);
-                if (ir_ctx.enabled && sa_ir_instr_count > 0) {
+                if (sa_ir_instr_count > 0) {
                     uint8_t _mi;
                     for (_mi = 0; _mi < sa_ir_instr_count; _mi++) {
                         uint8_t noff = sa_ir_instr_native_off[_mi];
@@ -1603,34 +1632,42 @@ static void sa_run_b2(void)
 #ifdef ENABLE_STATIC_COMPILE
   if (sa_do_compile) {
     // =====================================================================
-    // Two-pass static compilation with entry list.
-    // Only runs on warm boot (sa_do_compile set by platform main).
-    // Cold boot skips this — dynamic JIT fills the cache at runtime.
+    // Two-pass static compilation with entry list and tight allocation.
+    // Only runs on warm reboot (sa_do_compile set by cache-pressure
+    // reboot or Select+Start hold).  Cold boot skips compile and lets
+    // the dynamic JIT handle compilation on demand.
+    // Warm boots benefit from richer coverage data discovered by the
+    // dynamic JIT during the previous session.
     //
     // Architecture overview:
     //   Bank 18 (BANK_ENTRY_LIST) holds a sequential table of 16-byte entries
     //   written during pass 1.  Each entry records: entry_pc, exit_pc,
-    //   native_addr (code_index=0), code_bank, code_len, and the block's
-    //   exit register state (A/X/Y val+known) for boundary-state seeding.
-    //   iterates this list (not the bitmap) to find block entry points and
-    //   uses lookup_entry_list() for forward branch resolution.
+    //   native_addr, code_bank, code_len, and the block's exit register
+    //   state (A/X/Y val+known) for boundary-state seeding.
     //
-    //   Between passes, ALL code sectors (4-17), PC address sectors (19-26,
-    //   except BANK_RENDER and BANK_PLATFORM_ROM),
-    //   and PC flag sectors (27-30) are erased.  Only the entry list (bank 18)
-    //   and the SA metadata (bank 3) survive.  Pass 2 rewrites everything
-    //   fresh, with correct code_index values for the final native layout.
+    //   Pass 1: compile to RAM with max-size allocation.  Records actual
+    //     code_len per block in the entry list.
+    //
+    //   Between passes: erase code + PC sectors.  Pre-populate ALL block
+    //     entry_pc addresses into the PC tables using TIGHT allocation
+    //     (code_len from pass 1).  This enables lookup_native_addr_safe
+    //     to resolve both forward and backward branches in pass 2.
+    //     Reset the allocator after pre-population.
+    //
+    //   Pass 2: recompile with tight allocation (sa_block_alloc_size =
+    //     code_len).  The deterministic allocator replays the same
+    //     sequence as pre-population → identical addresses.  Forward
+    //     branches resolve via PC tables (pre-populated) instead of
+    //     the entry list, enabling 2-byte or 5-byte direct branches.
     //
     // Why this works:
-    //   - Both passes allocate max-size (258 bytes) in the same bitmap
-    //     order, so flash_sector_alloc makes identical sector-skip
-    //     decisions and returns identical addresses.
+    //   - Pre-populate and pass 2 allocate in the same order with the
+    //     same sizes → deterministic allocator produces identical addresses.
     //   - Pass 2 forces block termination at pass 1's exit_pc, so block
     //     boundaries match even when forward branches produce shorter code.
-    //   - Entry list stores code_index=0 native addresses, which are stable
-    //     between passes (flash_code_address + BLOCK_PREFIX_SIZE).
-    //   - After pass 2, a sector compaction sweep reclaims wasted space
-    //     by reading block headers and adjusting sector_free_offset.
+    //   - Pass 2 code_len <= pass 1 code_len (shorter branches), so the
+    //     tight allocation always has sufficient space.
+    //   - Tight allocation eliminates ~70% per-block waste vs max-stride.
     // =====================================================================
 
     // --- Erase entry list bank before pass 1 ---
@@ -1791,21 +1828,45 @@ static void sa_run_b2(void)
 
     flash_cache_init_sectors();
 
+    // PRE-POPULATE REMOVED.
+    //
+    // The pre-populate phase previously walked the entry list, replayed
+    // the allocator with flash_sector_alloc(code_len), and wrote entry-PC
+    // addresses into the PC tables before pass 2.  This enabled forward
+    // branch resolution during pass 2 (shorter 2/5-byte branches instead
+    // of 21-byte patchable templates).
+    //
+    // Problem: nes_rom_data_copy allocates 256 bytes in the flash sector
+    // during pass 2 compilation for indexed ROM reads (abs,X / abs,Y).
+    // Pre-populate only replayed flash_sector_alloc and could not predict
+    // these extra allocations.  After the first ROM data copy in pass 2,
+    // every subsequent block's actual address diverged from the pre-
+    // populated PC table entry — stale entries pointed into other blocks'
+    // unpatched epilogues, causing JMP $FFFF crashes.
+    //
+    // Without pre-populate, pass 2 writes PC table entries as each block
+    // compiles (addresses are always correct).  Forward branches use
+    // 21-byte patchable templates (same as pass 1, so tight allocation
+    // sizes match).  opt2_drain_static_patches resolves them post-compile.
+    // Backward branches still resolve directly via lookup_native_addr_safe
+    // (same iteration order — target already compiled).
+
     // =====================================================================
-    // PASS 2: Recompile with full knowledge of all block entry addresses.
+    // PASS 2: Recompile with tight allocation.
     //
     // Iterates the entry list (not the bitmap).  For each block:
     //   - Sets sa_block_exit_pc so the compile loop terminates at the
     //     same guest PC as pass 1 (prevents block boundary drift when
     //     shorter forward branches leave more room in the code buffer).
-    //   - sa_compile_pass==2 tells recompile_opcode_b2() to use
-    //     lookup_entry_list() for forward branches, emitting 2-byte
-    //     native branches or 5-byte Bxx_inv+JMP where possible.
+    //   - sa_block_alloc_size = code_len from entry list (tight alloc).
+    //   - sa_compile_pass==2 tells recompile_opcode_b2() to attempt
+    //     direct branches via lookup_native_addr_safe.  Backward targets
+    //     resolve (already compiled); forward targets fall through to the
+    //     21-byte patchable template (same as pass 1).
     //   - Writes code + headers to flash.  Writes PC tables fresh.
     //
-    // Allocation uses max-size (same as pass 1) so blocks land at the
-    // SAME flash addresses — the entry list's native_addr values remain
-    // correct.
+    // Tight allocation eliminates the ~70% per-block waste of max-stride.
+    // Forward branches are patched post-compile by opt2_drain_static_patches.
     // =====================================================================
     sa_compile_pass = 2;
 
@@ -1823,6 +1884,13 @@ static void sa_run_b2(void)
 
         uint16_t entry_pc_val = ep_lo | ((uint16_t)ep_hi << 8);
         sa_block_exit_pc = ex_lo | ((uint16_t)ex_hi << 8);
+
+        // Tight allocation: use pass 1's actual code_len
+        {
+            uint8_t p2_codelen = peek_bank_byte(BANK_ENTRY_LIST, addr + 7);
+            sa_block_alloc_size = (p2_codelen > 0 && p2_codelen != 0xFF)
+                                ? p2_codelen : 0;
+        }
 
 #ifdef ENABLE_IR
         // Boundary-state seeding: look up predecessor block whose exit_pc
@@ -1890,12 +1958,23 @@ static void sa_run_b2(void)
     // Restore dynamic mode
     sa_compile_pass = 0;
     sa_block_exit_pc = 0xFFFF;
+    sa_block_alloc_size = 0;
 
     // Final drain after all blocks are compiled.
     // Aggressively resolves pending patches and epilogues before execution.
 #ifdef ENABLE_OPTIMIZER_V2
     opt2_drain_static_patches();
 #endif
+
+    // PC TABLE VERIFICATION PASS REMOVED.
+    //
+    // The verification pass was a band-aid for pre-populate/pass-2
+    // divergence.  It wrote $00 to flags for stale entries.  But
+    // flash_cache_pc_update_b17's guard (if current_flag != 0xFF return)
+    // prevented the dynamic JIT from ever updating a $00 flag — causing
+    // infinite recompile loops that filled the entire flash cache with
+    // copies of the same block.  The root cause (pre-populate divergence
+    // from nes_rom_data_copy) is fixed by removing pre-populate above.
 
     // Interpreted-flag repair pass REMOVED.
     //
@@ -1915,24 +1994,24 @@ static void sa_run_b2(void)
     //     undoes flash allocation — one-time ~7K cycle cost per PC.
     //   - Normal code PCs: compiles and writes RECOMPILED flag.
 
-    // Compaction sweep REMOVED — the original sweep only shrank
-    // sector_free_offset to the actual code end of the LAST block at
-    // max-stride positions.  This allowed the dynamic JIT (which runs
-    // after SA) to allocate new blocks + ROM data copies into the gap
-    // between the last block's actual end and the next max-stride
-    // position.  Those allocations AND-corrupted SA blocks at later
-    // max-stride positions (overlapping headers + code), causing
-    // dispatch-to-BRK crashes.
+    // Tight allocation: pass 2 allocates each block using its actual
+    // code_len from pass 1 (set via sa_block_alloc_size).  All PC table
+    // entries are pre-populated with tight addresses between passes, so
+    // forward branches resolve correctly via lookup_native_addr_safe.
+    // sector_free_offset values now reflect actual usage — no wasted gaps.
     //
-    // SA pass 2 max-stride sector_free_offsets are intentionally kept
-    // as-is.  The ~70% per-block waste is the price for address stability.
+    // Old max-stride approach (REMOVED) wasted ~70% of flash cache space
+    // because every block got CODE_SIZE+EPILOGUE allocation regardless of
+    // actual code size.  The compaction sweep attempted to reclaim the
+    // tail gap but caused AND-corruption when dynamic JIT allocated into
+    // the gaps.  Tight allocation eliminates the gaps entirely.
 
     // Signal that SA two-pass compile ran to completion.  The cache-
     // pressure auto-reset in check_recompile_triggers reads this to
     // avoid endlessly cycling: SA compile → dynamic fill → pressure
     // → soft reset → SA compile → ...
     {
-        extern uint8_t sa_compile_completed;
+        extern volatile uint8_t sa_compile_completed;
         sa_compile_completed = 1;
     }
 

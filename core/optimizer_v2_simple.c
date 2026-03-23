@@ -279,6 +279,10 @@ static void opt2_sweep_pending_patches_b2(void) {
         } else
 #endif
         {
+            // Guard: na must be in flash code range.  Writing $FF to flash
+            // is a no-op, so if na=$FFFF the branch activates but JMP stays
+            // $FFFF → crash.
+            if (na < 0x8001 || na >= 0xC000) { i++; continue; }
             // Old-style template: 3 flash writes (branch byte + JMP lo + JMP hi)
             flash_byte_program(pp_branch_addr[i], pp_bank[i], pp_patch_val[i]);
             flash_byte_program(pp_jmp_addr[i], pp_bank[i], na & 0xFF);
@@ -365,12 +369,21 @@ static void opt2_scan_and_patch_epilogues_b2(void) {
             (exit_pc >> 14) + BANK_PC_FLAGS,
             (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
         if (flag & RECOMPILED) continue;
+        // Guard: flag==0 is "uninitialized" — dispatch treats as not-compiled
+        // (BEQ not_recompiled) but the RECOMPILED bit-7 check misses it.
+        if (flag == 0) continue;
         
         // Read native address (peek from PC bank)
         uint16_t pc_addr = (exit_pc << 1) & FLASH_BANK_MASK;
         uint8_t pc_bank = (exit_pc >> 13) + BANK_PC;
         uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr])
                     | (peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr+1]) << 8);
+        
+        // Guard: native address must be in flash code range ($8001-$BFFF).
+        // $FFFF = erased/unwritten table entry; $8000 = partially-written
+        // (flag set but address not).  Writing $FF to SST39SF040 is a no-op,
+        // so xbank operands stay unpatched → JMP $FFFF crash.
+        if (na < 0x8001 || na >= 0xC000) continue;
         
         // Don't patch self-loops: the patchable epilogue's fast path is
         // unconditional (CLC+BCC always taken), so patching it to jump back
@@ -585,12 +598,16 @@ void opt2_full_epilogue_scan_b1(void) {
                 (exit_pc >> 14) + BANK_PC_FLAGS,
                 (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
             if (flag & RECOMPILED) continue;
+            if (flag == 0) continue;  // uninitialized (dispatch BEQ)
             
             // Read native address
             uint16_t pc_addr = (exit_pc << 1) & FLASH_BANK_MASK;
             uint8_t pc_bank = (exit_pc >> 13) + BANK_PC;
             uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr])
                         | (peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pc_addr+1]) << 8);
+            
+            // Guard: na must be in flash code range ($8001-$BFFF)
+            if (na < 0x8001 || na >= 0xC000) continue;
             
             // Don't patch self-loops
             if (na >= code_base && na < code_base + code_len) continue;
@@ -746,10 +763,12 @@ void opt2_full_branch_scan_b1(void) {
                             uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
                                         | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
                             
-                            flash_byte_program(code_base + p - 1, code_bank, 0);
-                            flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
-                            flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
-                            patches_applied++;
+                            if (na >= 0x8001 && na < 0xC000) {
+                                flash_byte_program(code_base + p - 1, code_bank, 0);
+                                flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
+                                flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
+                                patches_applied++;
+                            }
                         }
                         p += 20;
                         if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) goto done;
@@ -775,7 +794,8 @@ void opt2_full_branch_scan_b1(void) {
                             uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
                                         | (peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa+1]) << 8);
                             
-                            if (!(na >= code_base && na < code_base + code_len)) {
+                            if (na >= 0x8001 && na < 0xC000 &&
+                                !(na >= code_base && na < code_base + code_len)) {
                                 flash_byte_program(code_base + p - 2, code_bank, 0);
                                 flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
                                 flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);

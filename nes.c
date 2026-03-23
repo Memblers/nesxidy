@@ -107,6 +107,7 @@ extern void flash_cache_init_sectors(void);
 // Forward declarations (defined later, in BANK_RENDER segment)
 void render_video(void);
 void render_video_noblock(void);
+void render_video_finish(void);
 
 __zpage uint8_t last_nmi_frame;  // __zpage: ASM dispatch references it directly
 
@@ -268,7 +269,7 @@ void clear_recompile_signature_b21(void)
 static void check_recompile_triggers_b21(void)
 {
 	extern uint16_t sector_free_offset[];
-	extern uint8_t sa_compile_completed;
+	extern volatile uint8_t sa_compile_completed;
 
 	// --- Cache pressure auto-reset ---
 	// Count how many sectors are actually occupied (sector_free_offset > 0).
@@ -372,12 +373,16 @@ int main(void)
 
 	// --- Cold boot vs warm boot ---
 	// Warm boot: recompile signature was written by a reset trigger
-	// (cache pressure or Select+Start hold).  SA data is richer than
-	// at the previous boot.  Clear the signature and proceed with a
-	// full flash format (SA sectors protected) + two-pass static compile.
+	// (cache pressure or Select+Start hold).  SA data from the prior
+	// dynamic run is already in flash.  Clear the signature and set
+	// sa_do_compile so the SA bitmap is enriched with coverage data.
 	//
-	// Cold boot: no signature present.  Same path — flash_format() with
-	// SA sector protection preserves any SA data from prior sessions.
+	// Cold boot: no signature present.  SA walks code from reset/NMI
+	// vectors (populating the bitmap and idle detection).
+	//
+	// In both cases, ENABLE_STATIC_COMPILE causes sa_run() to perform
+	// the two-pass static compile after the walk.  Warm boots benefit
+	// from richer bitmap data discovered by the dynamic JIT.
 	{
 		extern uint8_t sa_do_compile;
 		uint8_t saved_bank = mapper_prg_bank;
@@ -399,6 +404,17 @@ int main(void)
 
 #ifdef ENABLE_STATIC_ANALYSIS
 	sa_run();
+#endif
+
+	// Belt-and-suspenders: ensure sa_compile_completed is set even if the
+	// write inside sa_run_b2 was optimised away or lost across bank switches.
+	// Must happen in the same compilation unit as check_recompile_triggers_b21
+	// to guarantee the same symbol address is used for write and read.
+#ifdef ENABLE_STATIC_COMPILE
+	{
+		extern volatile uint8_t sa_compile_completed;
+		sa_compile_completed = 1;
+	}
 #endif
 
 	interrupt_condition = 0;
@@ -578,6 +594,7 @@ int main(void)
 				// advances on the next VBlank, breaking the deadlock.
 				nmi_stuck_count = 0;
 				render_video();
+				render_video_finish();  // watchdog must block — needs nmiCounter to advance
 				cur_nmi = *(volatile uint8_t*)0x26;
 				if (cur_nmi != last_nmi_frame)
 				{
@@ -641,6 +658,7 @@ int main(void)
 			{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
 			render_video();
+			render_video_finish();  // TRACK_TICKS needs blocking sync
 			if (PPUCTRL_soft & 0x80)
 				nmi6502();
 			last_nmi_frame = *(volatile uint8_t*)0x26;
@@ -657,6 +675,7 @@ int main(void)
 				{
 					frame_time = clockticks6502 + FRAME_LENGTH;
 					render_video();
+					render_video_finish();  // TRACK_TICKS NMI backstop needs blocking sync
 					if (PPUCTRL_soft & 0x80)
 						nmi6502();
 					last_nmi_frame = *(volatile uint8_t*)0x26;
@@ -845,8 +864,17 @@ void render_video_noblock(void)
 	ppu_queue_index = 0;
 }
 
-// Flush the PPU queue AND block until VBlank completes.
-// Use sparingly — each call costs one real frame (~16.7ms).
+// Flush the PPU queue and request VBlank sync — NON-BLOCKING.
+//
+// Submits the PPU list via lnList() and sets up the NMI handler to
+// process it on the next VBlank.  Returns immediately so guest code
+// can continue executing while waiting for the NMI.
+//
+// The previous sync (if any) is completed first with a brief spin.
+// Because a full frame of guest code ran since the last render_video(),
+// the NMI has almost certainly already fired, so the spin exits in
+// 0-1 iterations (vs. the old design that blocked ~29,780 cycles
+// every frame).
 //
 // IMPORTANT: We avoid lnSync(0) entirely.  lnSync's blocking poll loop
 // at $C2AA waits for the NMI handler to clear nmiFlags bit 6.  On 2nd+
@@ -854,12 +882,46 @@ void render_video_noblock(void)
 // (NMI enable) was lost on the hardware, NMI never fires and lnSync
 // deadlocks.  Even writing lnPPUCTRL to $2000 beforehand doesn't help
 // if lnPPUCTRL itself was corrupted (bit 7 cleared).
-//
-// Instead, we manually set up the NMI handler state (like ln_fire_and_forget)
-// and poll nmiCounter with a timeout.  nmiCounter is incremented at the
-// very end of the NMI handler, guaranteeing the PPU list was consumed.
+
+// Track pending sync state: the nmiCounter value we're waiting to change.
+static uint8_t rv_sync_nmi;
+static uint8_t rv_sync_active = 0;
+
+// Complete a previously submitted render_video sync.
+// Called at the top of render_video() and from render_video_finish().
+static void rv_complete_pending(void)
+{
+	if (!rv_sync_active)
+		return;
+
+	// Brief spin — NMI should have already fired since guest code
+	// ran for a full frame between calls.  Timeout is a safety net.
+	uint16_t timeout = 0;
+	while (*(volatile uint8_t*)0x26 == rv_sync_nmi) {
+		if (++timeout > 50000) {
+			// Force NMI re-arm and break deadlock
+			*(volatile uint8_t*)0x25 &= ~0x44;
+			lnPPUCTRL |= 0x80;
+			IO8(0x2000) = lnPPUCTRL;
+			break;
+		}
+	}
+	rv_sync_active = 0;
+}
+
+// Callable from the main loop to ensure previous render completed
+// before accessing PPU state.  Lightweight — returns immediately
+// if no sync is pending.
+void render_video_finish(void)
+{
+	rv_complete_pending();
+}
+
 void render_video(void)
 {
+	// Finish any previous pending sync first.
+	rv_complete_pending();
+
 	ppu_queue[ppu_queue_index] = lfEnd;
 	lnList(ppu_queue);
 	ppu_queue_index = 0;
@@ -897,21 +959,15 @@ void render_video(void)
 	lnPPUCTRL |= 0x80;
 	IO8(0x2000) = lnPPUCTRL;
 
-	// Block until NMI handler completes (increments nmiCounter).
-	{
-		uint8_t prev_nmi = *(volatile uint8_t*)0x26;
-		uint16_t timeout = 0;
-		while (*(volatile uint8_t*)0x26 == prev_nmi) {
-			if (++timeout > 50000) {
-				*(volatile uint8_t*)0x25 &= ~0x44;
-				lnPPUCTRL |= 0x80;
-				IO8(0x2000) = lnPPUCTRL;
-				break;
-			}
-		}
-	}
+	// Record the nmiCounter we're waiting to change and return
+	// immediately.  The NMI handler will process the list during
+	// the next VBlank while guest code continues executing.
+	rv_sync_nmi = *(volatile uint8_t*)0x26;
+	rv_sync_active = 1;
 
-	// Signal software VBlank
+	// Signal software VBlank immediately — the guest can read $2002
+	// and see bit 7 set.  The PPU list will be consumed by the NMI
+	// handler before the next render_video() call.
 	guest_vblank_pending = 1;
 }
 

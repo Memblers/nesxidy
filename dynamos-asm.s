@@ -1541,9 +1541,16 @@ _sta_indy_handler:
 	inc _indy_ea + 1
 .nc:
 	
-	; Range check: I/O registers ($5000+) need full write6502
+	; Range check: addresses above safe RAM need full write6502.
+	; Exidy: $5000+ is I/O.  NES: $2000+ is PPU / APU / mapper.
+	; Writes to NES $8000-$FFFF trigger Mapper 30 bank register,
+	; corrupting the flash code bank mid-execution.
 	lda _indy_ea + 1
+	if PLATFORM_NES
+	cmp #$20
+	else
 	cmp #$50
+	endif
 	bcs .io_fallback
 	
 	; Translate high byte via address decoding table

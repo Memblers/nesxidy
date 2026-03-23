@@ -169,10 +169,10 @@ ir_ctx_t ir_ctx;                         // IR compilation context (~480B WRAM)
 // and starting IR node index so that post-lowering native offsets can be
 // computed and published.  Populated by sa_compile_one_block's compile loop,
 // consumed by ir_compute_instr_offsets (bank 1) after ir_lower.
-#define SA_IR_MAX_INSTRS 64
+#define SA_IR_MAX_INSTRS 96
 uint8_t sa_ir_instr_pc_offset[SA_IR_MAX_INSTRS];   // (guest_pc - entry_pc) & 0xFF
 uint8_t sa_ir_instr_first_node[SA_IR_MAX_INSTRS];  // ir_ctx.node_count at instruction start
-uint8_t sa_ir_instr_native_off[SA_IR_MAX_INSTRS];  // post-lowering native offset (fwd-filled from next)
+uint8_t sa_ir_instr_native_off[SA_IR_MAX_INSTRS];  // seeded with raw offset; overwritten by ir_compute_instr_offsets
 uint8_t sa_ir_instr_count;                         // number of instructions recorded
 uint8_t sa_ir_instrs_eliminated;                   // count of IR-eliminated instrs (forward-filled)
 #endif
@@ -195,7 +195,7 @@ __zpage uint8_t  idle_count   = 0;
 
 // Static compilation pass indicator:
 //   0 = dynamic (runtime) or pass-1 measure — forward branches use 21-byte patchable template
-//   2 = pass-2 emit — forward branches use lookup_entry_list() for direct branches
+//   2 = pass-2 emit — tight allocation, forward branches resolved via pre-populated PC tables
 uint8_t sa_compile_pass = 0;
 
 // Static-compile gate: set to 1 by the platform's main() when a warm-boot
@@ -207,7 +207,8 @@ uint8_t sa_do_compile = 0;
 
 // Set to 1 after SA two-pass compile completes.  Checked by the cache-
 // pressure auto-reset logic to suppress endless SA cycling.
-uint8_t sa_compile_completed = 0;
+// volatile: VBCC -O2 must not optimise away the cross-unit write/read.
+volatile uint8_t sa_compile_completed = 0;
 
 // Pass 2: forced exit PC for the current block being compiled.
 // Set by sa_run before calling sa_compile_one_block in pass 2.
@@ -607,7 +608,36 @@ batch_exit:  // case 1 (compile needed) jumps here
 		interpret_6502();
 		return;
 	} }
-	
+
+#ifdef ENABLE_STATIC_ANALYSIS
+	// Guard: don't compile addresses that the SA BFS walk did not
+	// identify as instruction boundaries.  When a compiled block's
+	// epilogue or NS_RTS produces a _pc that points into the middle
+	// of a multi-byte instruction, the dynamic compile would treat
+	// operand/data bytes as opcodes, programming garbage into flash
+	// that can never be corrected (SST39SF040 bits only clear).
+	// The cascading misalignment then publishes more bad mid-block
+	// PCs, eventually crashing on an illegal opcode.
+	//
+	// SA bitmap: bit CLEAR = known code, bit SET = unknown.
+	// Erased flash ($FF) = all bits set = all unknown.
+	{
+		extern uint8_t sa_code_bitmap[];
+		uint16_t bm_offset = (pc & 0x7FFF) >> 3;
+		uint8_t  bm_mask   = 1 << (pc & 7);
+		uint8_t  bm_val    = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS,
+		                     (uint16_t)&sa_code_bitmap[bm_offset]);
+		if (bm_val & bm_mask) {
+			// Address not in SA bitmap — not a known instruction head.
+			// Interpret instead of compiling to avoid flash corruption.
+			cache_interpret++;
+			bankswitch_prg(0);
+			interpret_6502();
+			return;
+		}
+	}
+#endif
+
 	// Compile directly to flash
 	cache_misses++;
 
@@ -727,6 +757,15 @@ batch_exit:  // case 1 (compile needed) jumps here
 	}
 #endif  /* ENABLE_IR */
 
+#ifdef ENABLE_IR
+	// Reset mid-block PC tracking for this block.
+	// Mirrors the SA path (sa_compile_one_block) so that
+	// ir_compute_instr_offsets + deferred publish cover ALL
+	// mid-block PCs — not just fences.
+	sa_ir_instr_count = 0;
+	uint8_t dyn_prev_node_count = 0;
+#endif
+
 #if OPT_BLOCK_METADATA
 	// Track branches for metadata
 	uint8_t branch_count = 0;
@@ -767,6 +806,23 @@ batch_exit:  // case 1 (compile needed) jumps here
 		// Note: doesn't account for page-crossing penalties (acceptable approx).
 		if (instr_len > 0)
 			block_cycles_acc += ticktable[read6502(pc_old)];
+#endif
+
+#ifdef ENABLE_IR
+		// Track this instruction for post-lowering mid-block PC publishing.
+		// Same tracking as the SA path — enables ir_compute_instr_offsets
+		// to map guest PCs to post-lowering native offsets.
+		if (ir_ctx.enabled && sa_ir_instr_count < SA_IR_MAX_INSTRS) {
+			sa_ir_instr_pc_offset[sa_ir_instr_count] = (uint8_t)(pc_old - entry_pc);
+			sa_ir_instr_first_node[sa_ir_instr_count] = dyn_prev_node_count;
+#ifdef ENABLE_PEEPHOLE
+			sa_ir_instr_native_off[sa_ir_instr_count] = recompile_instr_start;
+#else
+			sa_ir_instr_native_off[sa_ir_instr_count] = code_index_old;
+#endif
+			sa_ir_instr_count++;
+			dyn_prev_node_count = ir_ctx.node_count;
+		}
 #endif
 
 #if OPT_BLOCK_METADATA
@@ -1045,6 +1101,9 @@ batch_exit:  // case 1 (compile needed) jumps here
 			/* Rebuild block_ci_map from post-lowering fence offsets
 			 * so future intra-block branches use correct native positions. */
 			ir_rebuild_block_ci_map();
+			/* Compute post-lowering native offsets for ALL tracked
+			 * instructions so mid-block PCs can be published. */
+			ir_compute_instr_offsets();
 			/* Phase B: resolve deferred branch/JMP pending patches with
 			 * correct post-lowering flash addresses (while bank1 mapped). */
 			ir_resolve_deferred_patches();
@@ -1228,6 +1287,36 @@ batch_exit:  // case 1 (compile needed) jumps here
 #endif
 			}
 		}
+
+		// --- Publish ALL mid-block instruction PCs ---
+		// Same as the SA deferred section: sa_ir_instr_native_off[] holds
+		// post-lowering offsets (when IR succeeded) or raw pre-IR offsets
+		// (when IR overflowed mid-block).  Publishing these lets dispatch
+		// enter this block at any guest instruction — critical for NMI
+		// return (RTI) and JSR return (RTS) to mid-block PCs.
+		entry_pc = (uint16_t)cache_entry_pc_lo[0]
+		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
+		if (sa_ir_instr_count > 0) {
+			uint8_t _mi;
+			for (_mi = 0; _mi < sa_ir_instr_count; _mi++) {
+				uint8_t noff = sa_ir_instr_native_off[_mi];
+				if (noff == 0xFF) continue;
+				if (noff >= epilogue_start) continue;
+				// Skip entry PC (already published above at offset 0)
+				if (noff == 0 && sa_ir_instr_pc_offset[_mi] == 0) continue;
+				uint16_t mpc = entry_pc + sa_ir_instr_pc_offset[_mi];
+				// Skip PLP guard
+				if (noff < epilogue_start && cache_code[0][noff] == 0x28)
+					noff++;
+				if (noff >= epilogue_start) continue;
+				setup_and_update_pc(mpc, noff, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+				opt2_notify_block_compiled(mpc,
+					flash_code_address + BLOCK_HEADER_SIZE + noff,
+					flash_code_bank);
+#endif
+			}
+		}
 #endif  /* ENABLE_IR */
 
 		// Shrink sector allocation to actual size used (avoid wasting space)
@@ -1275,7 +1364,17 @@ batch_exit:  // case 1 (compile needed) jumps here
 		
 		result = dispatch_on_pc();
 		// dispatch_on_pc should return 0 (executed from flash)
-		
+
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+		// Restore PPU emphasis after dynamic compile — the IO8(0x2001)
+		// write at the start of this function dimmed the screen.  Without
+		// this restore, the emphasis bits persist until the next VBlank
+		// lnPPUMASK write, making every mid-frame compile visible as a
+		// one-frame dim.  Writing lnPPUMASK back immediately eliminates
+		// the visible flicker for post-SA runtime compiles.
+		IO8(0x2001) = lnPPUMASK;
+#endif
+
 		// Optimizer trigger check moved to main loop in exidy.c
 		return;
 	}

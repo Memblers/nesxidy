@@ -199,13 +199,13 @@ uint8_t sa_idle_count = 0;
 // Bank 2 section — BFS walker, header helpers, queue, opcode helpers
 // =========================================================================
 
-#ifdef PLATFORM_NES
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
 #pragma section bank19
 #else
 #pragma section bank24
 #endif
 
-// Forward declaration: sa_record_subroutine is in the bank24 section below.
+// Forward declaration: sa_record_subroutine is in the SA_CODE section below.
 // Called from sa_walk_b2 (same bank, direct call).
 // Must be declared AFTER the #pragma so vbcc binds it to the correct section.
 void sa_record_subroutine(uint16_t target);
@@ -872,7 +872,7 @@ static void sa_compile_b2(void)
 
 #endif // ENABLE_STATIC_COMPILE
 
-#ifdef PLATFORM_NES
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
 #pragma section bank19
 #else
 #pragma section bank24
@@ -1375,7 +1375,7 @@ static uint8_t sa_compile_one_block(void)
 
 #endif // ENABLE_STATIC_COMPILE
 
-#ifdef PLATFORM_NES
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
 #pragma section bank19
 #else
 #pragma section bank24
@@ -2042,7 +2042,7 @@ static void sa_run_b2(void)
 // fixed-bank trampoline (compilation speed is not critical).
 // Returns SA_SUB_CLEAN, SA_SUB_DIRTY, or SA_SUB_EMPTY (not found).
 // -------------------------------------------------------------------------
-#ifdef PLATFORM_NES
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
 #pragma section bank19
 #else
 #pragma section bank24
@@ -2103,7 +2103,7 @@ uint8_t sa_subroutine_lookup(uint16_t target_pc)
 // Runtime feedback: record an indirect-jump target discovered during
 // execution.  Called from the interpreter via fixed-bank trampoline.
 // -------------------------------------------------------------------------
-#ifdef PLATFORM_NES
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
 #pragma section bank19
 #else
 #pragma section bank24

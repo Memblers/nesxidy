@@ -83,6 +83,28 @@ uint16_t translate_address(uint16_t src_addr) {
         return nes_addr;
     }
     return 0;  // PPU ($2000-$3FFF) or unmapped — must interpret
+#elif defined(PLATFORM_MILLIPEDE)
+    // Millipede arcade memory map
+    // $0000-$03FF = RAM (1KB)
+    // $1000-$13FF = Video RAM + sprite RAM — force interpret for dirty tracking
+    // $0400-$0FFF, $1400-$3FFF = I/O (POKEY, inputs, palette — interpret)
+    // $4000-$7FFF = ROM (16KB, in bank23 flash)
+    if (src_addr < 0x0400) {
+        // RAM: $0000-$03FF → RAM_BASE
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr >= 0x4000 && src_addr < 0x8000) {
+        // ROM: $4000-$7FFF → ROM_NAME with offset
+        uint16_t nes_addr = (src_addr - ROM_OFFSET) + (uint16_t)ROM_NAME;
+        // If decoded address falls in switchable bank ($8000-$BFFF),
+        // it conflicts with flash cache — force interpretation.
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;
+        return nes_addr;
+    }
+    // Video RAM ($1000-$13FF), I/O, sprites, palette — must interpret
+    // (write side-effects: screen_ram_updated flag, palette_dirty, etc.)
+    return 0;
 #else
     // Exidy memory map
     uint8_t msb = src_addr >> 8;
@@ -721,7 +743,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 		ir_fence_target_count = 0;
 		uint16_t scan = entry_pc;
 		uint8_t scan_count = 0;  // limit scan to ~32 instructions
-		while (scan >= 0x8000 && scan < 0xFFFA && scan_count < 32) {
+		while (scan >= ROM_ADDR_MIN && scan <= ROM_ADDR_MAX && scan_count < 32) {
 			uint8_t sop = read6502(scan);
 			uint8_t mode = addrmodes[sop];
 			uint8_t slen;
@@ -3457,7 +3479,8 @@ static uint8_t recompile_opcode_b2_inner()
 					// Skip if we already INC'd that region in this block.
 					// NES: disabled — NES has no screen/char RAM at $40xx-$4Fxx.
 					// $40xx on NES = APU registers (no dirty tracking needed).
-#ifndef PLATFORM_NES
+					// Millipede: disabled — video RAM at $10xx-$13xx is interpreted.
+#if !defined(PLATFORM_NES) && !defined(PLATFORM_MILLIPEDE)
 					if (decoded_address)
 					{
 						uint8_t msb = encoded_address >> 8;

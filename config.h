@@ -1,4 +1,4 @@
-//#define DEBUG_AUDIO 1
+#define DEBUG_AUDIO 1
 
 //#define DEBUG_CPU_WRITE 1
 //#define DEBUG_CPU_READ 1
@@ -29,7 +29,7 @@
 
 // TRACK_TICKS: enable cycle-based frame timing.  Auto-enabled by
 // ENABLE_BLOCK_CYCLES.  Can also be enabled standalone for interpreter.
-#ifdef ENABLE_BLOCK_CYCLES
+#if defined(ENABLE_BLOCK_CYCLES) || defined(PLATFORM_MILLIPEDE)
 #define TRACK_TICKS
 #else
 //#define TRACK_TICKS	//disable this to stop tracking run clock cycles
@@ -37,7 +37,7 @@
 
 // Normal build (linking + optimizer enabled)
 #define ENABLE_LINKING
-//#define INTERPRETER_ONLY
+#define INTERPRETER_ONLY
 
 // Master optimizer toggle - comment out to disable entire optimizer system
 //#define ENABLE_OPTIMIZER   // DISABLED: v1 sector evacuation approach
@@ -179,12 +179,15 @@
 
 // Game selection — only ONE game should be active.
 // Exidy games: define here.  NES games: pass -DGAME_DONKEY_KONG on command line.
+// Millipede arcade: pass -DPLATFORM_MILLIPEDE -DGAME_MILLIPEDE_ARCADE on command line.
 #ifndef PLATFORM_NES
+#ifndef PLATFORM_MILLIPEDE
 #define GAME_SIDE_TRACK
 //#define GAME_TARG
 //#define GAME_TARG_TEST_ROM
 //#define GAME_SPECTAR
 //#define GAME_CPU_6502_TEST
+#endif
 #endif
 
 // --- Static analysis pass ---
@@ -252,6 +255,28 @@
 #ifdef GAME_CPU_6502_TEST
 #define ROM_ADDR_MIN  0x2800
 #define ROM_ADDR_MAX  0x3FFF
+#endif
+
+// --- Millipede arcade ---
+// Program ROM at $4000-$7FFF (16KB, 4 × 4KB EPROMs)
+// ROM mirrors at $8000-$FFFF (A14-A15 partial decode)
+#ifdef GAME_MILLIPEDE_ARCADE
+#define ROM_ADDR_MIN  0x4000
+#define ROM_ADDR_MAX  0x7FFF
+// Idle loop: main loop polls VBLANK and waits for IRQ
+// TODO: find exact idle PC from disassembly
+//#define GAME_IDLE_PC  0x0000
+#endif
+
+// Common Millipede config
+#ifdef PLATFORM_MILLIPEDE
+#ifndef ROM_ADDR_MIN
+#define ROM_ADDR_MIN  0x4000
+#define ROM_ADDR_MAX  0x7FFF
+#endif
+#ifndef ENABLE_BATCH_DISPATCH
+#define ENABLE_BATCH_DISPATCH
+#endif
 #endif
 
 // --- NES games ---

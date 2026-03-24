@@ -156,8 +156,12 @@ extern __zpage uint32_t  clockticks6502;
  * definitions in metrics.c, otherwise vbcc binds the symbol to
  * the section of the *first* declaration it sees (warning 371).
  * ================================================================ */
-/* BANK_METRICS = bank21 on both platforms */
+/* BANK_METRICS = bank20 for Millipede, bank21 for others */
+#ifdef PLATFORM_MILLIPEDE
+#pragma section bank20
+#else
 #pragma section bank21
+#endif
 void metrics_dump_sa_b2(void);
 void metrics_dump_runtime_b2(void);
 #pragma section default

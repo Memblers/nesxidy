@@ -8,6 +8,8 @@
 // All shared code includes "exidy.h" — this avoids changing those includes.
 #ifdef PLATFORM_NES
 #include "nes.h"
+#elif defined(PLATFORM_MILLIPEDE)
+#include "millipede.h"
 #else
 // ******************************************************************************************
 

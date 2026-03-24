@@ -6,6 +6,10 @@ GAME_NUMBER = 0
 PLATFORM_NES = 0
 	endif
 
+	ifnd PLATFORM_MILLIPEDE
+PLATFORM_MILLIPEDE = 0
+	endif
+
 	ifnd ENABLE_NATIVE_STACK
 ENABLE_NATIVE_STACK = 0
 	endif
@@ -48,6 +52,11 @@ _ROM_OFFSET = $2800
 _ROM_NAME = _rom_cpu6502test
 	endif
 
+	if (GAME_NUMBER == 5)
+_ROM_OFFSET = $4000
+_ROM_NAME = _rom_millipede
+	endif
+
 	if (GAME_NUMBER == 10)
 _ROM_OFFSET = $C000
 _ROM_NAME = _rom_nes_prg
@@ -65,10 +74,14 @@ BLOCK_SENTINEL	=	$AA
 ; --- Bank assignments: MUST match bank_map.h ---
 BANK_PC			=	19
 BANK_PC_FLAGS	=	27
+	if PLATFORM_MILLIPEDE
+BANK_RENDER		=	20
+	else
 	ifnd PLATFORM_NES
 BANK_RENDER		=	22
 	else
 BANK_RENDER		=	21
+	endif
 	endif
 
 BLOCK_CONFIG_BASE	=	250
@@ -92,8 +105,13 @@ target_bank:	reserve 1
 _RAM_BASE:	reserve $800		; Full 2 KB NES internal RAM
 _CHARACTER_RAM_BASE = _RAM_BASE + $400	; alias — keeps C references valid
 	else
+	if PLATFORM_MILLIPEDE
+_RAM_BASE:	reserve $400
+_CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
+	else
 _RAM_BASE:	reserve $400
 _CHARACTER_RAM_BASE:	reserve $800
+	endif
 	endif
 	section "nesram"
 	align 8
@@ -174,6 +192,33 @@ _rom_spectar:
 	align 8
 _rom_cpu6502test:
 	incbin "cpu_6502_test.bin"
+	endif
+
+;=======================================================
+; Millipede arcade ROM data
+; Program ROM (16KB, 4 × 4KB) in bank23
+; Character ROM (4KB, 2 × 2KB planes) + color PROM in bank24
+;=======================================================
+
+	if (GAME_NUMBER == 5)
+	section "bank23"
+	global _rom_millipede
+	align 8
+_rom_millipede:
+	incbin "roms\milliped\136013-104.mn1"	; $4000-$4FFF
+	incbin "roms\milliped\136013-103.l1"	; $5000-$5FFF
+	incbin "roms\milliped\136013-102.jk1"	; $6000-$6FFF
+	incbin "roms\milliped\136013-101.h1"	; $7000-$7FFF
+
+	section "bank24"
+	global _chr_millipede, _color_prom_millipede
+	align 8
+_chr_millipede:
+	incbin "roms\milliped\136013-107.r5"	; character plane 0 (2KB)
+	incbin "roms\milliped\136013-106.p5"	; character plane 1 (2KB)
+	align 8
+_color_prom_millipede:
+	incbin "roms\milliped\136001-213.e7"	; color PROM (256 bytes)
 	endif
 
 ;=======================================================
@@ -312,6 +357,87 @@ _nmi_yield_hook:
 	sta _nmi_yield			; set bit 7 — backward branch stubs see BMI
 	rts
 
+;=======================================================
+	section "data"
+	global _nmi_sp_trampoline, _nmi_sp_restore
+	global _lnPush_safe
+;-------------------------------------------------------
+; NMI sp-guard trampolines (WRAM)
+;
+; The lazyNES NMI handler (___nmi) uses  ASL $20  to process nfOamFull
+; flag bits.  ZP $20-$21 is also the vbcc software stack pointer (sp).
+; Every NMI fires ~60 Hz and shifts sp's low byte, corrupting it.
+;
+; Fix: a post-build patch redirects the NMI vector to this entry
+; trampoline, which saves sp to WRAM, loads the real nfOamFull shadow
+; into $20, then jumps to the original NMI handler.  A second patch
+; replaces the NMI handler's final TAX;PLA;RTI with JMP _nmi_sp_restore,
+; which saves the updated nfOamFull, restores sp, and does RTI.
+;
+; Entry trampoline — replaces NMI vector target
+_nmi_sp_trampoline:
+	pha					; save A  (NMI handler expects it unsaved)
+	lda $20
+	sta _nmi_sp_save		; save sp lo
+	lda $21
+	sta _nmi_sp_save+1		; save sp hi
+	lda _nmi_nfOamFull		; load real nfOamFull shadow
+	sta $20				; NMI handler will see correct flag bits
+	pla					; restore A
+	jmp $C192			; jump to original ___nmi (PHA, TXA, PHA…)
+
+; Exit trampoline — replaces TAX;PLA;RTI at end of ___nmi
+; On entry: A = value from the PLA that was before TAX in the original.
+;           The hardware stack still has the original A value to PLA.
+_nmi_sp_restore:
+	tax					; finish X restore
+	pla					; restore original A
+	; Now A/X/Y are the interrupted code's registers.
+	; Save updated nfOamFull and restore sp, using the hardware stack.
+	pha					; save A temporarily
+	lda $20
+	sta _nmi_nfOamFull		; save modified nfOamFull back to shadow
+	lda _nmi_sp_save
+	sta $20				; restore sp lo
+	lda _nmi_sp_save+1
+	sta $21				; restore sp hi
+	pla					; restore A
+	rti
+
+;-------------------------------------------------------
+; lnPush_safe — sp-safe wrapper for lazyNES lnPush
+;
+; lnPush ($C23B) also uses ASL $20 for nfOamFull processing.
+; This wrapper saves sp, loads the real nfOamFull, calls lnPush,
+; saves the updated nfOamFull, and restores sp.
+; vbcc arguments (r0-r5) are untouched.
+;
+	global _lnPush
+_lnPush_safe:
+	pha					; save A
+	lda $20
+	sta _lnpush_sp_save		; save sp lo
+	lda $21
+	sta _lnpush_sp_save+1	; save sp hi
+	lda _nmi_nfOamFull
+	sta $20				; lnPush expects nfOamFull at $20
+	pla					; restore A
+	jsr _lnPush			; call real lnPush
+	pha					; save A
+	lda $20
+	sta _nmi_nfOamFull		; save updated nfOamFull
+	lda _lnpush_sp_save
+	sta $20				; restore sp lo
+	lda _lnpush_sp_save+1
+	sta $21				; restore sp hi
+	pla					; restore A
+	rts
+
+; Data: shadow variables for the sp guard
+_nmi_sp_save:		ds 2	; sp save area for NMI trampoline
+_nmi_nfOamFull:		db 0	; real nfOamFull shadow (starts 0 = no flags)
+_lnpush_sp_save:	ds 2	; sp save area for lnPush wrapper
+
 ;=======================================================	
 	section "data"
 	global _xbank_trampoline, _xbank_addr
@@ -342,7 +468,33 @@ _xbank_addr = * + 1
 	zpage addr_lo, addr_hi, target_bank, temp, temp2
 	zpage _clockticks6502
 ;-------------------------------------------------------
-_dispatch_on_pc:	; D0-D13 - address in bank   pc_flags
+_dispatch_on_pc:
+	if PLATFORM_MILLIPEDE
+	; --- Millipede ROM mirror guard ---
+	; Real hardware: A14 chip-select ⇒ ROM at $4000-$7FFF and $C000-$FFFF.
+	; $8000-$BFFF is NOT ROM (A14=0).  Canonicalize mirrors before the
+	; bank-number math, otherwise (pc>>14)+BANK_PC_FLAGS hits live code/data
+	; banks (BANK_IR_OPT, BANK_MILLIPEDE_CHR) instead of PC tables → crash.
+	lda _pc+1
+	cmp #$C0
+	bcc .mp_no_c_mirror
+	; $C0-$FF: ROM mirror → fold to $40-$7F
+	and #$3F
+	ora #$40
+	sta _pc+1
+	bne .mp_dispatch		; always taken (result $40-$7F)
+.mp_no_c_mirror:
+	cmp #$40
+	bcc .mp_interpret		; $00-$3F: RAM / IO → interpret
+	cmp #$80
+	bcc .mp_dispatch		; $40-$7F: canonical ROM range
+.mp_interpret:
+	lda #2					; return "interpret"
+	rts
+.mp_dispatch:
+	endif
+
+	; D0-D13 - address in bank   pc_flags
 	lda #0
 	sta temp		; INIT temp to 0 (required: ROL temp uses residual value)
 	lda _pc+1		; D14-D15 - bank number
@@ -632,12 +784,17 @@ not_recompiled:
 	lda _pc+1                    ; guest PC high byte
 	cmp #(_ROM_OFFSET/256)       ; < ROM_ADDR_MIN high byte?
 	bcc .out_of_range
+	if PLATFORM_MILLIPEDE
+	cmp #$80                     ; >= $8000? (Millipede: ROM_ADDR_MAX = $7FFF)
+	bcs .out_of_range
+	else
 	if PLATFORM_NES == 0
 	cmp #$40                     ; >= $4000? (all Exidy: ROM_ADDR_MAX = $3FFF)
 	bcs .out_of_range
 	else
 	; NES: ROM_ADDR_MAX = $FFFF, only lower bound matters.
 	; (vector table $FFFA-$FFFF is harmless to compile — just data.)
+	endif
 	endif
 	lda #1 ; needs recompile
 	rts
@@ -1129,7 +1286,7 @@ _screen_diff_build_list:
 	section "bss"
 	if !(PLATFORM_NES)
 _screen_shadow:		reserve $400	; 1024 bytes
-_vram_update_list:	reserve 97	; VRAM_UPDATE_MAX + 1 (terminator)
+_vram_update_list:	reserve 256	; tiles (96) + attr diff + palette diff + terminator
 	endif
 	section "data"
 

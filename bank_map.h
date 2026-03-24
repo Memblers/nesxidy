@@ -56,6 +56,8 @@
 #define BANK_EMIT               1       /* Emit helpers, optimizer V2 */
 #ifdef PLATFORM_NES
 #define BANK_IR_OPT             28      /* NES: dead flag-table bank $4000-$7FFF (no NES guest code there) */
+#elif defined(PLATFORM_MILLIPEDE)
+#define BANK_IR_OPT             29      /* Millipede: dead flag-table bank $8000-$BFFF (ROM mirror, not compiled) */
 #else
 #define BANK_IR_OPT             29      /* Exidy: dead flag-table bank $8000-$BFFF (no Exidy guest code there) */
 #endif
@@ -77,6 +79,9 @@
 #ifdef PLATFORM_NES
 #define BANK_SA_CODE            19      /* NES: $0000-$1FFF = RAM, no code here */
 #define BANK_INIT_CODE          19      /* NES: shares with SA (init runs once at boot) */
+#elif defined(PLATFORM_MILLIPEDE)
+#define BANK_SA_CODE            19      /* Millipede: $0000-$1FFF = RAM/IO, no code here */
+#define BANK_INIT_CODE          19      /* Millipede: shares with SA */
 #else
 #define BANK_SA_CODE            24      /* Exidy: $A000-$BFFF dead */
 #define BANK_INIT_CODE          25      /* Exidy: $C000-$DFFF dead */
@@ -100,17 +105,25 @@
  */
 #ifdef PLATFORM_NES
 #define BANK_RENDER             21
+#elif defined(PLATFORM_MILLIPEDE)
+#define BANK_RENDER             20      /* Millipede: $2000-$3FFF = I/O, dead for code */
 #else
 #define BANK_RENDER             22
 #endif
 
 /*
  * BANK_METRICS: metrics dump functions (metrics_dump_sa_b2,
- *               metrics_dump_runtime_b2).  Bank 21 on both platforms:
- *   NES:   same as BANK_RENDER (bank21, $4000-$5FFF dead)
- *   Exidy: separate from BANK_RENDER — $4000-$5FFF PC table is dead
+ *               metrics_dump_runtime_b2).
+ *   NES:       bank 21, same as BANK_RENDER ($4000-$5FFF dead)
+ *   Exidy:     bank 21 ($4000-$5FFF PC table dead for Exidy)
+ *   Millipede: bank 20, same as BANK_RENDER ($2000-$3FFF dead)
+ *              Bank 21 is LIVE for Millipede ($4000-$5FFF = ROM code)
  */
+#ifdef PLATFORM_MILLIPEDE
+#define BANK_METRICS            20      /* shares with BANK_RENDER */
+#else
 #define BANK_METRICS            21
+#endif
 
 /*
  * BANK_PLATFORM_ROM: platform-specific guest ROM data (.incbin files).
@@ -136,6 +149,16 @@
 #define BANK_NES_PRG_LO        20
 #define BANK_NES_PRG_HI        21      /* same as BANK_RENDER for NES */
 #define BANK_NES_CHR           23
+#endif
+
+/*
+ * Millipede arcade ROM banks:
+ *   BANK_PLATFORM_ROM (23): 16KB program ROM (fills the whole bank)
+ *   BANK_MILLIPEDE_CHR (24): character ROM (4KB) + color PROM (256B)
+ *   Bank 24 = PC $A000-$BFFF, dead for Millipede (ROM mirror, not compiled)
+ */
+#ifdef PLATFORM_MILLIPEDE
+#define BANK_MILLIPEDE_CHR     24
 #endif
 
 /* ---- Aliases for existing code ---- */

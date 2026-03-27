@@ -93,6 +93,7 @@ extern void irq6502(void);
 extern void hookexternal(void *funcptr);
 __zpage extern uint32_t clockticks6502;
 __zpage extern uint8_t status;
+__zpage extern uint16_t pc;
 
 __zpage extern uint16_t decoded_address;
 __zpage extern uint16_t encoded_address;

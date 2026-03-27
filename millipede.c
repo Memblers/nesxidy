@@ -91,7 +91,11 @@ static uint8_t attr_shadow[64];   // previous frame's NES attribute table
 static uint8_t pal_shadow[32];    // previous frame's NES palette
 static uint8_t nes_pal[32];       // current NES palette (built from palette_ram)
 
-// IRQ acknowledge flag
+// VBlank-pending latch for demand-driven IRQ delivery.
+// Set to 1 on each NES VBlank; cleared when the IRQ is actually delivered
+// to the guest (only when pc == GAME_IDLE_PC, i.e. the wait loop).
+// This ensures exactly one IRQ per game frame — no re-entrant IRQs
+// during slow game logic that would overflow vblank_flag ($9A) past 8.
 __zpage uint8_t irq_acked = 0;
 
 // Trackball simulation counters
@@ -572,17 +576,18 @@ void write6502(uint16_t address, uint8_t value)
 		return;
 	}
 
-	// IRQ acknowledge: $2600 write
+	// IRQ acknowledge: $2600 write — clear VBLANK flag so IN0 ($2000)
+	// no longer reports VBLANK active.  IRQ delivery is gated on
+	// pc == GAME_IDLE_PC, not on this ack.
 	if (address == 0x2600)
 	{
-		irq_acked = 1;
 		interrupt_condition &= ~FLAG_MILLIPEDE_IRQ;
 		return;
 	}
 
-	// Watchdog: $2680
+	// Watchdog: $2680 — ignored (no watchdog emulation)
 	if (address == 0x2680)
-		return;  // ignore watchdog
+		return;
 
 	// ROM area writes are ignored
 }
@@ -874,7 +879,10 @@ int main(void)
 			uint8_t cur_nmi = *(volatile uint8_t*)0x26;
 			if (cur_nmi != last_nmi_frame)
 			{
-				interrupt_condition |= FLAG_MILLIPEDE_IRQ;
+				// Latch: a VBlank occurred, IRQ delivery is pending.
+				// Actual delivery is deferred until the guest reaches
+				// the wait loop (pc == GAME_IDLE_PC) — see below.
+				irq_acked = 1;
 #if defined(ENABLE_OPTIMIZER_V2) && !defined(PLATFORM_MILLIPEDE)
 				opt2_frame_tick();
 #endif
@@ -884,6 +892,28 @@ int main(void)
 				nes_gamepad_refresh();
 				render_video();
 				last_nmi_frame = *(volatile uint8_t*)0x26;
+			}
+			// Deliver IRQ only when:
+			//  1. A VBlank has occurred (irq_acked latch)
+			//  2. Guest is at the VBLANK wait loop (pc == GAME_IDLE_PC)
+			//  3. Guest interrupts are enabled (I flag clear)
+			//  4. Guest vblank_flag ($9A) is 0 — previous IRQ consumed
+			// On real hardware the game completes each frame within one
+			// 16 ms VBlank period, so only one IRQ fires per frame.
+			// In DynaMoS the guest runs ~10× slower; without this gate,
+			// re-entrant IRQs during game logic overflow $9A past 8,
+			// triggering the watchdog spin at $7672.
+			// The $9A==0 check is critical because after RTI→$4026 the
+			// batch dispatch immediately breaks on the idle PC before
+			// the guest executes LSR $9A.  Without it, back-to-back
+			// IRQs fire whenever multiple VBlanks elapsed during one
+			// game frame.
+			if (irq_acked && pc == GAME_IDLE_PC
+			    && !(status & FLAG_INTERRUPT)
+			    && RAM_BASE[0x9A] == 0)
+			{
+				irq_acked = 0;
+				interrupt_condition |= FLAG_MILLIPEDE_IRQ;
 			}
 		}
 #else

@@ -607,9 +607,9 @@ void ir_resolve_direct_branches(void)
             int16_t branch_from = (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + p + 2);
             int16_t native_offset = (int16_t)target_native - branch_from;
 
-#ifdef PLATFORM_NES
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
             if (intra_block && native_offset < 0) {
-                /* VBlank-triggered backward branch stub for NES.
+                /* VBlank-triggered backward branch stub.
                  * Intra-block backward branches can create tight loops that
                  * never return to the dispatch loop, blocking NMI and PPU
                  * updates.  The lazyNES NMI hook sets nmi_yield bit 7 on

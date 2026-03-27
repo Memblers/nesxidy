@@ -1,4 +1,4 @@
-#define DEBUG_AUDIO 1
+//#define DEBUG_AUDIO 1
 
 //#define DEBUG_CPU_WRITE 1
 //#define DEBUG_CPU_READ 1
@@ -29,7 +29,11 @@
 
 // TRACK_TICKS: enable cycle-based frame timing.  Auto-enabled by
 // ENABLE_BLOCK_CYCLES.  Can also be enabled standalone for interpreter.
-#if defined(ENABLE_BLOCK_CYCLES) || defined(PLATFORM_MILLIPEDE)
+// NOTE: Millipede uses NMI-based IRQ timing (not tick-based) because
+// the emulator is far too slow for one-IRQ-per-tick-frame to work.
+// IRQ delivery is gated on irq_acked so the game only receives a new
+// IRQ after acknowledging the previous one — rate adapts to emu speed.
+#if defined(ENABLE_BLOCK_CYCLES)
 #define TRACK_TICKS
 #else
 //#define TRACK_TICKS	//disable this to stop tracking run clock cycles
@@ -37,7 +41,7 @@
 
 // Normal build (linking + optimizer enabled)
 #define ENABLE_LINKING
-#define INTERPRETER_ONLY
+//#define INTERPRETER_ONLY
 
 // Master optimizer toggle - comment out to disable entire optimizer system
 //#define ENABLE_OPTIMIZER   // DISABLED: v1 sector evacuation approach
@@ -263,9 +267,8 @@
 #ifdef GAME_MILLIPEDE_ARCADE
 #define ROM_ADDR_MIN  0x4000
 #define ROM_ADDR_MAX  0x7FFF
-// Idle loop: main loop polls VBLANK and waits for IRQ
-// TODO: find exact idle PC from disassembly
-//#define GAME_IDLE_PC  0x0000
+// Idle loop: wait_vblank at $4026 spins on LSR $9A / BCC $4026
+#define GAME_IDLE_PC  0x4026
 #endif
 
 // Common Millipede config

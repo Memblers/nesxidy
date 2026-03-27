@@ -338,7 +338,16 @@ _cross_bank_dispatch:
 	sta _nmi_yield			; clear VBlank yield flag (prevent re-yield)
 	ldx _dispatch_sp
 	txs
+	if PLATFORM_MILLIPEDE
+	; Millipede delivers guest IRQ via C code (irq6502).
+	; Must return to C so the main loop can fire the IRQ.
+	; Without this, the yield → dispatch_on_pc loop never
+	; reaches the C IRQ check, so the VBLANK IRQ never fires
+	; and the game hangs at the wait_vblank spin ($4026).
+	jmp _flash_dispatch_return_status_saved
+	else
 	jmp _dispatch_on_pc	; re-dispatch _pc without C round-trip
+	endif
 
 ;=======================================================	
 	section "data"
@@ -1853,8 +1862,13 @@ _trigger_soft_reset:
 SA_CODE_BANK = 19
 IR_OPT_BANK = 28
 	else
+	if PLATFORM_MILLIPEDE
+SA_CODE_BANK = 19
+IR_OPT_BANK = 29
+	else
 SA_CODE_BANK = 24
 IR_OPT_BANK = 26
+	endif
 	endif
 
 _sa_record_subroutine_runtime:

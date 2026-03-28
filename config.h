@@ -143,6 +143,17 @@
 // dispatch.  Requires ENABLE_STATIC_ANALYSIS for the subroutine table.
 #ifdef ENABLE_STATIC_ANALYSIS
 #define ENABLE_NATIVE_JSR
+
+// Inline tiny subroutines — instead of emitting a 36-byte NJSR template for
+// stack-clean subroutines whose body is very short (≤INLINE_TINY_MAX_BODY
+// translated bytes), copy the subroutine's instructions directly into the
+// calling block.  The trailing RTS is omitted.  Saves flash space and
+// eliminates the NJSR trampoline dispatch overhead entirely.
+// Only applies to straight-line subroutines (no branches, no JSR, no
+// indirect addressing, no stack ops).  Requires ENABLE_NATIVE_JSR.
+#define ENABLE_INLINE_TINY_SUB
+#define INLINE_TINY_MAX_BODY  32   // max translated bytes (before RTS)
+
 #endif
 
 // Native stack mode — use the real NES hardware stack page ($0100-$01FF)

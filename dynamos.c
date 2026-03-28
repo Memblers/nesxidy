@@ -174,10 +174,11 @@ __zpage uint8_t cache_index = BLOCK_COUNT-1;
 __zpage uint8_t next_new_cache = 0;
 __zpage uint8_t matched = 0;
 __zpage uint8_t decimal_mode = 0;
-__zpage uint8_t block_has_jsr = 0;  // set when JSR/NJSR compiled in current block
+__zpage uint8_t block_has_jsr = 0;  // bit 0: any JSR in block, bit 1: dirty (non-NJSR) JSR
 __zpage uint8_t nmi_yield = 0;          // VBlank yield flag (bit 7 set by NMI hook)
 static uint8_t block_dirty_screen = 0;  // set after first INC screen_ram_updated in block
 static uint8_t block_dirty_char = 0;    // set after first INC character_ram_updated in block
+static uint8_t exit_pc_lo_safe, exit_pc_hi_safe;  // WRAM backup: survives vbcc register reuse
 #ifdef ENABLE_PEEPHOLE
 volatile uint8_t block_flags_saved = 0;   // peephole: trailing PLP deferred from previous template (volatile: prevent vbcc dead-code elimination)
 uint8_t block_has_skip = 0;     // peephole: set when any template in block used skip=1
@@ -964,6 +965,12 @@ batch_exit:  // case 1 (compile needed) jumps here
 	{
 		// Exit PC is the current pc value (instruction to interpret or continue from)
 		uint16_t exit_pc = pc;
+		// WRAM backup: vbcc -O2 stores exit_pc in a ZP register pair
+		// that gets reused during the IR optimise/lower/patch passes
+		// below (~6 cross-bank calls).  Same class of bug as entry_pc
+		// corruption (see reload at epilogue header write).
+		exit_pc_lo_safe = (uint8_t)exit_pc;
+		exit_pc_hi_safe = (uint8_t)(exit_pc >> 8);
 
 #ifdef ENABLE_PEEPHOLE
 		// Flush deferred PLP from peephole before epilogue
@@ -1153,6 +1160,13 @@ batch_exit:  // case 1 (compile needed) jumps here
 		// --- Build epilogue into cache_code buffer, then write header + all code to flash ---
 		uint8_t epilogue_start = code_index;
 
+		// IMPORTANT: Reload exit_pc from WRAM backup.  VBCC -O2 stores
+		// the local 'exit_pc' in a ZP register pair that is reused for
+		// temporaries during the IR optimise/lower/patch passes above,
+		// corrupting the value.  Same class of bug as entry_pc (below).
+		exit_pc = (uint16_t)exit_pc_lo_safe
+		        | ((uint16_t)exit_pc_hi_safe << 8);
+
 #ifdef ENABLE_PATCHABLE_EPILOGUE
 		// Patchable epilogue (21 bytes) — built in buffer, written by loop below
 		cache_code[0][code_index++] = 0x08;  // PHP
@@ -1226,8 +1240,8 @@ batch_exit:  // case 1 (compile needed) jumps here
 		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
 		flash_byte_program(flash_code_address + 0, flash_code_bank, (uint8_t)entry_pc);        // entry_pc lo
 		flash_byte_program(flash_code_address + 1, flash_code_bank, (uint8_t)(entry_pc >> 8));  // entry_pc hi
-		flash_byte_program(flash_code_address + 2, flash_code_bank, (uint8_t)exit_pc);          // exit_pc lo
-		flash_byte_program(flash_code_address + 3, flash_code_bank, (uint8_t)(exit_pc >> 8));   // exit_pc hi
+		flash_byte_program(flash_code_address + 2, flash_code_bank, exit_pc_lo_safe);           // exit_pc lo (from WRAM backup)
+		flash_byte_program(flash_code_address + 3, flash_code_bank, exit_pc_hi_safe);           // exit_pc hi (from WRAM backup)
 		flash_byte_program(flash_code_address + 4, flash_code_bank, code_index);                // code_len (code+epilogue)
 		flash_byte_program(flash_code_address + 5, flash_code_bank, epilogue_start);            // epilogue_offset
 #ifdef ENABLE_BLOCK_CYCLES
@@ -1627,7 +1641,7 @@ static uint8_t invert_branch_b17(uint8_t opcode) {
 //============================================================================================================
 static uint8_t try_intra_block_branch_b17(uint16_t target_pc, uint8_t branch_opcode)
 {
-	if (block_has_jsr)
+	if (block_has_jsr & 2)
 		return 0;
 	
 #ifdef ENABLE_PEEPHOLE
@@ -2392,6 +2406,175 @@ static uint8_t ir_dirty_flag_bytes;
 
 #pragma section bank2
 
+#ifdef ENABLE_INLINE_TINY_SUB
+// -------------------------------------------------------------------------
+// try_inline_tiny_sub — attempt to inline a stack-clean subroutine body.
+//
+// Scans from 'target' to RTS, translating each instruction just as the
+// main compiler would.  If the body fits within INLINE_TINY_MAX_BODY
+// translated bytes and every instruction is compilable, emits the
+// translated bytes directly into code_ptr[code_index..] and returns the
+// number of translated bytes.  Returns 0 if the subroutine can't be
+// inlined (too long, contains branches, JSR, indirect modes, etc.).
+// The trailing RTS is NOT emitted.
+// -------------------------------------------------------------------------
+static uint8_t try_inline_tiny_sub(uint16_t target, uint8_t *code_ptr)
+{
+	uint8_t ci_save = code_index;  // rollback point
+	uint16_t cur = target;
+	uint8_t steps = 0;
+
+	while (steps < 32)
+	{
+		steps++;
+		uint8_t op = read6502(cur);
+
+		// RTS — end of subroutine body (don't emit it)
+		if (op == 0x60)
+			break;
+
+		// Reject: any control flow or unpredictable instruction
+		if (op == 0x20 || op == 0x4C || op == 0x6C || // JSR, JMP abs, JMP ind
+		    op == 0x40 || op == 0x00 ||                // RTI, BRK
+		    op == 0xBA || op == 0x9A ||                // TSX, TXS
+		    op == 0x48 || op == 0x68 ||                // PHA, PLA
+		    op == 0x08 || op == 0x28 ||                // PHP, PLP
+		    op == 0x58 || op == 0x78 ||                // CLI, SEI
+		    op == 0xF8 ||                              // SED
+		    op == 0x96 || op == 0x94)                   // STX ZP,Y / STY ZP,X
+		{
+			code_index = ci_save;
+			return 0;
+		}
+
+		uint8_t mode = addrmodes[op];
+
+		// Reject: branches, indirect modes
+		if (mode == rel || mode == indx || mode == indy || mode == ind)
+		{
+			code_index = ci_save;
+			return 0;
+		}
+
+		// Check space: worst case is ZP->ABS expansion (2->3 bytes)
+		if ((code_index + 3 + EPILOGUE_SIZE + 6) >= CODE_SIZE)
+		{
+			code_index = ci_save;
+			return 0;
+		}
+
+		switch (mode)
+		{
+			case imp:
+			case acc:
+			{
+				// NOP: skip entirely (no emit)
+				if (op == 0xEA) {
+					cur += 1;
+					continue;
+				}
+				code_ptr[code_index] = op;
+				cur += 1;
+				code_index += 1;
+				break;
+			}
+
+			case imm:
+			{
+				code_ptr[code_index] = op;
+				code_ptr[code_index + 1] = read6502(cur + 1);
+				cur += 2;
+				code_index += 2;
+				break;
+			}
+
+			case zp:
+			{
+				// ZP -> ABS: opcode |= 0x08, address = zp + &RAM_BASE
+				code_ptr[code_index] = op | 0x08;
+				uint8_t zp_addr = read6502(cur + 1);
+				uint16_t address = (uint16_t)zp_addr + (uint16_t)&RAM_BASE[0];
+				code_ptr[code_index + 1] = (uint8_t)address;
+				code_ptr[code_index + 2] = (uint8_t)(address >> 8);
+				cur += 2;
+				code_index += 3;
+				break;
+			}
+
+			case zpx:
+			case zpy:
+			{
+#ifdef ENABLE_ZP_INDEX_WRAP
+				code_index = ci_save;
+				return 0;
+#else
+				// ZPX/ZPY -> ABSX/ABSY: opcode |= 0x08
+				code_ptr[code_index] = op | 0x08;
+				uint16_t address = read6502(cur + 1);
+				address += (uint16_t)&RAM_BASE[0];
+				code_ptr[code_index + 1] = (uint8_t)address;
+				code_ptr[code_index + 2] = (uint8_t)(address >> 8);
+				cur += 2;
+				code_index += 3;
+				break;
+#endif
+			}
+
+			case abso:
+			case absx:
+			case absy:
+			{
+				uint16_t encoded = (uint16_t)read6502(cur + 1)
+				                 | ((uint16_t)read6502(cur + 2) << 8);
+				uint16_t decoded = translate_address(encoded);
+				if (!decoded)
+				{
+#ifdef PLATFORM_NES
+					// NES ROM constant-fold: non-indexed abs read -> immediate
+					if (encoded >= 0x8000 && mode == abso) {
+						uint8_t imm_op = nes_abs_to_imm(op);
+						if (imm_op) {
+							extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+							code_ptr[code_index] = imm_op;
+							code_ptr[code_index + 1] = peek_bank_byte(
+								BANK_NES_PRG_LO,
+								(uint16_t)&ROM_NAME[encoded & 0x3FFF]);
+							cur += 3;
+							code_index += 2;
+							break;
+						}
+					}
+#endif
+					// Can't translate -- reject
+					code_index = ci_save;
+					return 0;
+				}
+				code_ptr[code_index] = op;
+				code_ptr[code_index + 1] = (uint8_t)decoded;
+				code_ptr[code_index + 2] = (uint8_t)(decoded >> 8);
+				cur += 3;
+				code_index += 3;
+				break;
+			}
+
+			default:
+				// Unknown mode -- reject
+				code_index = ci_save;
+				return 0;
+		}
+
+		// Check translated body size
+		if ((uint8_t)(code_index - ci_save) > INLINE_TINY_MAX_BODY)
+		{
+			code_index = ci_save;
+			return 0;
+		}
+	}
+
+	return (uint8_t)(code_index - ci_save);
+}
+#endif /* ENABLE_INLINE_TINY_SUB */
+
 static uint8_t invert_branch(uint8_t opcode) {
 	return opcode ^ 0x20;
 }
@@ -2858,8 +3041,13 @@ static uint8_t recompile_opcode_b2_inner()
 				 * NMI safety: ir_lower.c emits a BIT nmi_yield / BMI
 				 * backward-branch stub that yields to the dispatch loop
 				 * when VBlank fires, guaranteeing NMI processing. */
-				if (!block_has_jsr)
+				if (!(block_has_jsr & 2))
 				{
+					/* Stack-clean JSRs (NJSR) are safe: the trampoline
+					 * handles VBlank between subroutine blocks, and the
+					 * backward branch stub (BIT nmi_yield / BMI) yields
+					 * to dispatch on real VBlank.  Only dirty (emulated)
+					 * JSRs block intra-block backward branches. */
 					uint16_t blk_entry = (uint16_t)cache_entry_pc_lo[cache_index]
 					                   | ((uint16_t)cache_entry_pc_hi[cache_index] << 8);
 					if (target_pc >= blk_entry && target_pc < pc) {
@@ -3101,7 +3289,7 @@ static uint8_t recompile_opcode_b2_inner()
 				
 				pc += 3;
 				code_index += opcode_6502_ns_jsr_size;
-				block_has_jsr = 1;
+				block_has_jsr |= 3;  // bits 0+1: native-stack JSR (conservative: treat as dirty)
 #ifdef ENABLE_STATIC_ANALYSIS
 				sa_record_subroutine_runtime(target);
 #endif
@@ -3120,6 +3308,24 @@ static uint8_t recompile_opcode_b2_inner()
 				enable_interpret();
 			}
 #elif defined(ENABLE_NATIVE_JSR)
+#ifdef ENABLE_INLINE_TINY_SUB
+			// Try inlining tiny stack-clean subroutines before NJSR path
+			if (sa_subroutine_lookup(target) == SA_SUB_CLEAN)
+			{
+				uint8_t inlined = try_inline_tiny_sub(target, code_ptr);
+				if (inlined)
+				{
+					pc += 3;
+					// No block_has_jsr — inlined code is just normal instructions
+#ifdef ENABLE_STATIC_ANALYSIS
+					sa_record_subroutine_runtime(target);
+#endif
+					// ir_tmpl_id stays 0 — outer wrapper records via ir_record_native_b2
+					cache_flag[cache_index] |= READY_FOR_NEXT;
+					return cache_flag[cache_index];
+				}
+			}
+#endif
 			// Check if subroutine is stack-clean — use native trampoline template
 			if (sa_subroutine_lookup(target) == SA_SUB_CLEAN &&
 			    (code_index + opcode_6502_njsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
@@ -3134,7 +3340,7 @@ static uint8_t recompile_opcode_b2_inner()
 				
 				pc += 3;
 				code_index += opcode_6502_njsr_size;
-				block_has_jsr = 1;
+				block_has_jsr |= 1;  // bit 0 only: stack-clean JSR
 #ifdef ENABLE_STATIC_ANALYSIS
 				sa_record_subroutine_runtime(target);
 #endif
@@ -3158,7 +3364,7 @@ static uint8_t recompile_opcode_b2_inner()
 				
 				pc += 3;
 				code_index += opcode_6502_jsr_size;
-				block_has_jsr = 1;
+				block_has_jsr |= 3;  // bits 0+1: dirty (non-clean) JSR
 #ifdef ENABLE_STATIC_ANALYSIS
 				// Record JSR target for stack-safety analysis on next boot
 				sa_record_subroutine_runtime(target);
@@ -3190,7 +3396,7 @@ static uint8_t recompile_opcode_b2_inner()
 				
 				pc += 3;
 				code_index += opcode_6502_jsr_size;
-				block_has_jsr = 1;
+				block_has_jsr |= 3;  // bits 0+1: dirty (non-clean) JSR
 #ifdef ENABLE_STATIC_ANALYSIS
 				// Record JSR target for stack-safety analysis on next boot
 				sa_record_subroutine_runtime(target);

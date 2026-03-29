@@ -199,7 +199,7 @@ uint8_t sa_idle_count = 0;
 // Bank 2 section — BFS walker, header helpers, queue, opcode helpers
 // =========================================================================
 
-#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE) || defined(PLATFORM_ASTEROIDS)
 #pragma section bank19
 #else
 #pragma section bank24
@@ -872,7 +872,7 @@ static void sa_compile_b2(void)
 
 #endif // ENABLE_STATIC_COMPILE
 
-#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE) || defined(PLATFORM_ASTEROIDS)
 #pragma section bank19
 #else
 #pragma section bank24
@@ -1375,7 +1375,7 @@ static uint8_t sa_compile_one_block(void)
 
 #endif // ENABLE_STATIC_COMPILE
 
-#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE) || defined(PLATFORM_ASTEROIDS)
 #pragma section bank19
 #else
 #pragma section bank24
@@ -2042,7 +2042,7 @@ static void sa_run_b2(void)
 // fixed-bank trampoline (compilation speed is not critical).
 // Returns SA_SUB_CLEAN, SA_SUB_DIRTY, or SA_SUB_EMPTY (not found).
 // -------------------------------------------------------------------------
-#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE) || defined(PLATFORM_ASTEROIDS)
 #pragma section bank19
 #else
 #pragma section bank24
@@ -2103,7 +2103,7 @@ uint8_t sa_subroutine_lookup(uint16_t target_pc)
 // Runtime feedback: record an indirect-jump target discovered during
 // execution.  Called from the interpreter via fixed-bank trampoline.
 // -------------------------------------------------------------------------
-#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE) || defined(PLATFORM_ASTEROIDS)
 #pragma section bank19
 #else
 #pragma section bank24

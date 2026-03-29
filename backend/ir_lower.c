@@ -572,11 +572,15 @@ void ir_resolve_direct_branches(void)
                 if (ir_ctx.fence_guest_pc[f] == target_pc) {
                     /* Intra-block: native offset relative to buffer start.
                      * Absolute address = flash_code_address + BLOCK_PREFIX_SIZE + offset. */
-                    target_native = flash_code_address + BLOCK_PREFIX_SIZE
-                                  + ir_ctx.fence_native_offset[f];
-                    target_bank = flash_code_bank;
-                    resolved = 1;
-                    intra_block = 1;
+                    if (ir_ctx.fence_native_offset[f] < len) {
+                        target_native = flash_code_address + BLOCK_PREFIX_SIZE
+                                      + ir_ctx.fence_native_offset[f];
+                        target_bank = flash_code_bank;
+                        resolved = 1;
+                        intra_block = 1;
+                    }
+                    /* else: fence offset overshoots code buffer — leave
+                     * unresolved so the NES dispatch-stub fallback fires */
                     break;
                 }
             }
@@ -587,13 +591,23 @@ void ir_resolve_direct_branches(void)
          * tight-allocation addresses (pre-populated between passes).
          * The entry list fallback is kept for non-SA (dynamic JIT) use
          * but should never fire during SA pass 2 since pre-population
-         * covers all entry_pc addresses in the PC tables. */
+         * covers all entry_pc addresses in the PC tables.
+         *
+         * Safety: reject targets that land inside the current block's
+         * flash range.  Such a hit means this was really an intra-block
+         * branch whose fence was missing (e.g. IR_FENCE_TARGET_MAX
+         * exceeded).  Using the inter-block address would jump past
+         * the block's epilogue into stale flash data. */
         if (!resolved) {
-            if (lookup_native_addr_safe(target_pc) && reserve_result_bank == flash_code_bank) {
+            uint16_t block_code_start = flash_code_address + BLOCK_PREFIX_SIZE;
+            uint16_t block_code_end   = block_code_start + len;
+            if (lookup_native_addr_safe(target_pc) && reserve_result_bank == flash_code_bank
+                && (reserve_result_addr < block_code_start || reserve_result_addr >= block_code_end)) {
                 target_native = reserve_result_addr;
                 target_bank = reserve_result_bank;
                 resolved = 1;
-            } else if (lookup_entry_list(target_pc) && reserve_result_bank == flash_code_bank) {
+            } else if (lookup_entry_list(target_pc) && reserve_result_bank == flash_code_bank
+                       && (reserve_result_addr < block_code_start || reserve_result_addr >= block_code_end)) {
                 target_native = reserve_result_addr;
                 target_bank = reserve_result_bank;
                 resolved = 1;
@@ -607,7 +621,7 @@ void ir_resolve_direct_branches(void)
             int16_t branch_from = (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + p + 2);
             int16_t native_offset = (int16_t)target_native - branch_from;
 
-#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE)
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE) || defined(PLATFORM_ASTEROIDS)
             if (intra_block && native_offset < 0) {
                 /* VBlank-triggered backward branch stub.
                  * Intra-block backward branches can create tight loops that

@@ -1101,6 +1101,7 @@ void exec6502(uint32_t tickcount) {
 
 void step6502() {
     opcode = read6502(pc++);
+    last_interpreted_opcode = opcode;
     status |= FLAG_CONSTANT;
 
 #ifdef TRACK_TICKS

@@ -10,6 +10,10 @@ PLATFORM_NES = 0
 PLATFORM_MILLIPEDE = 0
 	endif
 
+	ifnd PLATFORM_ASTEROIDS
+PLATFORM_ASTEROIDS = 0
+	endif
+
 	ifnd ENABLE_NATIVE_STACK
 ENABLE_NATIVE_STACK = 0
 	endif
@@ -57,6 +61,11 @@ _ROM_OFFSET = $4000
 _ROM_NAME = _rom_millipede
 	endif
 
+	if (GAME_NUMBER == 6)
+_ROM_OFFSET = $6800
+_ROM_NAME = _rom_asteroids
+	endif
+
 	if (GAME_NUMBER == 10)
 _ROM_OFFSET = $C000
 _ROM_NAME = _rom_nes_prg
@@ -77,10 +86,14 @@ BANK_PC_FLAGS	=	27
 	if PLATFORM_MILLIPEDE
 BANK_RENDER		=	20
 	else
+	if PLATFORM_ASTEROIDS
+BANK_RENDER		=	22
+	else
 	ifnd PLATFORM_NES
 BANK_RENDER		=	22
 	else
 BANK_RENDER		=	21
+	endif
 	endif
 	endif
 
@@ -109,8 +122,13 @@ _CHARACTER_RAM_BASE = _RAM_BASE + $400	; alias — keeps C references valid
 _RAM_BASE:	reserve $400
 _CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
 	else
+	if PLATFORM_ASTEROIDS
+_RAM_BASE:	reserve $400
+_CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
+	else
 _RAM_BASE:	reserve $400
 _CHARACTER_RAM_BASE:	reserve $800
+	endif
 	endif
 	endif
 	section "nesram"
@@ -219,6 +237,24 @@ _chr_millipede:
 	align 8
 _color_prom_millipede:
 	incbin "roms\milliped\136001-213.e7"	; color PROM (256 bytes)
+	endif
+
+;=======================================================
+; Asteroids arcade ROM data
+; Program ROM (6KB, 3 × 2KB) + Vector ROM (2KB) in bank23
+;=======================================================
+
+	if (GAME_NUMBER == 6)
+	section "bank23"
+	global _rom_asteroids, _rom_asteroids_vec
+	align 8
+_rom_asteroids:
+	incbin "roms\asteroid\035145-04e.ef2"	; $6800-$6FFF (2KB)
+	incbin "roms\asteroid\035144-04e.h2"	; $7000-$77FF (2KB)
+	incbin "roms\asteroid\035143-02.j2"	; $7800-$7FFF (2KB)
+	align 8
+_rom_asteroids_vec:
+	incbin "roms\asteroid\035127-02.np3"	; $4800-$4FFF vector ROM (2KB)
 	endif
 
 ;=======================================================

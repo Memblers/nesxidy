@@ -58,6 +58,8 @@
 #define BANK_IR_OPT             28      /* NES: dead flag-table bank $4000-$7FFF (no NES guest code there) */
 #elif defined(PLATFORM_MILLIPEDE)
 #define BANK_IR_OPT             29      /* Millipede: dead flag-table bank $8000-$BFFF (ROM mirror, not compiled) */
+#elif defined(PLATFORM_ASTEROIDS)
+#define BANK_IR_OPT             29      /* Asteroids: dead flag-table bank $8000-$BFFF (ROM ends at $7FFF) */
 #else
 #define BANK_IR_OPT             29      /* Exidy: dead flag-table bank $8000-$BFFF (no Exidy guest code there) */
 #endif
@@ -82,6 +84,9 @@
 #elif defined(PLATFORM_MILLIPEDE)
 #define BANK_SA_CODE            19      /* Millipede: $0000-$1FFF = RAM/IO, no code here */
 #define BANK_INIT_CODE          19      /* Millipede: shares with SA */
+#elif defined(PLATFORM_ASTEROIDS)
+#define BANK_SA_CODE            19      /* Asteroids: $0000-$1FFF = RAM/IO, no code here */
+#define BANK_INIT_CODE          19      /* Asteroids: shares with SA */
 #else
 #define BANK_SA_CODE            24      /* Exidy: $A000-$BFFF dead */
 #define BANK_INIT_CODE          25      /* Exidy: $C000-$DFFF dead */
@@ -107,6 +112,8 @@
 #define BANK_RENDER             21
 #elif defined(PLATFORM_MILLIPEDE)
 #define BANK_RENDER             20      /* Millipede: $2000-$3FFF = I/O, dead for code */
+#elif defined(PLATFORM_ASTEROIDS)
+#define BANK_RENDER             22      /* Asteroids: $6000-$7FFF range, ROM is at $6800+ */
 #else
 #define BANK_RENDER             22
 #endif
@@ -121,6 +128,8 @@
  */
 #ifdef PLATFORM_MILLIPEDE
 #define BANK_METRICS            20      /* shares with BANK_RENDER */
+#elif defined(PLATFORM_ASTEROIDS)
+#define BANK_METRICS            21      /* Asteroids: $4000-$5FFF = I/O, dead for guest code */
 #else
 #define BANK_METRICS            21
 #endif
@@ -160,6 +169,12 @@
 #ifdef PLATFORM_MILLIPEDE
 #define BANK_MILLIPEDE_CHR     24
 #endif
+
+/*
+ * Asteroids arcade ROM banks:
+ *   BANK_PLATFORM_ROM (23): 6KB program ROM + 2KB vector ROM
+ *   Program ROM ($6800-$7FFF) + Vector ROM ($4800-$4FFF)
+ */
 
 /* ---- Aliases for existing code ---- */
 #define BANK_FLASH_BLOCK_FLAGS  BANK_META

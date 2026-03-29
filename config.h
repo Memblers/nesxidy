@@ -1,4 +1,4 @@
-//#define DEBUG_AUDIO 1
+#define DEBUG_AUDIO 1
 
 //#define DEBUG_CPU_WRITE 1
 //#define DEBUG_CPU_READ 1
@@ -41,7 +41,7 @@
 
 // Normal build (linking + optimizer enabled)
 #define ENABLE_LINKING
-//#define INTERPRETER_ONLY
+#define INTERPRETER_ONLY
 
 // Master optimizer toggle - comment out to disable entire optimizer system
 //#define ENABLE_OPTIMIZER   // DISABLED: v1 sector evacuation approach
@@ -195,13 +195,16 @@
 // Game selection — only ONE game should be active.
 // Exidy games: define here.  NES games: pass -DGAME_DONKEY_KONG on command line.
 // Millipede arcade: pass -DPLATFORM_MILLIPEDE -DGAME_MILLIPEDE_ARCADE on command line.
+// Asteroids arcade: pass -DPLATFORM_ASTEROIDS -DGAME_ASTEROIDS on command line.
 #ifndef PLATFORM_NES
 #ifndef PLATFORM_MILLIPEDE
+#ifndef PLATFORM_ASTEROIDS
 #define GAME_SIDE_TRACK
 //#define GAME_TARG
 //#define GAME_TARG_TEST_ROM
 //#define GAME_SPECTAR
 //#define GAME_CPU_6502_TEST
+#endif
 #endif
 #endif
 
@@ -270,6 +273,26 @@
 #ifdef GAME_CPU_6502_TEST
 #define ROM_ADDR_MIN  0x2800
 #define ROM_ADDR_MAX  0x3FFF
+#endif
+
+// --- Asteroids arcade ---
+// Program ROM at $6800-$7FFF (6KB, 3 × 2KB EPROMs)
+// Vector ROM at $4800-$4FFF (2KB, character shapes)
+// Uses NMI for 60 Hz game tick (not IRQ like Millipede)
+#ifdef GAME_ASTEROIDS
+#define ROM_ADDR_MIN  0x6800
+#define ROM_ADDR_MAX  0x7FFF
+#endif
+
+// Common Asteroids config
+#ifdef PLATFORM_ASTEROIDS
+#ifndef ROM_ADDR_MIN
+#define ROM_ADDR_MIN  0x6800
+#define ROM_ADDR_MAX  0x7FFF
+#endif
+#ifndef ENABLE_BATCH_DISPATCH
+#define ENABLE_BATCH_DISPATCH
+#endif
 #endif
 
 // --- Millipede arcade ---

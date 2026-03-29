@@ -105,6 +105,26 @@ uint16_t translate_address(uint16_t src_addr) {
     // Video RAM ($1000-$13FF), I/O, sprites, palette — must interpret
     // (write side-effects: screen_ram_updated flag, palette_dirty, etc.)
     return 0;
+#elif defined(PLATFORM_ASTEROIDS)
+    // Asteroids arcade memory map
+    // $0000-$03FF = RAM (1KB)
+    // $2000-$3FFF = I/O (POKEY, inputs, outputs — interpret)
+    // $4000-$47FF = Vector RAM (writable, must interpret for DVG)
+    // $4800-$4FFF = Vector ROM (read-only, in bank23 flash)
+    // $6800-$7FFF = Program ROM (6KB, in bank23 flash)
+    if (src_addr < 0x0400) {
+        // RAM: $0000-$03FF → RAM_BASE
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr >= 0x6800 && src_addr < 0x8000) {
+        // Program ROM: $6800-$7FFF → ROM_NAME with offset
+        uint16_t nes_addr = (src_addr - ROM_OFFSET) + (uint16_t)ROM_NAME;
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;
+        return nes_addr;
+    }
+    // Vector RAM/ROM ($4000-$4FFF), I/O ($2000-$3FFF) — must interpret
+    return 0;
 #else
     // Exidy memory map
     uint8_t msb = src_addr >> 8;
@@ -259,7 +279,7 @@ uint8_t block_ci_map[64];
 // targets within the current block.  Used by recompile_opcode_b2() to
 // selectively insert IR_PC_MARK fences at real branch targets instead
 // of at every SA-known address (which would kill IR optimization).
-#define IR_FENCE_TARGET_MAX 8
+#define IR_FENCE_TARGET_MAX 16
 static uint8_t  ir_fence_target_count;
 static uint16_t ir_fence_targets[IR_FENCE_TARGET_MAX];
 #endif
@@ -3686,7 +3706,7 @@ static uint8_t recompile_opcode_b2_inner()
 					// NES: disabled — NES has no screen/char RAM at $40xx-$4Fxx.
 					// $40xx on NES = APU registers (no dirty tracking needed).
 					// Millipede: disabled — video RAM at $10xx-$13xx is interpreted.
-#if !defined(PLATFORM_NES) && !defined(PLATFORM_MILLIPEDE)
+#if !defined(PLATFORM_NES) && !defined(PLATFORM_MILLIPEDE) && !defined(PLATFORM_ASTEROIDS)
 					if (decoded_address)
 					{
 						uint8_t msb = encoded_address >> 8;

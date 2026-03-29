@@ -41,7 +41,7 @@
 
 // Normal build (linking + optimizer enabled)
 #define ENABLE_LINKING
-#define INTERPRETER_ONLY
+//#define INTERPRETER_ONLY
 
 // Master optimizer toggle - comment out to disable entire optimizer system
 //#define ENABLE_OPTIMIZER   // DISABLED: v1 sector evacuation approach
@@ -293,6 +293,12 @@
 #ifndef ENABLE_BATCH_DISPATCH
 #define ENABLE_BATCH_DISPATCH
 #endif
+// The idle loop at $680C reads hardware I/O ($2007), so
+// ENABLE_AUTO_IDLE_DETECT's scanner rejects it.  Define GAME_IDLE_PC
+// as a manual override.  This is safe now that guest_steps_since_nmi
+// only counts non-NMI steps — the 8 quick idle exits don't starve
+// the main game code.
+#define GAME_IDLE_PC  0x680C
 #endif
 
 // --- Millipede arcade ---

@@ -87,7 +87,7 @@ BANK_PC_FLAGS	=	27
 BANK_RENDER		=	20
 	else
 	if PLATFORM_ASTEROIDS
-BANK_RENDER		=	22
+BANK_RENDER		=	20
 	else
 	ifnd PLATFORM_NES
 BANK_RENDER		=	22
@@ -589,16 +589,6 @@ _dispatch_on_pc:
 	lda (addr_lo),y
 	sta .dispatch_addr + 1
 	
-	; Check for invalid code address ($8000 = uninitialized)
-	; This can happen if flag was written but code address wasn't
-	cmp #$80
-	bne .addr_valid
-	lda .dispatch_addr
-	bne .addr_valid
-	; Address is $8000 - treat as invalid
-	jmp not_recompiled
-.addr_valid:
-
 	lda target_bank
 	if PLATFORM_NES
 	; (flash_exec_bank removed — flash data copy lives in same bank as code)
@@ -829,8 +819,8 @@ not_recompiled:
 	lda _pc+1                    ; guest PC high byte
 	cmp #(_ROM_OFFSET/256)       ; < ROM_ADDR_MIN high byte?
 	bcc .out_of_range
-	if PLATFORM_MILLIPEDE
-	cmp #$80                     ; >= $8000? (Millipede: ROM_ADDR_MAX = $7FFF)
+	if PLATFORM_MILLIPEDE || PLATFORM_ASTEROIDS
+	cmp #$80                     ; >= $8000? (ROM_ADDR_MAX = $7FFF)
 	bcs .out_of_range
 	else
 	if PLATFORM_NES == 0
@@ -1902,8 +1892,13 @@ IR_OPT_BANK = 28
 SA_CODE_BANK = 19
 IR_OPT_BANK = 29
 	else
+	if PLATFORM_ASTEROIDS
+SA_CODE_BANK = 19
+IR_OPT_BANK = 29
+	else
 SA_CODE_BANK = 24
 IR_OPT_BANK = 26
+	endif
 	endif
 	endif
 
@@ -2065,15 +2060,20 @@ _flash_cache_code:	reserve 16384
 	global _flash_cache_pc, _flash_cache_pc_flags
 ;-------------------------------------------------------	
 	ifnd PLATFORM_NES
+	ifnd PLATFORM_ASTEROIDS
 	align 14		; PC table: $0000-$1FFF (Exidy has no code here)
 	endif
-	; bank19 on NES = SA/init code, no align — section used by C code
+	endif
+	; bank19 on NES/Asteroids = SA/init code, no align — section used by C code
 _flash_cache_pc:	
 	section "bank20"
 	ifnd PLATFORM_NES
+	ifnd PLATFORM_ASTEROIDS
 	align 14		; PC table: Exidy ROM $2000-$3FFF
 	endif
+	endif
 	; bank20 on NES = NES PRG-ROM data, no align — section used by asm incbin
+	; bank20 on Asteroids = BANK_RENDER code, no align — section used by C code
 	ifdef PLATFORM_NES
 	; NES: skip bank21 entirely — used for BANK_RENDER C code.
 	; If we enter section "bank21" here, the linker overlaps this
@@ -2087,6 +2087,9 @@ _flash_cache_pc:
 	section "bank22"
 	ifdef PLATFORM_NES
 	align 14		; PC table: NES PRG-RAM $6000-$7FFF
+	endif
+	ifdef PLATFORM_ASTEROIDS
+	align 14		; PC table: Asteroids ROM $6800-$7FFF
 	endif
 	; bank22 on Exidy = BANK_RENDER code, no align
 	section "bank23"

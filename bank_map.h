@@ -30,10 +30,12 @@
  * Repurposed dead banks (platform-dependent):
  *   Bank 19       NES-dead ($0000-$1FFF = RAM) → SA code + init code (NES)
  *   Bank 20       NES-dead ($2000-$3FFF = PPU/IO, no code) → NES PRG-ROM lo
+ *                 Asteroids-dead ($2000-$3FFF = no code) → BANK_RENDER
  *   Bank 21       NES-dead ($4000-$5FFF = PPU/IO, no NES code)
  *                 Exidy-LIVE ($4000-$5FFF has guest code — do NOT use for Exidy)
  *   Bank 22       Exidy-dead ($6000-$7FFF = no Exidy code here)
  *                 NES-LIVE (PRG-RAM can have code) — do NOT use for NES
+ *                 Asteroids-LIVE ($6800-$7FFF = ROM) — do NOT use for Asteroids
  *   Bank 23       Exidy-dead ($8000-$9FFF, Exidy ROM < $8000) → platform ROM
  *                 NES-LIVE ($8000-$9FFF = PRG-ROM mirror on NROM)
  *   Bank 24       Exidy-dead ($A000-$BFFF, Exidy ROM < $8000) → SA code
@@ -105,6 +107,8 @@
  *
  * Exidy: bank 22 ($6000-$7FFF range is dead — Exidy has no code there)
  * NES:   bank 21 ($4000-$5FFF range is dead — PPU/IO region)
+ * Asteroids: bank 20 ($2000-$3FFF range is dead — no guest code)
+ *   NOTE: bank 22 is LIVE for Asteroids — PC table for $6000-$7FFF.
  *
  * The build always picks exactly one platform, so no runtime conflict.
  */
@@ -113,7 +117,7 @@
 #elif defined(PLATFORM_MILLIPEDE)
 #define BANK_RENDER             20      /* Millipede: $2000-$3FFF = I/O, dead for code */
 #elif defined(PLATFORM_ASTEROIDS)
-#define BANK_RENDER             22      /* Asteroids: $6000-$7FFF range, ROM is at $6800+ */
+#define BANK_RENDER             20      /* Asteroids: $2000-$3FFF = dead, no guest code */
 #else
 #define BANK_RENDER             22
 #endif

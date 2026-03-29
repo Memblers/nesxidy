@@ -184,6 +184,14 @@ uint8_t update_pc_entry(uint16_t src_pc, uint16_t new_native) {
         return 0;  // Already has value, skip
     }
     
+    // Guard: reject $0000 — this is never a valid native code address
+    // (native_addr is always $8008+).  Catches worklist entries whose
+    // new_native was never assigned by the estimation pass.
+    if (new_native == 0) {
+        bankswitch_prg(1);
+        return 0;
+    }
+    
     // Entry is erased ($FFFF) — program bytes directly.
     // NOR flash allows clearing bits (1→0) without erasing.
     // This avoids the expensive and race-prone backup-erase-rewrite

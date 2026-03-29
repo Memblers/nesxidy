@@ -88,18 +88,34 @@ __zpage uint8_t last_nmi_frame = 0;
 // NMI pending latch for demand-driven interrupt delivery
 __zpage uint8_t nmi_pending = 0;
 
-// NMI pacing — count guest instructions since the last NMI delivery.
-// With INTERPRETER_ONLY, step6502() executes 1 instruction per main
-// loop iteration.  Gate NMI delivery on enough elapsed instructions
-// AND on the previous handler having finished (RTI detected).
+// NMI pacing — count main-loop iterations since the last NMI delivery.
+// In interpreter mode, step6502() executes 1 instruction per iteration
+// (500 iterations ≈ 500 guest instructions).
+// In recompiler mode, run_6502() executes up to 64 batches of compiled
+// blocks per call, so each iteration is thousands of guest instructions.
+// The nmi_active/nmi_sp_guard mechanism already prevents re-entrant NMIs,
+// so the step gate only needs to let the NMI handler finish one dispatch
+// round-trip — a small threshold suffices.
+#ifdef INTERPRETER_ONLY
 #define NMI_MIN_GUEST_STEPS  500
+#else
+// Each run_6502() executes up to 64 batch dispatches.  Only non-NMI
+// steps count (gated by !nmi_active in the main loop), so the guest
+// is guaranteed this many run_6502() calls of main-code execution
+// between NMI deliveries.
+#define NMI_MIN_GUEST_STEPS  8
+#endif
 __zpage uint16_t guest_steps_since_nmi = 0;
 
 // NMI nesting prevention — on real Asteroids hardware the NMI line is
 // edge-triggered; only one NMI is active at a time.  If we deliver a
 // second NMI before the handler RTIs, the stack grows into the
 // interlock bytes ($01D0/$01FF) and the handler spins forever.
-__zpage uint8_t in_nmi = 0;
+// Uses nmi_active + nmi_sp_guard (SP-based RTI detection) so it works
+// in both interpreter and recompiler mode.  The dynamos.c batch
+// dispatch also checks these to break out when RTI completes.
+uint8_t nmi_active = 0;
+uint8_t nmi_sp_guard;
 
 // Vector RAM page select ($3200 write): 0 or 1
 // Page 0 = CPU writes $4000-$43FF, DVG reads $4400-$47FF
@@ -136,8 +152,7 @@ __zpage uint16_t boot_frame_count = 0;
 // Score shadow (for incremental nametable updates)
 static uint8_t score_shadow[6];  // 6 BCD digits for P1 score
 
-// VRU list for score updates — must be in the default (fixed) section
-// so the NMI handler can read it regardless of which PRG bank is mapped.
+// VRU list for score nametable updates
 static uint8_t score_list[6 * 3 + 1];
 
 
@@ -156,7 +171,7 @@ static uint8_t pokey_random(void)
 // ==========================================================================
 // DVG interpreter — parses display list, samples dots
 // ==========================================================================
-#pragma section bank22
+#pragma section bank20
 
 // Read a 16-bit word from DVG address space (word-addressed).
 // DVG is mapped starting at CPU $4000 (MAME: set_memory(0x4000)).
@@ -224,14 +239,37 @@ static void dvg_sample_vector(int16_t dx, int16_t dy)
 		return;
 	}
 
-	// Number of dots to place along this vector
-	int16_t num_dots = length / DVG_SAMPLE_INTERVAL;
-	if (num_dots < 1) num_dots = 1;
-	if (num_dots > 6) num_dots = 6;  // cap per-vector
+	// Number of dots to place along this vector.
+	// Divide by sample interval, clamp to [1, DVG_MAX_DOTS_PER_VEC].
+	// Use comparison chain to avoid expensive 16-bit division.
+	int16_t num_dots;
+#if DVG_MAX_DOTS_PER_VEC == 1
+	num_dots = 1;
+#else
+	num_dots = 1;
+	for (int16_t n = 2; n <= DVG_MAX_DOTS_PER_VEC; n++) {
+		if (length >= (int16_t)(n * DVG_SAMPLE_INTERVAL))
+			num_dots = n;
+	}
+#endif
 
-	for (int16_t i = 0; i <= num_dots; i++) {
-		int16_t px = dvg.beam_x + (dx * i) / num_dots;
-		int16_t py = dvg.beam_y + (dy * i) / num_dots;
+	// Precompute step size to avoid per-iteration divides.
+	// Use shifts for power-of-2 divisors; only odd divisors need real division.
+	int16_t step_x, step_y;
+	switch (num_dots) {
+		case 1: step_x = dx; step_y = dy; break;
+		case 2: step_x = dx >> 1; step_y = dy >> 1; break;
+		case 4: step_x = dx >> 2; step_y = dy >> 2; break;
+		default: step_x = dx / num_dots; step_y = dy / num_dots; break;
+	}
+
+	// Place dots along the vector using iterative stepping
+	int16_t px = dvg.beam_x;
+	int16_t py = dvg.beam_y;
+	dvg_add_dot(px, py);
+	for (int16_t i = 1; i <= num_dots; i++) {
+		px += step_x;
+		py += step_y;
 		dvg_add_dot(px, py);
 	}
 }
@@ -505,7 +543,7 @@ static void ln_fire_and_forget(void)
 // ==========================================================================
 // render_video — per-frame: run DVG, place dot sprites, update score
 // ==========================================================================
-#pragma section bank22
+#pragma section bank20
 
 void render_video_b2(void)
 {
@@ -529,17 +567,33 @@ void render_video_b2(void)
 	// Rotate starting offset within this mux frame's dot set
 	uint16_t oam_offset = 0;
     
-	if (mux_dot_count > 0)
-		oam_offset = (mux_frame * 17) % mux_dot_count;  // co-prime stride
+	if (mux_dot_count > 0) {
+		// Replace modulo with repeated subtraction (mux_frame*17 is small)
+		oam_offset = mux_frame * 17;
+		while (oam_offset >= mux_dot_count) oam_offset -= mux_dot_count;
+	}
         
+	// Convert oam_offset to a dot_buffer index and stride by DVG_MUX_FRAMES
+	// instead of multiplying each iteration (eliminates __muluint16 calls).
+	// Use repeated addition instead of multiply for the initial offset.
+	uint16_t dot_idx = mux_frame;
+	for (uint16_t k = 0; k < oam_offset; k++) dot_idx += DVG_MUX_FRAMES;
+	uint16_t wrap_span = dot_idx - mux_frame;  // == mux_dot_count * DVG_MUX_FRAMES
+	for (uint16_t k = oam_offset; k < mux_dot_count; k++) wrap_span += DVG_MUX_FRAMES;
+	uint8_t spr_meta[5] = {
+		0, 0, 0, 0x00, 128  // tile 0 in PT1 (1x1 dot), palette 0
+	};
 	for (uint16_t j = 0; j < mux_dot_count && spr_count < 64; j++) {
-		uint16_t idx = ((j + oam_offset) % mux_dot_count) * DVG_MUX_FRAMES + mux_frame;
-		if (idx >= dot_count) continue;
-		uint8_t spr_meta[5] = {
-			0, 0, 0, 0x00, 128  // tile 0 in PT1 (1x1 dot), palette 0
-		};
-		lnAddSpr(spr_meta, dot_buffer[idx].x, dot_buffer[idx].y);
-		spr_count++;
+		if (dot_idx < dot_count) {
+			lnAddSpr(spr_meta, dot_buffer[dot_idx].x, dot_buffer[dot_idx].y);
+			spr_count++;
+		}
+		// Advance to next mux slot by striding DVG_MUX_FRAMES
+		dot_idx += DVG_MUX_FRAMES;
+		// Wrap: if past end, subtract total span to wrap around
+		if (dot_idx >= dot_count) {
+			dot_idx -= wrap_span;
+		}
 	}
 
 	// Advance mux frame
@@ -1049,11 +1103,18 @@ int main(void)
 		run_6502();
 #endif
 		TRACE_MARK(0x02);
-		guest_steps_since_nmi++;
+		// Only count non-NMI guest steps — the counter gates NMI delivery
+		// so the guest gets breathing room *between* handlers.  Without
+		// this guard the counter climbs during handler execution and the
+		// next NMI fires the instant RTI completes, starving init/main.
+		if (!nmi_active)
+			guest_steps_since_nmi++;
 
-		// Detect RTI ($40) — the NMI handler has returned
-		if (in_nmi && last_interpreted_opcode == 0x40)
-			in_nmi = 0;
+		// Detect RTI — NMI handler has returned (SP restored to pre-NMI level).
+		// Works for both interpreter and recompiler mode (last_interpreted_opcode
+		// is not set by compiled blocks, so we use the SP guard instead).
+		if (nmi_active && sp == nmi_sp_guard)
+			nmi_active = 0;
 
 		// Asteroids NMI runs at CLOCK_3KHZ/12 ≈ 250 Hz.
 		// The game increments NmiCounter every NMI, and every 4th NMI
@@ -1084,21 +1145,31 @@ int main(void)
 
 			// Deliver pending NMI only after guest has had enough
 			// steps for the previous handler to complete
-			if (nmi_pending > 0 && guest_steps_since_nmi >= NMI_MIN_GUEST_STEPS && !in_nmi)
+			if (nmi_pending > 0 && guest_steps_since_nmi >= NMI_MIN_GUEST_STEPS && !nmi_active)
 			{
 				TRACE_MARK(0x10 | nmi_pending);
 				nmi_pending--;
 				guest_steps_since_nmi = 0;
 
-				// Clear the ROM's NMI overrun counter ($5B).
-				// The NMI handler increments $5B every 4th NMI and
-				// spins forever at $7B81 if it reaches 4.  At real
-				// 1.5 MHz the main loop easily keeps up; at our
-				// interpreted speed it cannot, so zero it each time.
+				// Prevent the NMI overrun watchdog ($5B >= 4 → spin at
+				// $7B81).  On real hardware 4 NMIs fire per game frame;
+				// we deliver only 1 per NES VBlank.  Clear FrameCounter
+				// before the NMI so the handler's INC $5B can't reach 4.
 				RAM_BASE[0x5B] = 0;
 
-				in_nmi = 1;
+				nmi_sp_guard = sp;
+				nmi_active = 1;
 				nmi6502();
+
+				// Ensure FrameCounter ($5B) is non-zero after the NMI
+				// handler returns.  The main loop polls LSR $5B / BCC
+				// $680C — it stalls until bit 0 is set.  On real
+				// hardware the 4th NMI does INC $5B every game frame,
+				// but we only deliver 1 NMI per VBlank, so 3 out of 4
+				// deliveries skip the INC.  Force $5B = 1 to unblock
+				// the main loop every frame.
+				RAM_BASE[0x5B] = 1;
+
 				TRACE_MARK(0x1F);
 			}
 		}
@@ -1123,10 +1194,11 @@ int main(void)
 		}
 #endif
 		// Fire NMI — Asteroids uses NMI for its ~250 Hz game tick
-		if ((interrupt_condition & FLAG_ASTEROIDS_NMI) && !in_nmi)
+		if ((interrupt_condition & FLAG_ASTEROIDS_NMI) && !nmi_active)
 		{
 			interrupt_condition &= ~FLAG_ASTEROIDS_NMI;
-			in_nmi = 1;
+			nmi_sp_guard = sp;
+			nmi_active = 1;
 			nmi6502();
 		}
 	}

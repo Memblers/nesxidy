@@ -57,10 +57,10 @@
 // ==========================================================================
 
 // Maximum dots rendered per DVG frame
-#define DVG_MAX_DOTS        384
+#define DVG_MAX_DOTS        390 //384
 
 // Sprite multiplex: cycle over N frames
-#define DVG_MUX_FRAMES      6 //3
+#define DVG_MUX_FRAMES      6 //12 //3
 
 // DVG subroutine call stack depth
 #define DVG_STACK_DEPTH     4
@@ -72,10 +72,10 @@
 #define DVG_COORD_MAX       1023
 
 // Point sampling interval (DVG coordinate units between dots)
-#define DVG_SAMPLE_INTERVAL 3 //40
+#define DVG_SAMPLE_INTERVAL 12
 
 // Maximum dots placed along a single vector segment
-#define DVG_MAX_DOTS_PER_VEC 12 //6
+#define DVG_MAX_DOTS_PER_VEC 2
 
 // Dot buffer entry
 typedef struct {
@@ -121,6 +121,11 @@ extern void hookexternal(void *funcptr);
 __zpage extern uint32_t clockticks6502;
 __zpage extern uint8_t status;
 __zpage extern uint16_t pc;
+__zpage extern uint8_t sp;
+
+// NMI nesting prevention (shared with dynamos.c batch dispatch)
+extern uint8_t nmi_active;
+extern uint8_t nmi_sp_guard;
 
 __zpage extern uint16_t decoded_address;
 __zpage extern uint16_t encoded_address;

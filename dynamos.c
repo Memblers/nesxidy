@@ -597,11 +597,14 @@ void run_6502(void)
 #else
 	if (sa_is_idle_pc(pc)) break;
 #endif
-#elif defined(GAME_IDLE_PC)
+#endif
+#ifdef GAME_IDLE_PC
+	// Manual idle PC override — catches loops the static scanner rejects
+	// (e.g. loops that read hardware I/O).
 	if (pc == GAME_IDLE_PC) break;
 #endif
 	// 4. RTI completed — NMI handler finished, return for state update
-#ifdef PLATFORM_NES
+#if defined(PLATFORM_NES) || defined(PLATFORM_ASTEROIDS)
 	if (nmi_active && sp == nmi_sp_guard) break;
 #endif
 	} while (1);
@@ -1600,6 +1603,19 @@ static void flash_cache_pc_update_b17(uint8_t code_address, uint8_t flags)
 	
 	if (current_flag != 0xFF)
 		return;  // slot already programmed — don't AND-corrupt it
+	
+	// Guard: verify address bytes are erased ($FF) before writing.
+	// On NES, bank 23 holds BOTH CHR-ROM data and the PC address table
+	// for guest PCs $8000-$9FFF.  CHR data bytes (often $00) would
+	// AND-corrupt the address to $0000.  Also catches stale pass-1
+	// entries surviving the between-passes erase (bank 23 is skipped
+	// because it's BANK_PLATFORM_ROM).
+	uint8_t existing_lo = peek_bank_byte(pc_jump_bank,
+	    (uint16_t)&flash_cache_pc[0] + pc_jump_address + 0);
+	uint8_t existing_hi = peek_bank_byte(pc_jump_bank,
+	    (uint16_t)&flash_cache_pc[0] + pc_jump_address + 1);
+	if (existing_lo != 0xFF || existing_hi != 0xFF)
+		return;  // address bytes not erased — would AND-corrupt
 	
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t)native_addr);
 	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t)(native_addr >> 8));			

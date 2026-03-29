@@ -1,0 +1,44 @@
+﻿Reading flash sectors from Mesen à
+  Bank 4 sector 0 (PRG $10000): 11 blocks
+  Bank 4 sector 1 (PRG $11000):  0 blocks
+  Bank 4 sector 2 (PRG $12000): 15 blocks
+  Bank 4 sector 3 (PRG $13000): 15 blocks
+  Bank 5 sector 0 (PRG $14000): 12 blocks
+  Bank 5 sector 1 (PRG $15000):  3 blocks
+  Bank 5 sector 2 (PRG $16000): 12 blocks
+  Bank 5 sector 3 (PRG $17000): 15 blocks
+  Bank 6 sector 0 (PRG $18000): 15 blocks
+  Bank 6 sector 1 (PRG $19000):  0 blocks
+  Bank 6 sector 2 (PRG $1A000): 15 blocks
+  Bank 6 sector 3 (PRG $1B000): 11 blocks
+
+================================================================
+FLASH CACHE WASTE ANALYSIS
+================================================================
+Total slots:      180
+Valid blocks:     124
+Empty slots:      56
+Slot occupancy:   68.9%
+C:/proj/c/NES/nesxidy-co/nesxidy/.venv/Scripts/python.exe : Traceback (most 
+recent call last):
+At line:1 char:1
++ C:/proj/c/NES/nesxidy-co/nesxidy/.venv/Scripts/python.exe C:/proj/c/N ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last) 
+   ::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\proj\c\NES\nesxidy-co\nesxidy\flash_waste_report.py", line 178, in 
+<module>
+    main()
+    ~~~~^^
+  File "C:\proj\c\NES\nesxidy-co\nesxidy\flash_waste_report.py", line 122, in 
+main
+    print(f"\n\u2500\u2500 Code length stats \u2500\u2500")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.
+3312.0_x64__qbz5n2kfra8p0\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 2-3: 
+character maps to <undefined>

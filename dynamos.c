@@ -7,63 +7,24 @@
 #include "dynamos.h"
 #include "exidy.h"
 #include "mapper30.h"
+#include "core/optimizer.h"
+#include "core/static_analysis.h"
+#include "core/metrics.h"
+#ifdef ENABLE_OPTIMIZER_V2
+#include "core/optimizer_v2_simple.h"
+#endif
+#ifdef ENABLE_IR
+#include "backend/ir.h"
+#endif
 
-__zpage extern uint8_t sp;
-__zpage extern uint16_t pc;
-__zpage uint16_t pc_end;
-__zpage extern uint8_t opcode;
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+extern uint8_t lnPPUMASK;  // lazynes shadow for $2001
+#endif
 
-static uint16_t rom_remap_index = 0;
-static uint8_t debug_out[0x80];
-__zpage uint32_t cache_hits = 0;
-__zpage uint32_t cache_misses = 0;
-uint32_t cache_links = 0;
-uint32_t cache_links_found = 0;
-uint32_t cache_links_dropped = 0;
-uint32_t cache_branches = 0;
-//static uint16_t cache_index = 0;
-__zpage uint8_t cache_index = BLOCK_COUNT-1;
-//static uint8_t cache_active = 0;
-
-__zpage uint8_t next_new_cache = 0;
-__zpage uint8_t matched = 0;
-__zpage uint8_t decimal_mode = 0;
-__zpage uint16_t flash_cache_index;
-uint8_t flash_enabled = 0;
-
-uint8_t l1_cache_code[CACHE_L1_CODE_SIZE];
-uint8_t cache_code[BLOCK_COUNT][CODE_SIZE];
-uint8_t cache_flag[BLOCK_COUNT];
-__zpage uint8_t cache_entry_pc_lo[BLOCK_COUNT];
-__zpage uint8_t cache_entry_pc_hi[BLOCK_COUNT];
-uint8_t cache_exit_pc_lo[BLOCK_COUNT];
-uint8_t cache_exit_pc_hi[BLOCK_COUNT];
-uint8_t cache_link[BLOCK_COUNT];
-uint8_t cache_branch_link[BLOCK_COUNT];
-uint16_t cache_cycles[BLOCK_COUNT];
-uint8_t cache_hit_count[BLOCK_COUNT];
-uint8_t cache_branch_pc_lo[BLOCK_COUNT];
-uint8_t cache_branch_pc_hi[BLOCK_COUNT];
-uint8_t cache_vpc[BLOCK_COUNT];
-
-__zpage uint8_t code_index;
-__zpage uint16_t decoded_address;
-__zpage uint16_t encoded_address;
-__zpage uint8_t address_8;
-
-uint32_t cache_branch_long = 0;
-
-extern	uint8_t flash_block_flags[];
-
-uint16_t pc_jump_address;
-uint8_t pc_jump_bank;
-uint16_t pc_jump_flag_address;
-uint8_t pc_jump_flag_bank;
-uint16_t flash_code_address;
-uint8_t flash_code_bank;
-
-
-const uint8_t addrmodes[256] = {
+// Address mode table - must be in accessible memory during recompilation.
+// Stored in WRAM (data section) which is always accessible regardless of bank switching.
+#pragma section data
+uint8_t addrmodes[256] = {
 /*        |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  |  A  |  B  |  C  |  D  |  E  |  F  |     */
 /* 0 */     imp, indx,  imp, indx,   zp,   zp,   zp,   zp,  imp,  imm,  acc,  imm, abso, abso, abso, abso, /* 0 */
 /* 1 */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx, /* 1 */
@@ -82,6 +43,380 @@ const uint8_t addrmodes[256] = {
 /* E */     imm, indx,  imm, indx,   zp,   zp,   zp,   zp,  imp,  imm,  imp,  imm, abso, abso, abso, abso, /* E */
 /* F */     rel, indy,  imp, indy,  zpx,  zpx,  zpx,  zpx,  imp, absy,  imp, absy, absx, absx, absx, absx  /* F */
 };
+#pragma section default
+
+// Address translation — only called from recompile_opcode_b2 (bank2).
+// NES build: placed in bank2 (b31 is tight, b2 has room).
+// Exidy build: stays in default/b31 (b2 is tight on Exidy).
+#ifdef PLATFORM_NES
+#pragma section bank2
+#endif
+uint16_t translate_address(uint16_t src_addr) {
+#ifdef PLATFORM_NES
+    // NES memory map: $0000-$07FF=RAM, $8000-$FFFF=ROM, rest=I/O
+    if (src_addr < 0x0800) {
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr < 0x2000) {
+        // RAM mirror
+        return (src_addr & 0x7FF) + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr >= 0x4000 && src_addr <= 0x4017) {
+        // APU / I/O registers — compile as native hardware access.
+        // $4000-$4013 = APU sound regs, $4015 = APU status,
+        // $4016-$4017 = controller ports / frame counter.
+        // These are real NES hardware addresses — JIT code can
+        // STA/LDA them directly with zero interpretation overhead.
+        if (src_addr == 0x4014) {
+            // OAM DMA trigger — redirect to a RAM flag so the
+            // main loop can execute it at the correct VBlank timing.
+            extern uint8_t oam_dma_request;
+            return (uint16_t)&oam_dma_request;
+        }
+        return src_addr;  // native hardware address
+    }
+    else if (src_addr >= 0x8000) {
+        // PRG-ROM — offset into ROM_NAME using NROM mirror mask
+        uint16_t nes_addr = (src_addr & 0x3FFF) + (uint16_t)ROM_NAME;
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;  // conflicts with flash cache — interpret
+        return nes_addr;
+    }
+    return 0;  // PPU ($2000-$3FFF) or unmapped — must interpret
+#elif defined(PLATFORM_MILLIPEDE)
+    // Millipede arcade memory map
+    // $0000-$03FF = RAM (1KB)
+    // $1000-$13FF = Video RAM + sprite RAM — force interpret for dirty tracking
+    // $0400-$0FFF, $1400-$3FFF = I/O (POKEY, inputs, palette — interpret)
+    // $4000-$7FFF = ROM (16KB, in bank23 flash)
+    if (src_addr < 0x0400) {
+        // RAM: $0000-$03FF → RAM_BASE
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr >= 0x4000 && src_addr < 0x8000) {
+        // ROM: $4000-$7FFF → ROM_NAME with offset
+        uint16_t nes_addr = (src_addr - ROM_OFFSET) + (uint16_t)ROM_NAME;
+        // If decoded address falls in switchable bank ($8000-$BFFF),
+        // it conflicts with flash cache — force interpretation.
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;
+        return nes_addr;
+    }
+    // Video RAM ($1000-$13FF), I/O, sprites, palette — must interpret
+    // (write side-effects: screen_ram_updated flag, palette_dirty, etc.)
+    return 0;
+#elif defined(PLATFORM_ASTEROIDS)
+    // Asteroids arcade memory map
+    // $0000-$03FF = RAM (1KB)
+    // $2000-$3FFF = I/O (POKEY, inputs, outputs — interpret)
+    // $4000-$47FF = Vector RAM (writable, must interpret for DVG)
+    // $4800-$4FFF = Vector ROM (read-only, in bank23 flash)
+    // $6800-$7FFF = Program ROM (6KB, in bank23 flash)
+    if (src_addr < 0x0400) {
+        // RAM: $0000-$03FF → RAM_BASE
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr >= 0x6800 && src_addr < 0x8000) {
+        // Program ROM: $6800-$7FFF → ROM_NAME with offset
+        uint16_t nes_addr = (src_addr - ROM_OFFSET) + (uint16_t)ROM_NAME;
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;
+        return nes_addr;
+    }
+    // Vector RAM/ROM ($4000-$4FFF), I/O ($2000-$3FFF) — must interpret
+    return 0;
+#else
+    // Exidy memory map
+    uint8_t msb = src_addr >> 8;
+    
+    if (msb < 0x04) {
+        // RAM: $0000-$03FF -> RAM_BASE
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (msb < 0x40) {
+        // ROM: $0400-$3FFF -> ROM_NAME (with offset)
+        uint16_t nes_addr = (src_addr - ROM_OFFSET) + (uint16_t)ROM_NAME;
+        // If decoded address is in the switchable bank ($8000-$BFFF), it conflicts with flash cache execution.
+        // Return 0 to force interpretation so the interpreter can switch banks correctly.
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;
+        return nes_addr;
+    }
+    else if (msb < 0x48) {
+        // Screen RAM: $4000-$47FF -> SCREEN_RAM_BASE
+        return (src_addr - 0x4000) + (uint16_t)SCREEN_RAM_BASE;
+    }
+    else if (msb < 0x50) {
+        // Character RAM: $4800-$4FFF -> CHARACTER_RAM_BASE
+        return (src_addr - 0x4800) + (uint16_t)CHARACTER_RAM_BASE;
+    }
+    
+    // I/O or unmapped - must interpret
+    return 0;
+#endif  // PLATFORM_NES
+}
+#pragma section default
+
+#ifdef PLATFORM_NES
+// Convert an absolute-addressed read opcode to its immediate equivalent.
+// Returns the immediate opcode, or 0 if no immediate form exists.
+// Lives in bank 31 (fixed) — only does arithmetic, no bank-specific data.
+static uint8_t nes_abs_to_imm(uint8_t op) {
+    uint8_t lo = op & 0x0F;
+    if (lo == 0x0D && op != 0x8D) return op - 4;
+    if (op == 0xAC || op == 0xCC || op == 0xEC || op == 0xAE) return op - 0x0C;
+    return 0;
+}
+#endif
+
+__zpage extern uint8_t sp;
+__zpage extern uint8_t a;
+__zpage extern uint8_t x;
+__zpage extern uint8_t y;
+__zpage extern uint16_t pc;
+__zpage uint16_t pc_end;
+__zpage extern uint8_t opcode;
+
+static uint16_t rom_remap_index = 0;
+__zpage uint32_t cache_hits = 0;
+__zpage uint32_t cache_misses = 0;
+uint32_t cache_interpret = 0;       // dispatch returned "interpret"
+uint32_t cache_branches = 0;
+uint32_t branch_not_compiled = 0;   // target not yet compiled
+uint32_t branch_wrong_bank = 0;     // target in different flash bank
+uint32_t branch_out_of_range = 0;   // native offset > 127 bytes
+uint32_t branch_forward = 0;        // forward branch (can't optimize)
+uint16_t stats_frame = 0;            // debug stats frame counter
+//static uint16_t cache_index = 0;
+__zpage uint8_t cache_index = BLOCK_COUNT-1;
+//static uint8_t cache_active = 0;
+
+__zpage uint8_t next_new_cache = 0;
+__zpage uint8_t matched = 0;
+__zpage uint8_t decimal_mode = 0;
+__zpage uint8_t block_has_jsr = 0;  // bit 0: any JSR in block, bit 1: dirty (non-NJSR) JSR
+__zpage uint8_t nmi_yield = 0;          // VBlank yield flag (bit 7 set by NMI hook)
+static uint8_t block_dirty_screen = 0;  // set after first INC screen_ram_updated in block
+static uint8_t block_dirty_char = 0;    // set after first INC character_ram_updated in block
+static uint8_t exit_pc_lo_safe, exit_pc_hi_safe;  // WRAM backup: survives vbcc register reuse
+#ifdef ENABLE_PEEPHOLE
+volatile uint8_t block_flags_saved = 0;   // peephole: trailing PLP deferred from previous template (volatile: prevent vbcc dead-code elimination)
+uint8_t block_has_skip = 0;     // peephole: set when any template in block used skip=1
+uint8_t peephole_skipped = 0;   // peephole: set per-instruction when skip=1 was used
+#endif
+uint8_t recompile_instr_start;           // code_index at instruction start (after any deferred PLP flush)
+
+#ifdef ENABLE_IR
+ir_ctx_t ir_ctx;                         // IR compilation context (~480B WRAM)
+// SA pass 2 mid-block PC tracking: record each guest instruction's PC offset
+// and starting IR node index so that post-lowering native offsets can be
+// computed and published.  Populated by sa_compile_one_block's compile loop,
+// consumed by ir_compute_instr_offsets (bank 1) after ir_lower.
+#define SA_IR_MAX_INSTRS 96
+uint8_t sa_ir_instr_pc_offset[SA_IR_MAX_INSTRS];   // (guest_pc - entry_pc) & 0xFF
+uint8_t sa_ir_instr_first_node[SA_IR_MAX_INSTRS];  // ir_ctx.node_count at instruction start
+uint8_t sa_ir_instr_native_off[SA_IR_MAX_INSTRS];  // seeded with raw offset; overwritten by ir_compute_instr_offsets
+uint8_t sa_ir_instr_count;                         // number of instructions recorded
+uint8_t sa_ir_instrs_eliminated;                   // count of IR-eliminated instrs (forward-filled)
+#endif
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+__zpage uint8_t compile_ppu_effect = 0;  // PPU emphasis bits toggled during compile
+__zpage uint8_t compile_ppu_active = 0;  // 1 = PPU effect enabled (SA boot only)
+#endif
+__zpage uint16_t flash_cache_index;
+uint8_t flash_enabled = 0;
+
+#ifdef ENABLE_IDLE_DETECT
+// Idle loop detection state (see config.h ENABLE_IDLE_DETECT).
+// idle_anchor = PC of the detected backward-branch target.
+// idle_count  = consecutive hits before fast-path activates.
+// idle_prev_pc = previous guest PC (for backward-branch detection).
+__zpage uint16_t idle_anchor  = 0;
+__zpage uint16_t idle_prev_pc = 0;
+__zpage uint8_t  idle_count   = 0;
+#endif
+
+// Static compilation pass indicator:
+//   0 = dynamic (runtime) or pass-1 measure — forward branches use 21-byte patchable template
+//   2 = pass-2 emit — tight allocation, forward branches resolved via pre-populated PC tables
+uint8_t sa_compile_pass = 0;
+
+// Static-compile gate: set to 1 by the platform's main() when a warm-boot
+// recompile is requested (recompile signature detected).  sa_run_b2()
+// checks this before entering the two-pass compile.  On cold boot this
+// stays 0 — only BFS walk + subroutine analysis runs, and the dynamic
+// JIT fills the cache at runtime.
+uint8_t sa_do_compile = 0;
+
+// Set to 1 after SA two-pass compile completes.  Checked by the cache-
+// pressure auto-reset logic to suppress endless SA cycling.
+// volatile: VBCC -O2 must not optimise away the cross-unit write/read.
+volatile uint8_t sa_compile_completed = 0;
+
+// Pass 2: forced exit PC for the current block being compiled.
+// Set by sa_run before calling sa_compile_one_block in pass 2.
+// The compile loop checks pc >= sa_block_exit_pc to force block termination,
+// ensuring pass 2's block boundaries match pass 1's even when forward
+// branches produce shorter native code.
+uint16_t sa_block_exit_pc = 0xFFFF;
+
+// Entry list write cursor (offset within BANK_ENTRY_LIST, in bytes).
+// Each entry is 8 bytes: entry_pc(2), exit_pc(2), native_addr(2), bank(1), code_len(1).
+// Reset to 0 before pass 1.
+uint16_t entry_list_offset = 0;
+
+// Pass 2: allocation size for current block (from entry list code_len).
+// sa_compile_one_block calls flash_sector_alloc(sa_block_alloc_size) in pass 2.
+uint8_t sa_block_alloc_size = 0;
+
+// Intra-block backward branch map: maps (guest_pc - entry_pc) → code_index+1
+// during compilation.  Index by offset & 0x3F (64-entry table).
+// Value 0 = no entry at that offset.  Otherwise code_index = value - 1.
+uint8_t block_ci_map[64];
+
+#ifdef ENABLE_IR
+// Mid-block fence targets: PCs identified by ROM pre-scan as branch/JMP
+// targets within the current block.  Used by recompile_opcode_b2() to
+// selectively insert IR_PC_MARK fences at real branch targets instead
+// of at every SA-known address (which would kill IR optimization).
+#define IR_FENCE_TARGET_MAX 16
+static uint8_t  ir_fence_target_count;
+static uint16_t ir_fence_targets[IR_FENCE_TARGET_MAX];
+#endif
+
+// Sector-based free-form allocator:
+// Each 4KB flash sector has a bump pointer tracking the next free offset.
+// Stored in WRAM (mutable).  Zeroed at boot by flash_cache_init_sectors().
+uint16_t sector_free_offset[FLASH_CACHE_SECTORS];
+uint8_t next_free_sector = 0;  // monotonic sector cursor
+
+uint8_t l1_cache_code[CACHE_L1_CODE_SIZE];
+uint8_t cache_code[BLOCK_COUNT][CACHE_CODE_BUF_SIZE];
+uint8_t cache_flag[BLOCK_COUNT];
+__zpage uint8_t cache_entry_pc_lo[BLOCK_COUNT];
+__zpage uint8_t cache_entry_pc_hi[BLOCK_COUNT];
+uint8_t cache_exit_pc_lo[BLOCK_COUNT];
+uint8_t cache_exit_pc_hi[BLOCK_COUNT];
+// Removed: cache_link, cache_branch_link (RAM cache linking)
+uint16_t cache_cycles[BLOCK_COUNT];
+uint8_t cache_hit_count[BLOCK_COUNT];
+uint8_t cache_branch_pc_lo[BLOCK_COUNT];
+uint8_t cache_branch_pc_hi[BLOCK_COUNT];
+uint8_t cache_vpc[BLOCK_COUNT];
+
+__zpage uint8_t code_index;
+__zpage uint16_t decoded_address;
+__zpage uint16_t encoded_address;
+__zpage uint8_t address_8;
+
+uint32_t cache_branch_long = 0;
+__zpage uint8_t indy_hit_count = 0;  // Debug: count indy case hits
+
+extern	uint8_t flash_block_flags[];
+
+// -------------------------------------------------------------------------
+// Debug stats dump — writes key counters to a fixed WRAM region ($7F00)
+// so they can be inspected in Mesen's hex editor (WRAM tab, offset $1F00).
+//
+// Layout at $7F00 (all little-endian):
+//   +$00: 4B  cache_hits       (dispatch → ran compiled code)
+//   +$04: 4B  cache_misses     (dispatch → needed recompile)
+//   +$08: 4B  cache_interpret   (dispatch → interpreted)
+//   +$0C: 4B  cache_branches   (branch optimization attempts)
+//   +$10: 4B  branch_not_compiled
+//   +$14: 4B  branch_wrong_bank
+//   +$18: 4B  branch_out_of_range
+//   +$1C: 4B  branch_forward
+//   +$20: 2B  opt2_total       (V2 branch opportunities)
+//   +$22: 2B  opt2_direct      (V2 patches applied)
+//   +$24: 2B  opt2_pending     (V2 patches waiting)
+//   +$26: 2B  blocks_used      (flash cache blocks in use / 960)
+//   +$28: 2B  frame_counter    (incremented each dump)
+//   +$2A: 2B  magic ($DB, $57) (signature to confirm stats are live)
+//   +$2C: 2B  sa_blocks_total  (blocks compiled by static analysis)
+// -------------------------------------------------------------------------
+// Address $7E00 chosen: above BSS end (~$7A20) and below C stack ($8000-$200)
+#define DEBUG_STATS_ADDR  ((volatile uint8_t*)0x7E00)
+
+// Bank 2 implementation — no bankswitch_prg calls allowed.
+// Uses peek_bank_byte (WRAM helper) for cross-bank reads.
+#ifdef ENABLE_DEBUG_STATS
+#pragma section bank2
+static void debug_stats_update_b2(void)
+{
+	volatile uint8_t *p = DEBUG_STATS_ADDR;
+
+	// 32-bit counters (little-endian) — all in WRAM/ZP, safe from bank 2
+	*(volatile uint32_t*)(p + 0x00) = cache_hits;
+	*(volatile uint32_t*)(p + 0x04) = cache_misses;
+	*(volatile uint32_t*)(p + 0x08) = cache_interpret;
+	*(volatile uint32_t*)(p + 0x0C) = cache_branches;
+	*(volatile uint32_t*)(p + 0x10) = branch_not_compiled;
+	*(volatile uint32_t*)(p + 0x14) = branch_wrong_bank;
+	*(volatile uint32_t*)(p + 0x18) = branch_out_of_range;
+	*(volatile uint32_t*)(p + 0x1C) = branch_forward;
+
+	// 16-bit opt2 stats — read via peek_bank_byte from bank 1
+#ifdef ENABLE_OPTIMIZER_V2
+	extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+	extern uint16_t opt2_stat_total;
+	extern uint16_t opt2_stat_direct;
+	extern uint16_t opt2_stat_pending;
+	*(volatile uint16_t*)(p + 0x20) = peek_bank_byte(1, (uint16_t)&opt2_stat_total)
+	                                | (peek_bank_byte(1, (uint16_t)&opt2_stat_total + 1) << 8);
+	*(volatile uint16_t*)(p + 0x22) = peek_bank_byte(1, (uint16_t)&opt2_stat_direct)
+	                                | (peek_bank_byte(1, (uint16_t)&opt2_stat_direct + 1) << 8);
+	*(volatile uint16_t*)(p + 0x24) = peek_bank_byte(1, (uint16_t)&opt2_stat_pending)
+	                                | (peek_bank_byte(1, (uint16_t)&opt2_stat_pending + 1) << 8);
+#endif
+
+	// Blocks in use: report next_free_sector as a proxy for cache utilization
+	extern uint8_t next_free_sector;
+	*(volatile uint16_t*)(p + 0x26) = next_free_sector;
+
+	// Frame counter (global in BSS/WRAM — static in bank2 flash would be read-only)
+	extern uint16_t stats_frame;
+	*(volatile uint16_t*)(p + 0x28) = stats_frame++;
+
+	// Magic signature
+	p[0x2A] = 0xDB;
+	p[0x2B] = 0x57;
+
+	// SA compile counter
+#ifdef ENABLE_STATIC_ANALYSIS
+	extern uint16_t sa_blocks_total;
+	*(volatile uint16_t*)(p + 0x2C) = sa_blocks_total;
+#else
+	*(volatile uint16_t*)(p + 0x2C) = 0;
+#endif
+}
+#pragma section default
+
+// Fixed-bank trampoline — switches to bank 2, calls b2 impl, restores bank
+void debug_stats_update(void)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	debug_stats_update_b2();
+	bankswitch_prg(saved_bank);
+}
+#endif // ENABLE_DEBUG_STATS
+
+uint16_t pc_jump_address;
+uint8_t pc_jump_bank;
+uint16_t pc_jump_flag_address;
+uint8_t pc_jump_flag_bank;
+uint16_t flash_code_address;
+uint8_t flash_code_bank;
+
+#ifdef PLATFORM_NES
+// Floor for sector_free_offset shrink — data copies placed beyond code
+// must not be reclaimed.  Reset to 0 at the start of each recompile.
+uint16_t sector_alloc_floor;
+#endif
+
+
+// Removed: local addrmodes[] array - now using cpu_6502_addrmodes from frontend/cpu_6502.c
 
 #pragma section bank3
 uint8_t cache_bit_array[0x2000];
@@ -109,6 +444,12 @@ search cache for entrance matching the current program counter
 void run_6502(void)
 {		
 	//cache_test();
+
+#ifdef ENABLE_BLOCK_CYCLES
+	// interpret_6502() already adds to clockticks6502 via ticktable.
+	// JIT blocks add their pre-computed cycle count in dispatch_on_pc (asm).
+#endif
+	
 #ifdef DEBUG_OUT
 	static uint8_t print_delay = 0;
 	print_delay++;
@@ -134,182 +475,965 @@ void run_6502(void)
 		}
 	}
 	
-
-	flash_cache_search(pc);
-	/*
+#ifdef ENABLE_BATCH_DISPATCH
+	// Batch dispatch: loop here until an exit condition is met.
+	// Saves one __rsave12/__rload12 pair (~260 NES cycles) per dispatch
+	// by amortising the vbcc callee-save cost across all dispatches
+	// within a single VBlank period.
+	uint8_t batch_nmi = *(volatile uint8_t*)0x26;
+	uint8_t result;
+	uint8_t batch_count = 0;
+	do {
+	result = dispatch_on_pc();
+#else
 	uint8_t result = dispatch_on_pc();
+#endif
 	switch (result)
 	{
-		case 2:
+		case 2:  // interpret
 		{
+#ifdef ENABLE_IDLE_DETECT
+			// Idle loop detection — ONLY in the interpret path.
+			// When a non-JIT'd PC keeps looping back to the same address,
+			// batch-interpret a full iteration instead of paying the
+			// dispatch round-trip each time.  JIT'd loops (case 0) are
+			// already fast and must NOT be caught here.
+			if (pc == idle_anchor) {
+				if (++idle_count >= IDLE_DETECT_THRESHOLD) {
+					cache_interpret++;
+					bankswitch_prg(0);
+					uint16_t anchor = pc;
+					uint8_t steps = 8;
+					do {
+						interpret_6502();
+					} while (pc != anchor && --steps);
+					if (pc != anchor) {
+						idle_count = 0;
+						idle_anchor = 0;
+					}
+#ifdef TRACK_TICKS
+					clockticks6502 += DISPATCH_OVERHEAD;
+#endif
+					idle_prev_pc = pc;
+					return;
+				}
+			} else if (pc < idle_prev_pc) {
+				idle_anchor = pc;
+				idle_count = 1;
+			}
+			idle_prev_pc = pc;
+#endif
+			cache_interpret++;
+			bankswitch_prg(0);
+			interpret_6502();
+#ifdef TRACK_TICKS
+			// Dispatch overhead compensation: each dispatch round-trip costs
+			// ~200+ real NES cycles in C/asm overhead (function calls, bank
+			// switching, dispatch_on_pc lookup, etc.), but interpret_6502()
+			// only executes one guest instruction (~3-7 guest cycles).
+			// Adding DISPATCH_OVERHEAD compensates so that busy-wait delay
+			// loops (DEX;BNE, DEC zp;BNE, LDA $5101 polling) advance the
+			// cycle counter proportionally to wall-clock time elapsed.
+			// Without this, tight delay loops run 40-100x slower than on
+			// real hardware because each iteration pays the full dispatch
+			// round-trip cost but only counts a few guest cycles.
+			clockticks6502 += DISPATCH_OVERHEAD;
+#endif
+#ifdef ENABLE_BATCH_DISPATCH
+			break;  // continue batch loop
+#else
+			return;
+#endif
+		}
+		case 0:  // executed from flash
+		{
+			cache_hits++;
+#ifdef ENABLE_IDLE_DETECT
+			// DO NOT reset idle_count here.
+			// The idle loop at case-2 may be interrupted by the guest NMI
+			// handler whose compiled blocks land here (case 0).  Resetting
+			// idle_count wipes the progress toward IDLE_DETECT_THRESHOLD,
+			// so the idle escape never fires when the threshold exceeds the
+			// number of interpret iterations that fit between NMIs (~7).
+			// The case-2 path already resets idle state via the
+			// "else if (pc < idle_prev_pc)" branch when a new anchor is
+			// detected, so the explicit reset here is unnecessary.
+#endif
+#ifdef TRACK_TICKS
+			// JIT blocks already have accurate cycle counts in the header,
+			// but the dispatch round-trip overhead (~200 NES cycles) isn't
+			// reflected.  Adding DISPATCH_OVERHEAD keeps frame timing
+			// proportional to wall time even for short blocks (e.g.
+			// DEX;BNE = 4 guest cycles + 80 overhead = 84 per dispatch).
+			clockticks6502 += DISPATCH_OVERHEAD;
+#endif
+#ifdef ENABLE_BATCH_DISPATCH
+			break;  // continue batch loop
+#else
+			return;
+#endif
+		}
+		case 1:  // recompile needed
+#ifdef ENABLE_BATCH_DISPATCH
+			goto batch_exit;  // must return to compile
+#else
+			break;
+#endif
+	}
+#ifdef ENABLE_BATCH_DISPATCH
+	// Batch exit conditions — check after each dispatch:
+	// 1. VBlank occurred — must return for NMI processing
+	if (*(volatile uint8_t*)0x26 != batch_nmi) break;
+	// 2. Iteration limit — prevents infinite batch when lazynes nmiCounter
+	//    is stuck (no pending lnSync).  Guarantees the main loop runs
+	//    periodically so its stuck-frame watchdog can re-arm lazynes.
+	if (++batch_count >= 64) break;
+	// 3. Known idle loop — stop dispatching, let main loop poll VBlank
+#ifdef ENABLE_AUTO_IDLE_DETECT
+#ifdef NES_NMI_VBLANK_FLAG
+	// Don't break at idle PC when the VBlank flag is set — the guest
+	// must run to read the flag and exit its spin loop.
+	if (sa_is_idle_pc(pc) && !RAM_BASE[NES_NMI_VBLANK_FLAG]) break;
+#else
+	if (sa_is_idle_pc(pc)) break;
+#endif
+#elif defined(GAME_IDLE_PC)
+	if (pc == GAME_IDLE_PC) break;
+#endif
+	// 4. RTI completed — NMI handler finished, return for state update
+#ifdef PLATFORM_NES
+	if (nmi_active && sp == nmi_sp_guard) break;
+#endif
+	} while (1);
+	return;  // VBlank / idle / RTI exit — return to main loop
+batch_exit:  // case 1 (compile needed) jumps here
+#endif
+
+	// Guard: skip compile if _pc is already recompiled (e.g., from SA).
+	// When the native JSR trampoline hits an INTERPRETED-flagged PC, it
+	// inline-interprets and advances _pc.  If a VBlank fires right after,
+	// the trampoline bails with result=1 (compile).  But _pc may now point
+	// to an already-compiled adjacent PC.  Without this guard, the same
+	// block is compiled 20+ times (each copy unreachable because the
+	// AND-corruption guard prevents updating the flag), exhausting the
+	// flash cache on a static title screen.
+	{
+		extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+		uint8_t flag_bank = ((pc >> 14) + BANK_PC_FLAGS);
+		uint16_t flag_addr = (pc & FLASH_BANK_MASK);
+		uint8_t existing_flag = peek_bank_byte(flag_bank,
+			(uint16_t)&flash_cache_pc_flags[flag_addr]);
+		if (existing_flag && !(existing_flag & RECOMPILED)) {
+			// non-zero with bit 7 clear → already compiled, re-dispatch next iteration
+			// ($00 = AND-corrupted/uninitialized → still needs compile)
+			return;
+		}
+	}
+
+	// Guard: don't compile addresses outside the ROM range.
+	// Transient stack corruption (or IO-space PCs) can produce
+	// out-of-range addresses.  Compiling them would read garbage
+	// from character/screen RAM and program it into flash, causing
+	// hard crashes on subsequent dispatches.  Interpret instead.
+	// Also reject $FFFA-$FFFF: the 6502 vector table (NMI/RESET/IRQ)
+	// is data, never executable code.  Note: pc > ROM_ADDR_MAX is
+	// always false when ROM_ADDR_MAX == 0xFFFF (uint16_t max), so the
+	// vector-table check is the only effective upper-bound guard.
+	//
+	// IMPORTANT: volatile prevents VBCC -O2 from optimizing away this
+	// comparison (observed: entire guard removed, causing JMP-$0000
+	// crashes on Exidy when out-of-range PCs reach the compile path).
+	{ volatile uint16_t pc_v = pc;
+	if (pc_v < ROM_ADDR_MIN || pc_v > ROM_ADDR_MAX || pc_v >= 0xFFFA)
+	{
+		cache_interpret++;
+		bankswitch_prg(0);
+		interpret_6502();
+		return;
+	} }
+
+#ifdef ENABLE_STATIC_ANALYSIS
+	// Guard: don't compile addresses that the SA BFS walk did not
+	// identify as instruction boundaries.  When a compiled block's
+	// epilogue or NS_RTS produces a _pc that points into the middle
+	// of a multi-byte instruction, the dynamic compile would treat
+	// operand/data bytes as opcodes, programming garbage into flash
+	// that can never be corrected (SST39SF040 bits only clear).
+	// The cascading misalignment then publishes more bad mid-block
+	// PCs, eventually crashing on an illegal opcode.
+	//
+	// SA bitmap: bit CLEAR = known code, bit SET = unknown.
+	// Erased flash ($FF) = all bits set = all unknown.
+	{
+		extern uint8_t sa_code_bitmap[];
+		uint16_t bm_offset = (pc & 0x7FFF) >> 3;
+		uint8_t  bm_mask   = 1 << (pc & 7);
+		uint8_t  bm_val    = peek_bank_byte(BANK_FLASH_BLOCK_FLAGS,
+		                     (uint16_t)&sa_code_bitmap[bm_offset]);
+		if (bm_val & bm_mask) {
+			// Address not in SA bitmap — not a known instruction head.
+			// Interpret instead of compiling to avoid flash corruption.
+			cache_interpret++;
 			bankswitch_prg(0);
 			interpret_6502();
 			return;
 		}
-		case 0:
-		{
-			return;
-		}
-		case 1:
-		{			
-		}
 	}
-	*/	
+#endif
+
+	// Compile directly to flash
+	cache_misses++;
+
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+	// Darken screen during dynamic compile (all 3 emphasis bits)
+	IO8(0x2001) = lnPPUMASK | 0xE0;
+#endif
+
+	// Save the entry PC before compilation
+	uint16_t entry_pc = pc;
 	
+	// Store entry PC in global arrays so recompile_opcode_b2 can detect
+	// backward branches that target the same block's entry (self-loops).
+	cache_entry_pc_lo[0] = (uint8_t)entry_pc;
+	cache_entry_pc_hi[0] = (uint8_t)(entry_pc >> 8);
 	
-	matched = 0;
-	cache_search();
-	if (matched == 1)
+	// Use cache index 0 as temporary compilation buffer
+	cache_index = 0;
+	code_index = 0;		
+
+	cache_flag[0] = 0;
+	block_has_jsr = 0;  // reset for new block
+	block_dirty_screen = 0;
+	block_dirty_char = 0;
+#ifdef ENABLE_PEEPHOLE
+	block_flags_saved = 0;
+	block_has_skip = 0;
+#endif
+
+	// Clear intra-block code_index map
+	for (uint8_t ci_i = 0; ci_i < 64; ci_i++)
+		block_ci_map[ci_i] = 0;
+
+#ifdef ENABLE_BLOCK_CYCLES
+	uint16_t block_cycles_acc = 0;  // accumulated 6502 cycles for this block
+#endif
+	
+	// Tentatively allocate space for max-size block.
+	// We'll write the actual size to the header after compilation.
+	// flash_sector_alloc sets flash_code_bank and flash_code_address (to header start).
+	//
+	// Save allocator state so we can undo if the block produces no code
+	// (first instruction is always-interpreted).  Without this, each
+	// interpreted PC wastes 258 bytes of flash on an empty allocation.
+	extern uint16_t sector_free_offset[];
+	extern uint8_t next_free_sector;
+	uint8_t pre_alloc_next_free = next_free_sector;
+#ifdef PLATFORM_NES
+	extern uint16_t sector_alloc_floor;
+	sector_alloc_floor = 0;
+#endif
+	
+	if (!flash_sector_alloc(CODE_SIZE + EPILOGUE_SIZE + XBANK_EPILOGUE_SIZE))
 	{
-		cache_hits++;
-		ready();
+		// No flash available — mark this PC as INTERPRETED so future
+		// dispatches return case 2 (interpret) directly, avoiding the
+		// expensive full-sector scan on every subsequent visit.
+		// The PC flag table lives in separate flash banks (27-30) and
+		// doesn't use the sector allocator, so this write always works.
+		setup_flash_pc_tables(pc);
+		flash_cache_pc_update(0, INTERPRETED);
+		bankswitch_prg(0);
+		interpret_6502();
 		return;
 	}
 	
-	// create new cache for this pc
-
-	cache_misses++;
+	uint8_t alloc_sector = next_free_sector;
+	uint16_t undo_free_offset = flash_code_address & FLASH_SECTOR_MASK;
 	
-	flash_cache_index = flash_cache_select();
-	if (flash_cache_index)
+	// flash_code_address now points to header start.
+	// Native code starts at flash_code_address + BLOCK_HEADER_SIZE.
+	// Set up PC table pointers for the entry PC.
+	setup_flash_pc_tables(pc);
+
+#ifdef ENABLE_IR
+	// --- Pre-scan ROM for branch targets within this block ---
+	// Walk the guest ROM from entry_pc, find conditional branches and
+	// forward JMPs, record their targets.  These are the only mid-block
+	// PCs worth fencing (places other code might branch into).
 	{
-		flash_cache_index--;
-		flash_enabled = 1;
+		ir_fence_target_count = 0;
+		uint16_t scan = entry_pc;
+		uint8_t scan_count = 0;  // limit scan to ~32 instructions
+		while (scan >= ROM_ADDR_MIN && scan <= ROM_ADDR_MAX && scan_count < 32) {
+			uint8_t sop = read6502(scan);
+			uint8_t mode = addrmodes[sop];
+			uint8_t slen;
+			switch (mode) {
+				case imp: case acc: slen = 1; break;
+				case imm: case zp: case zpx: case zpy:
+				case rel: case indx: case indy: slen = 2; break;
+				default: slen = 3; break;
+			}
+			/* Conditional branch: record target if within block range */
+			if (mode == rel) {
+				int8_t boff = (int8_t)read6502(scan + 1);
+				uint16_t btgt = scan + 2 + boff;
+				if (btgt > entry_pc && btgt < entry_pc + 128 &&
+				    ir_fence_target_count < IR_FENCE_TARGET_MAX) {
+					/* Avoid duplicates */
+					uint8_t dup = 0;
+					for (uint8_t d = 0; d < ir_fence_target_count; d++) {
+						if (ir_fence_targets[d] == btgt) { dup = 1; break; }
+					}
+					if (!dup)
+						ir_fence_targets[ir_fence_target_count++] = btgt;
+				}
+			}
+			/* Stop at terminators */
+			if (sop == 0x60 || sop == 0x40 || sop == 0x00)  /* RTS/RTI/BRK */
+				break;
+			if (sop == 0x4C || sop == 0x6C)  /* JMP abs / JMP (ind) */
+				break;
+			scan += slen;
+			scan_count++;
+		}
 	}
-	else
-	{
-		flash_enabled = 0;
-	}
+#endif  /* ENABLE_IR */
 
-	cache_index = next_new_cache;		
-	// when cache is full, overwrite the oldest ones
-	if (cache_index-- == 0)
-		cache_index = BLOCK_COUNT-1;		
-			
-	code_index = 0;		
+#ifdef ENABLE_IR
+	// Reset mid-block PC tracking for this block.
+	// Mirrors the SA path (sa_compile_one_block) so that
+	// ir_compute_instr_offsets + deferred publish cover ALL
+	// mid-block PCs — not just fences.
+	sa_ir_instr_count = 0;
+	uint8_t dyn_prev_node_count = 0;
+#endif
 
-	cache_entry_pc_lo[cache_index] = (uint8_t) pc;
-	cache_entry_pc_hi[cache_index] = (uint8_t) (pc >> 8);
+#if OPT_BLOCK_METADATA
+	// Track branches for metadata
+	uint8_t branch_count = 0;
+	uint8_t branch_offsets[16];    // Offset within code where branch operand is
+	uint16_t branch_targets[16];   // Target PC for each branch
+#endif
 	
-	cache_flag[cache_index] = 0;
-	cache_cycles[cache_index] = 0;	
-	cache_hit_count[cache_index] = 0;
-	
-	//cache_hit_count[cache_index]++;	
-
 	do
 	{
-		#ifdef TRACK_TICKS
-		cache_cycles[cache_index] += ticktable[read6502(pc)];
-		#else
-		cache_cycles[cache_index]++;
-		#endif
-		
 		uint16_t pc_old = pc;
 		uint8_t code_index_old = code_index;
 		
+#ifdef ENABLE_PEEPHOLE
+		peephole_skipped = 0;  // reset per-instruction skip flag
+#endif
 		recompile_opcode();
 		
-		if (code_index > (CODE_SIZE - 6))
+		// Record this instruction's code_index for intra-block branch lookup.
+		// recompile_instr_start (set inside recompile_opcode_b2 after any
+		// deferred PLP flush) points to instruction code, not PLP byte.
+#ifdef ENABLE_PEEPHOLE
 		{
-			cache_flag[cache_index] |= OUT_OF_CACHE;
-			cache_flag[cache_index] &= ~READY_FOR_NEXT;
+			uint8_t ci_slot = (uint8_t)(pc_old - entry_pc) & 0x3F;
+			block_ci_map[ci_slot] = recompile_instr_start + 1;
 		}
-		if (flash_enabled)
+#else
 		{
-			setup_flash_address(pc_old, flash_cache_index);
-			if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
-				flash_cache_pc_update(code_index_old, INTERPRETED);
-			else if (code_index)
-				flash_cache_pc_update(code_index_old, RECOMPILED);
+			uint8_t ci_slot = (uint8_t)(pc_old - entry_pc) & 0x3F;
+			block_ci_map[ci_slot] = code_index_old + 1;
+		}
+#endif
+		
+		uint8_t instr_len = code_index - code_index_old;
+
+#ifdef ENABLE_BLOCK_CYCLES
+		// Add this opcode's base cycle count to the block total.
+		// Uses the same ticktable as the interpreter.
+		// Note: doesn't account for page-crossing penalties (acceptable approx).
+		if (instr_len > 0)
+			block_cycles_acc += ticktable[read6502(pc_old)];
+#endif
+
+#ifdef ENABLE_IR
+		// Track this instruction for post-lowering mid-block PC publishing.
+		// Same tracking as the SA path — enables ir_compute_instr_offsets
+		// to map guest PCs to post-lowering native offsets.
+		if (ir_ctx.enabled && sa_ir_instr_count < SA_IR_MAX_INSTRS) {
+			sa_ir_instr_pc_offset[sa_ir_instr_count] = (uint8_t)(pc_old - entry_pc);
+			sa_ir_instr_first_node[sa_ir_instr_count] = dyn_prev_node_count;
+#ifdef ENABLE_PEEPHOLE
+			sa_ir_instr_native_off[sa_ir_instr_count] = recompile_instr_start;
+#else
+			sa_ir_instr_native_off[sa_ir_instr_count] = code_index_old;
+#endif
+			sa_ir_instr_count++;
+			dyn_prev_node_count = ir_ctx.node_count;
+		}
+#endif
+
+#if OPT_BLOCK_METADATA
+		// Track branches for metadata
+		uint8_t op = read6502(pc_old);
+		if ((op==0x10||op==0x30||op==0x50||op==0x70||op==0x90||op==0xB0||op==0xD0||op==0xF0) 
+		    && branch_count < 16) {
+			int8_t off = read6502(pc_old + 1);
+			uint16_t target = pc_old + 2 + off;
+			branch_offsets[branch_count] = code_index_old + 1;
+			branch_targets[branch_count] = target;
+			branch_count++;
+		}
+		setup_flash_pc_tables(pc_old);
+#else
+		// Write this instruction's bytes to flash immediately
+		setup_flash_pc_tables(pc_old);
+#ifdef ENABLE_IR
+		// IR mode: defer flash writes — the optimized buffer will be
+		// bulk-written after the compile loop.  Per-instruction writes
+		// are redundant because the final loop at the bottom writes
+		// the entire cache_code[0][] to flash anyway.
+		(void)instr_len;  // suppress unused warning in IR mode
+#else
+		for (uint8_t i = 0; i < instr_len; i++)
+		{
+			flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + code_index_old + i, flash_code_bank, cache_code[0][code_index_old + i]);
+		}
+#endif
+#endif
+		
+#ifdef ENABLE_PEEPHOLE
+		// Account for deferred PLP byte (block_flags_saved) that will be
+		// flushed before the next instruction or in the epilogue.
+		if ((code_index + block_flags_saved) > (CODE_SIZE - 6)
+		    || code_index < code_index_old)  // uint8 overflow detection
+#else
+		if (code_index > (CODE_SIZE - 6)
+		    || code_index < code_index_old)  // uint8 overflow detection
+#endif
+		{
+			cache_flag[0] |= OUT_OF_CACHE;
+			cache_flag[0] &= ~READY_FOR_NEXT;
+			if (code_index < code_index_old)
+				code_index = code_index_old;  // revert to pre-overflow value
 		}
 		
-	} while (cache_flag[cache_index] & READY_FOR_NEXT);	// need to re-add OUT_OF_CACHE_LOGIC		
-	
-	cache_vpc[cache_index] = code_index;
-	
-	if (code_index)
-	{
-		cache_code[cache_index][code_index++] = 0x4C; //opJMP
-		cache_code[cache_index][code_index++] = (uint8_t) ((uint16_t) &dispatch_return); //opJMP
-		cache_code[cache_index][code_index++] = (uint8_t) (((uint16_t) &dispatch_return) >> 8); //opJMP
+		if (cache_flag[0] & INTERPRET_NEXT_INSTRUCTION)
+			flash_cache_pc_update(recompile_instr_start, INTERPRETED);
+#ifdef ENABLE_PEEPHOLE
+		else if (peephole_skipped)
+		{
+			// Peephole safety: this instruction's leading PHP was skipped
+			// (skip=1), so its native code is only valid when entered from
+			// the preceding instruction in the block.  Mark it INTERPRETED
+			// so that dispatch won't jump directly to this unsafe code.
+			flash_cache_pc_update(recompile_instr_start, INTERPRETED);
+		}
+#endif
+		else if (instr_len || pc != pc_old)
+		{
+#ifdef ENABLE_IR
+			// IR mode: only the block entry PC (offset 0) has a valid
+			// native address after optimisation.  Mid-block PCs would
+			// carry stale pre-IR offsets, so leave them unprogrammed
+			// ($FF).  Dispatch will treat them as cache-miss → compile
+			// a new block starting at that PC when it is hit.
+			//
+			// DEFERRED: The PC table update for the entry PC is deferred
+			// to AFTER the code bytes are written to flash.  Writing the
+			// table entry here (before IR optimisation and the bulk code
+			// write) creates a window where the table says "dispatch to
+			// $XXXX" but the code at $XXXX isn't in flash yet.  If IR
+			// optimisation eliminates all nodes (code_index == 0), the
+			// early-return path undoes the flash allocation — but this
+			// premature table entry persists, becoming a stale pointer
+			// to flash space that will be reused by a future block.
+			// See "Deferred IR entry-PC table update" below the code
+			// write loop.
+			(void)0;  // entry PC table update deferred
+#else
+			flash_cache_pc_update(recompile_instr_start, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+			// V2: Check if any pending branches/epilogues target this PC
+			opt2_notify_block_compiled(pc_old, flash_code_address + recompile_instr_start + BLOCK_PREFIX_SIZE, flash_code_bank);
+#endif
+#endif  /* ENABLE_IR */
+		}
+
+		// Guard: stop block if pc advanced outside the ROM range or into
+		// the 6502 vector table ($FFFA-$FFFF).  Without the upper bound
+		// check, blocks at the end of ROM can overflow into non-ROM
+		// address space, writing bogus PC-flag entries into banks that
+		// are repurposed for code (e.g. BANK_RENDER on Exidy).
+		//
+		// IMPORTANT: volatile prevents VBCC -O2 from optimizing this away.
+		{ volatile uint16_t pc_v = pc;
+		if (pc_v >= 0xFFFA || pc_v < ROM_ADDR_MIN || pc_v > ROM_ADDR_MAX)
+			cache_flag[0] &= ~READY_FOR_NEXT; }
 		
-		//flash_cache_pc_flag_clear((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)), (uint8_t) ~RECOMPILED);	// testing - may be interpreted
-		if (flash_enabled)
-			flash_cache_copy(cache_index, flash_cache_index);
-	}
-		
-	else // code buffer empty
+	} while (cache_flag[0] & READY_FOR_NEXT);
+
+	if (!code_index)
 	{
-		//flash_cache_pc_flag_clear((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)), ~INTERPRETED);	// testing - may be interpreted		
+		// Block produced no native code (first instruction was interpreted).
+		// Undo the flash allocation — the empty slot would waste space and
+		// the PC flag was already set by flash_cache_pc_update(INTERPRETED)
+		// in the compile loop above.
+		sector_free_offset[alloc_sector] = undo_free_offset;
+		next_free_sector = pre_alloc_next_free;
+		// Fall through to interpret_6502 below
 		bankswitch_prg(0);
 		interpret_6502();
-		cache_entry_pc_hi[cache_index] = 0; // cancel cache
-		cache_entry_pc_lo[cache_index] = 0;
-		return; // get out
+		return;
 	}
-	
-	if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
+
 	{
-		uint16_t pc_temp = pc;
-		switch (read6502(pc))
-		{
-			case abso:
-			case absy:
-			case absx:
-			case ind:
-			{
-				pc_temp += 3;
-				break;
-			}	
-			
-			case zp:
-			case zpx:
-			case zpy:
-			case indx:
-			case indy:
-			case imm:
-			case rel:
-			{
-				pc_temp += 2;
-				break;
-			}
-			
-			case imp:
-			case acc:
-			{
-				pc_temp += 1;
-				break;
-			}
-			default:
+		// Exit PC is the current pc value (instruction to interpret or continue from)
+		uint16_t exit_pc = pc;
+		// WRAM backup: vbcc -O2 stores exit_pc in a ZP register pair
+		// that gets reused during the IR optimise/lower/patch passes
+		// below (~6 cross-bank calls).  Same class of bug as entry_pc
+		// corruption (see reload at epilogue header write).
+		exit_pc_lo_safe = (uint8_t)exit_pc;
+		exit_pc_hi_safe = (uint8_t)(exit_pc >> 8);
+
+#ifdef ENABLE_PEEPHOLE
+		// Flush deferred PLP from peephole before epilogue
+		// NOTE: volatile pointer cast on cache_code write prevents vbcc DCE.
+		// code_index uses plain ++ so compiler tracks the new value.
+		if (block_flags_saved) {
+#ifdef ENABLE_IR
+			// Under IR, add the deferred PLP as an IR node so it's
+			// included in the lowered output.  Emitting it directly to
+			// cache_code creates a byte the IR doesn't know about,
+			// causing lowered_size < code_index and epilogue overlap.
+			IR_EMIT(&ir_ctx, IR_PLP, 0x80, 0);
+#else
+			*(volatile uint8_t *)&cache_code[0][code_index] = 0x28;  // PLP
+			code_index++;
+#endif
+			block_flags_saved = 0;
 		}
-		cache_exit_pc_lo[cache_index] = (uint8_t) pc_temp;
-		cache_exit_pc_hi[cache_index] = (uint8_t) (pc_temp >> 8);		
+#endif
+
+#ifdef ENABLE_IR
+		// --- IR optimisation pass ---
+		// IR nodes were already recorded per-instruction by the bank2
+		// wrapper (ir_record_native_b2).  We only need to run the
+		// optimiser and lower back to native bytes here.
+		//
+		// IR optimise lives in bank 0, lower/patches/RMW fusion in bank 1.
+		{
+			uint8_t ir_saved_bank = mapper_prg_bank;
+			uint8_t ir_bytes_before = code_index;
+			uint8_t lowered_size;
+			if (!ir_ctx.enabled) {
+				/* IR was disabled mid-block (node overflow) — skip
+				 * lowering.  cache_code[0] already has correct bytes. */
+				lowered_size = 0;
+				bankswitch_prg(BANK_EMIT);  /* bank1 needed for patches below */
+			} else {
+#ifndef SKIP_DYNAMIC_IR_OPT
+			bankswitch_prg(BANK_IR_OPT);
+			ir_optimize(&ir_ctx);
+			bankswitch_prg(BANK_COMPILE);
+			ir_optimize_ext(&ir_ctx);
+			bankswitch_prg(BANK_EMIT);
+			/* Pass 5+6: RMW fusion + register substitution in bank1 */
+			ir_ctx.stat_rmw_fusion = ir_opt_rmw_fusion(&ir_ctx);
+#else
+			/* SKIP_DYNAMIC_IR_OPT: skip optimise passes during JIT.
+			 * ir_lower still runs to populate fence_native_offset[]
+			 * (needed by ir_resolve_direct_branches). */
+			bankswitch_prg(BANK_EMIT);
+#endif
+			lowered_size = ir_lower(&ir_ctx, cache_code[0], CACHE_CODE_BUF_SIZE);
+			/* DIAG: dirty flag is now JSR-based (no inline PHP/INC/PLP).
+			 * Verify that no stale inline PHP/INC $32 without PLP remains
+			 * (would indicate the old path was taken). */
+			if (lowered_size > 5) {
+				uint8_t _dd;
+				for (_dd = 0; _dd + 3 < lowered_size; _dd++) {
+					if (cache_code[0][_dd] == 0x08 &&
+					    cache_code[0][_dd+1] == 0xE6 &&
+					    cache_code[0][_dd+2] == 0x32) {
+						/* Old inline dirty flag found in lowered output!
+						 * This should never happen with the JSR fix. */
+						*(volatile uint8_t *)0x04F0 = 0xDD;
+						*(volatile uint8_t *)0x04F1 = ir_ctx.node_count;
+						*(volatile uint8_t *)0x04F2 = lowered_size;
+						*(volatile uint8_t *)0x04F3 = _dd;
+						break;
+					}
+				}
+			}
+			}
+			/* Post-lowering safety: verify that NRTS/JSR/NJSR template
+			 * blocks still have the leading PHP (0x08) in the lowered
+			 * output.  The IR optimizer should preserve the IR_TEMPLATE
+			 * node, but as a defence-in-depth measure, scan for the
+			 * template body signature and re-insert PHP if it was
+			 * stripped.
+			 *
+			 * Two patterns are checked:
+			 *
+			 *   (A) Full 6-byte prologue: STA _a; STX _x; STY _y
+			 *       Matches the intact template prologue.
+			 *
+			 *   (B) NRTS/PHA 7-byte: STA _a; STY _y; LDX _sp; INX
+			 *       Matches when IR optimizer stripped the dead STX _x
+			 *       (X is immediately overwritten by LDX _sp).  The
+			 *       trailing INX (E8) distinguishes pop-style templates
+			 *       from non-template code that coincidentally saves
+			 *       A/Y and loads SP.
+			 *
+			 * The PLP template starts with STA _a; STX _x; INC _sp
+			 * and must NOT receive a PHP insertion.  Pattern A does
+			 * not match PLP (requires STY _y at k+4; PLP has INC).
+			 * Pattern B does not match PLP (requires STY _y at k+2;
+			 * PLP has STX _x). */
+			if (lowered_size > 6) {
+				uint8_t *lb = cache_code[0];
+				uint8_t sa = (uint8_t)((uint16_t)&a);
+				uint8_t sx = (uint8_t)((uint16_t)&x);
+				uint8_t sy = (uint8_t)((uint16_t)&y);
+				uint8_t ssp = (uint8_t)((uint16_t)&sp);
+				uint8_t php_insert_pos = 0xFF;  /* 0xFF = not found */
+
+				for (uint8_t k = 0; k + 5 < lowered_size; k++) {
+					/* Pattern A: STA _a (85 sa) STX _x (86 sx) STY _y (84 sy) */
+					if (lb[k]   == 0x85 && lb[k+1] == sa &&
+					    lb[k+2] == 0x86 && lb[k+3] == sx &&
+					    lb[k+4] == 0x84 && lb[k+5] == sy) {
+						php_insert_pos = k;
+						break;
+					}
+					/* Pattern B: STA _a; STY _y; LDX _sp; INX
+					 * (85 sa 84 sy A6 ssp E8) — 7 bytes.
+					 * Matches NRTS/PHA when STX _x was stripped. */
+					if (k + 6 < lowered_size &&
+					    lb[k]   == 0x85 && lb[k+1] == sa &&
+					    lb[k+2] == 0x84 && lb[k+3] == sy &&
+					    lb[k+4] == 0xA6 && lb[k+5] == ssp &&
+					    lb[k+6] == 0xE8) {
+						php_insert_pos = k;
+						break;
+					}
+				}
+				if (php_insert_pos != 0xFF) {
+					uint8_t k = php_insert_pos;
+					if (k == 0 || lb[k-1] != 0x08) {
+						/* PHP missing — shift right and insert. */
+						if (lowered_size < CACHE_CODE_BUF_SIZE) {
+							for (uint8_t s = lowered_size; s > k; s--)
+								lb[s] = lb[s-1];
+							lb[k] = 0x08;  /* PHP */
+							lowered_size++;
+						}
+					}
+				}
+			}
+			/* Update code_index to lowered size before resolving patches,
+			 * so ir_resolve_deferred_patches scans the correct range. */
+			if (lowered_size) {
+				code_index = lowered_size;
+				metrics_ir_block(ir_bytes_before, code_index);
+				/* Safety: pad gap between lowered output and pre-IR end
+				 * with NOP bytes.  21-byte patchable templates have an
+				 * internal BEQ at +0 with offset 19 targeting +21.
+				 * If the optimizer removed bytes, the epilogue (appended
+				 * at code_index) could overlap a template's +21 position,
+				 * skipping the epilogue's PHP and corrupting the stack.
+				 * NOP padding keeps +21 within valid code. */
+				while (code_index < ir_bytes_before) {
+					cache_code[0][code_index++] = 0xEA;  /* NOP */
+				}
+			}
+			/* Phase B: resolve direct branch placeholders (JMP $FFFE)
+			 * BEFORE deferred patches — uses fence table + entry list. */
+			ir_resolve_direct_branches();
+			/* Rebuild block_ci_map from post-lowering fence offsets
+			 * so future intra-block branches use correct native positions. */
+			ir_rebuild_block_ci_map();
+			/* Compute post-lowering native offsets for ALL tracked
+			 * instructions so mid-block PCs can be published. */
+			ir_compute_instr_offsets();
+			/* Phase B: resolve deferred branch/JMP pending patches with
+			 * correct post-lowering flash addresses (while bank1 mapped). */
+			ir_resolve_deferred_patches();
+			/* Capture per-pass counters while bank 1 is mapped */
+			uint8_t ir_pass_rl = ir_ctx.stat_redundant_load;
+			uint8_t ir_pass_ds = ir_ctx.stat_dead_store;
+			uint8_t ir_pass_dl = ir_ctx.stat_dead_load;
+			uint8_t ir_pass_pp = ir_ctx.stat_php_plp;
+			uint8_t ir_pass_pr = ir_ctx.stat_pair_rewrite;
+			uint8_t ir_pass_rmw = ir_ctx.stat_rmw_fusion;
+			/* Count dead (killed) nodes */
+			uint8_t ir_dead_cnt = 0;
+			{ uint8_t k; for (k = 0; k < ir_ctx.node_count; k++) {
+				if (ir_ctx.nodes[k].op == 0xFF) ir_dead_cnt++;
+			} }
+			bankswitch_prg(ir_saved_bank);
+			metrics_ir_nodes_killed(ir_dead_cnt);
+			metrics_ir_pass_results(ir_pass_rl, ir_pass_ds, ir_pass_dl,
+			                        ir_pass_pp, ir_pass_pr, ir_pass_rmw);
+			// If ir_lower returns 0 (error), keep original buffer unchanged
+		}
+
+#endif
+
+		// --- Build epilogue into cache_code buffer, then write header + all code to flash ---
+		uint8_t epilogue_start = code_index;
+
+		// IMPORTANT: Reload exit_pc from WRAM backup.  VBCC -O2 stores
+		// the local 'exit_pc' in a ZP register pair that is reused for
+		// temporaries during the IR optimise/lower/patch passes above,
+		// corrupting the value.  Same class of bug as entry_pc (below).
+		exit_pc = (uint16_t)exit_pc_lo_safe
+		        | ((uint16_t)exit_pc_hi_safe << 8);
+
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+		// Patchable epilogue (21 bytes) — built in buffer, written by loop below
+		cache_code[0][code_index++] = 0x08;  // PHP
+		cache_code[0][code_index++] = 0x18;  // CLC
+		cache_code[0][code_index++] = 0x90;  // BCC
+		cache_code[0][code_index++] = 4;     // offset → regular path at +8
+		cache_code[0][code_index++] = 0x28;  // PLP (fast path)
+		cache_code[0][code_index++] = 0x4C;  // JMP (fast path)
+		cache_code[0][code_index++] = 0xFF;  // JMP lo (PATCHABLE)
+		cache_code[0][code_index++] = 0xFF;  // JMP hi (PATCHABLE)
+		cache_code[0][code_index++] = 0x85;  // STA _a (regular path)
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);
+		cache_code[0][code_index++] = 0xA9;  // LDA #<exit_pc
+		cache_code[0][code_index++] = (uint8_t)exit_pc;
+		cache_code[0][code_index++] = 0x85;  // STA _pc
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&pc);
+		cache_code[0][code_index++] = 0xA9;  // LDA #>exit_pc
+		cache_code[0][code_index++] = (uint8_t)(exit_pc >> 8);
+		cache_code[0][code_index++] = 0x85;  // STA _pc+1
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
+		cache_code[0][code_index++] = 0x4C;  // JMP cross_bank_dispatch
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+		// +21: Cross-bank fast-path setup (18 bytes)
+		cache_code[0][code_index++] = 0x08;  // PHP (re-save guest flags)
+		cache_code[0][code_index++] = 0x85;  // STA _a
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);
+		cache_code[0][code_index++] = 0xA9;  // LDA #$FF (target addr lo, PATCHABLE)
+		cache_code[0][code_index++] = 0xFF;
+		cache_code[0][code_index++] = 0x8D;  // STA xbank_addr (abs)
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&xbank_addr);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_addr) >> 8);
+		cache_code[0][code_index++] = 0xA9;  // LDA #$FF (target addr hi, PATCHABLE)
+		cache_code[0][code_index++] = 0xFF;
+		cache_code[0][code_index++] = 0x8D;  // STA xbank_addr+1 (abs)
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_addr) + 1);
+		cache_code[0][code_index++] = (uint8_t)((((uint16_t)&xbank_addr) + 1) >> 8);
+		cache_code[0][code_index++] = 0xA9;  // LDA #$FF (target bank, PATCHABLE)
+		cache_code[0][code_index++] = 0xFF;
+		cache_code[0][code_index++] = 0x4C;  // JMP xbank_trampoline
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&xbank_trampoline);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&xbank_trampoline) >> 8);
+#else
+		// Standard epilogue (14 bytes) — built in buffer, written by loop below
+		cache_code[0][code_index++] = 0x85;  // STA _a
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&a);
+		cache_code[0][code_index++] = 0x08;  // PHP
+		cache_code[0][code_index++] = 0xA9;  // LDA #<exit_pc
+		cache_code[0][code_index++] = (uint8_t)exit_pc;
+		cache_code[0][code_index++] = 0x85;  // STA _pc
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&pc);
+		cache_code[0][code_index++] = 0xA9;  // LDA #>exit_pc
+		cache_code[0][code_index++] = (uint8_t)(exit_pc >> 8);
+		cache_code[0][code_index++] = 0x85;  // STA _pc+1
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&pc) + 1);
+		cache_code[0][code_index++] = 0x4C;  // JMP cross_bank_dispatch
+		cache_code[0][code_index++] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+		cache_code[0][code_index++] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+#endif  // ENABLE_PATCHABLE_EPILOGUE
+
+		// --- Write block header to flash ---
+		// flash_code_address points to header start; code starts at +BLOCK_HEADER_SIZE
+		//
+		// IMPORTANT: Reload entry_pc from the global arrays that were set
+		// at compile start (line ~595).  VBCC -O2 stores the local
+		// 'entry_pc' in a ZP register pair (r22:r23) but reuses those
+		// registers for temporaries during the ~37000-instruction compile
+		// process, corrupting the value.  The cache_entry_pc arrays live
+		// in ZP globals that survive function calls.
+		entry_pc = (uint16_t)cache_entry_pc_lo[0]
+		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
+		flash_byte_program(flash_code_address + 0, flash_code_bank, (uint8_t)entry_pc);        // entry_pc lo
+		flash_byte_program(flash_code_address + 1, flash_code_bank, (uint8_t)(entry_pc >> 8));  // entry_pc hi
+		flash_byte_program(flash_code_address + 2, flash_code_bank, exit_pc_lo_safe);           // exit_pc lo (from WRAM backup)
+		flash_byte_program(flash_code_address + 3, flash_code_bank, exit_pc_hi_safe);           // exit_pc hi (from WRAM backup)
+		flash_byte_program(flash_code_address + 4, flash_code_bank, code_index);                // code_len (code+epilogue)
+		flash_byte_program(flash_code_address + 5, flash_code_bank, epilogue_start);            // epilogue_offset
+#ifdef ENABLE_BLOCK_CYCLES
+		// Store pre-computed 6502 cycle count (capped at 255).
+		// Read by dispatch_on_pc asm before executing the block.
+		flash_byte_program(flash_code_address + 6, flash_code_bank,
+			(uint8_t)(block_cycles_acc > 255 ? 255 : block_cycles_acc));  // cycles
+#else
+		// flash_code_address + 6 = flags (leave 0xFF = erased)
+#endif
+		// flash_code_address + 7 = reserved — used as block-complete sentinel
+
+		// --- Write code + epilogue to flash ---
+		for (uint8_t i = 0; i < code_index; i++) {
+			flash_byte_program(flash_code_address + BLOCK_HEADER_SIZE + i, flash_code_bank, cache_code[0][i]);
+		}
+
+		// Block-complete sentinel: write $AA to the reserved header byte
+		// (offset 7 = dispatch_addr - 1) AFTER all code bytes are in flash.
+		// The dispatch asm guard checks this byte before jumping to the
+		// block — if it's still $FF (erased), the block is incomplete and
+		// dispatch treats it as a cache miss.  This catches:
+		//  - Stale PC table entries pointing to erased/reused flash
+		//  - Partial flash writes (power loss, programming failure)
+		//  - Any future bugs that create premature table entries
+		flash_byte_program(flash_code_address + 7, flash_code_bank, BLOCK_SENTINEL);
+
+		// Reload entry_pc again — the flash write loop above involves many
+		// function calls that may clobber VBCC's register allocation.
+		entry_pc = (uint16_t)cache_entry_pc_lo[0]
+		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
+
+#ifdef ENABLE_STATIC_ANALYSIS
+		// Record this entry PC in the SA bitmap so the next boot's BFS walk
+		// includes all runtime-discovered code addresses.  Single flash
+		// bit-clear (1→0), free on SST39SF040 — no erase required.
+		sa_bitmap_mark(entry_pc);
+#endif
+
+#ifdef ENABLE_IR
+		// --- Deferred IR entry-PC table update ---
+		// Now that both the header and code are in flash, it's safe to
+		// publish the PC table entry.  Re-set up the table pointers
+		// (the compile loop's setup_flash_pc_tables calls for later
+		// instructions may have overwritten them) and commit.
+		setup_flash_pc_tables(entry_pc);
+		flash_cache_pc_update(0, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+		opt2_notify_block_compiled(entry_pc, flash_code_address + BLOCK_PREFIX_SIZE, flash_code_bank);
+#endif
+
+		// --- Publish mid-block PC fences ---
+		// IR_PC_MARK nodes recorded SA-identified branch targets.
+		// After lowering, each fence has a known native byte offset.
+		// Publish them so dispatch can enter this block mid-stream
+		// instead of compiling a duplicate block.
+		// Guard: only publish if IR lowering actually ran (enabled=1).
+		// When IR is disabled mid-block (node overflow), fence offsets
+		// were never populated and would be wrong.
+		if (ir_ctx.enabled && ir_ctx.fence_count) {
+			uint8_t f;
+			for (f = 0; f < ir_ctx.fence_count; f++) {
+				uint16_t fpc = ir_ctx.fence_guest_pc[f];
+				uint8_t  foff = ir_ctx.fence_native_offset[f];
+				// Skip leading PLP from deferred peephole flush.
+				// When dispatch enters a fence, there's no matching
+				// PHP — a leading PLP would pop the dispatch JSR
+				// return byte and corrupt S.
+				if (foff < code_index && cache_code[0][foff] == 0x28)
+					foff++;
+				// Safety: don't publish fences past main code
+				if (foff >= epilogue_start) continue;
+				setup_flash_pc_tables(fpc);
+				flash_cache_pc_update(foff, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+				opt2_notify_block_compiled(fpc,
+					flash_code_address + foff + BLOCK_PREFIX_SIZE,
+					flash_code_bank);
+#endif
+			}
+		}
+
+		// --- Publish ALL mid-block instruction PCs ---
+		// Same as the SA deferred section: sa_ir_instr_native_off[] holds
+		// post-lowering offsets (when IR succeeded) or raw pre-IR offsets
+		// (when IR overflowed mid-block).  Publishing these lets dispatch
+		// enter this block at any guest instruction — critical for NMI
+		// return (RTI) and JSR return (RTS) to mid-block PCs.
+		entry_pc = (uint16_t)cache_entry_pc_lo[0]
+		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
+		if (sa_ir_instr_count > 0) {
+			uint8_t _mi;
+			for (_mi = 0; _mi < sa_ir_instr_count; _mi++) {
+				uint8_t noff = sa_ir_instr_native_off[_mi];
+				if (noff == 0xFF) continue;
+				if (noff >= epilogue_start) continue;
+				// Skip entry PC (already published above at offset 0)
+				if (noff == 0 && sa_ir_instr_pc_offset[_mi] == 0) continue;
+				uint16_t mpc = entry_pc + sa_ir_instr_pc_offset[_mi];
+				// Skip PLP guard
+				if (noff < epilogue_start && cache_code[0][noff] == 0x28)
+					noff++;
+				if (noff >= epilogue_start) continue;
+				setup_and_update_pc(mpc, noff, RECOMPILED);
+#ifdef ENABLE_OPTIMIZER_V2
+				opt2_notify_block_compiled(mpc,
+					flash_code_address + BLOCK_HEADER_SIZE + noff,
+					flash_code_bank);
+#endif
+			}
+		}
+#endif  /* ENABLE_IR */
+
+		// Shrink sector allocation to actual size used (avoid wasting space)
+		{
+			uint16_t shrunk = (flash_code_address & FLASH_SECTOR_MASK) + BLOCK_HEADER_SIZE + code_index;
+#ifdef PLATFORM_NES
+			// Don't reclaim ROM data copies placed beyond the code block
+			if (shrunk < sector_alloc_floor)
+				shrunk = sector_alloc_floor;
+#endif
+			sector_free_offset[next_free_sector] = shrunk;
+		}
+
+#ifdef ENABLE_OPTIMIZER
+		// Notify optimizer that a new unique block was compiled
+		opt_notify_block_compiled();
+		
+		// Mark the sector as in-use since we just compiled code to it
+		opt_mark_sector_in_use(flash_code_bank);
+#endif
+
+		// V2 notify is now called per-instruction in the compile loop above
+		
+#ifdef ENABLE_OPTIMIZER_V2
+		// Periodic sweep: after every 8 blocks, resolve pending branch patches
+		// and scan flash for patchable epilogues that can now be chained
+		static uint8_t blocks_compiled = 0;
+		if (++blocks_compiled >= 8) {
+			blocks_compiled = 0;
+			// Sweep pending branch patches
+			opt2_sweep_pending_patches();
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+			// Scan all flash blocks for epilogues that can now be chained
+			opt2_scan_and_patch_epilogues();
+#endif
+		}
+#endif
+		
+		// Restore PC to entry point and execute from flash.
+		// Reload: VBCC may have clobbered entry_pc's register during
+		// the optimizer/sweep/fence calls above.
+		entry_pc = (uint16_t)cache_entry_pc_lo[0]
+		         | ((uint16_t)cache_entry_pc_hi[0] << 8);
+		pc = entry_pc;
+		
+		result = dispatch_on_pc();
+		// dispatch_on_pc should return 0 (executed from flash)
+
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+		// Restore PPU emphasis after dynamic compile — the IO8(0x2001)
+		// write at the start of this function dimmed the screen.  Without
+		// this restore, the emphasis bits persist until the next VBlank
+		// lnPPUMASK write, making every mid-frame compile visible as a
+		// one-frame dim.  Writing lnPPUMASK back immediately eliminates
+		// the visible flicker for post-SA runtime compiles.
+		IO8(0x2001) = lnPPUMASK;
+#endif
+
+		// Optimizer trigger check moved to main loop in exidy.c
+		return;
 	}
-	else
-	{
-		cache_exit_pc_lo[cache_index] = (uint8_t) pc;
-		cache_exit_pc_hi[cache_index] = (uint8_t) (pc >> 8 );		
-	}
-	
-	if (flash_enabled)
-	{
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 0), flash_code_bank, cache_exit_pc_lo[cache_index]);
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 1), flash_code_bank, cache_exit_pc_hi[cache_index]);
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 2), flash_code_bank, cache_entry_pc_lo[cache_index]);
-		flash_byte_program((flash_code_address + BLOCK_CONFIG_BASE + 3), flash_code_bank, cache_entry_pc_hi[cache_index]);
-	}		
-
-	check_cache_links();	
-/*	
-	while (code_index < CODE_SIZE)	// for easier viewing in memory
-		cache_code[cache_index][code_index++] = 0;		
-*/			
-
-	next_new_cache = cache_index;
-
-	ready();
-	return;
 }
 
 //============================================================================================================
@@ -319,105 +1443,1206 @@ pc_jump_flag_bank = ((address >> 14) + BANK_PC_FLAGS);\
 pc_jump_flag_address = (address & FLASH_BANK_MASK);
 
 //============================================================================================================
+// ==========================================================================
+// flash_cache_search — dead code, removed to save bank2 space.
+// ==========================================================================
+#if 0
+#pragma section bank2
 
-void flash_cache_pc_flag_clear(uint16_t emulated_pc, uint8_t flag)
-{
-	lookup_pc_jump_flag(emulated_pc);
-	bankswitch_prg(pc_jump_flag_bank);	
-	uint8_t data = flash_cache_pc_flags[pc_jump_flag_address];
-	data &= flag;
-	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, data);	
-}
-
-//============================================================================================================
-
-uint8_t flash_cache_search(uint16_t emulated_pc)
+static uint8_t flash_cache_search_b2(uint16_t emulated_pc)
 {	
 	lookup_pc_jump_flag(emulated_pc);
-	bankswitch_prg(pc_jump_flag_bank);
-	uint8_t test = (flash_cache_pc_flags[pc_jump_flag_address] && RECOMPILED);
-	if (test) //(flash_cache_pc_flags[pc_jump_flag_address] && RECOMPILED);	// D7 clear if RECOMPILED
-		return 0;
+	uint8_t test = peek_bank_byte(pc_jump_flag_bank, (uint16_t)&flash_cache_pc_flags[pc_jump_flag_address]) & RECOMPILED;
+	if (test)
+		return 0; // not found
 		
-	// run!
+	// run native code, return through flash_dispatch_return
 	uint32_t full_address = (emulated_pc << 1);
 	pc_jump_bank = ((emulated_pc >> 13) + BANK_PC);
 	pc_jump_address = (full_address & FLASH_BANK_MASK);
-	bankswitch_prg(pc_jump_bank);
 	
-	//const uint16_t *run_label = (uint16_t *) &run_again[0];
 	IO8(0x4020) = 0x25;
-	void (*code_ptr)(void) = (void*) flash_cache_pc[pc_jump_address];
+	uint16_t code_addr = peek_bank_byte(pc_jump_bank, (uint16_t)&flash_cache_pc[pc_jump_address])
+	                   | (peek_bank_byte(pc_jump_bank, (uint16_t)&flash_cache_pc[pc_jump_address + 1]) << 8);
+	void (*code_ptr)(void) = (void*) code_addr;
 	(*code_ptr)();
-	return 1;
+	//unreachable, returns through flash_dispatch_return
 }
 
-//============================================================================================================
+#pragma section default
 
-uint16_t flash_cache_select()
+uint8_t flash_cache_search(uint16_t emulated_pc)
 {
-	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
-	for (uint16_t i = 0; i < FLASH_CACHE_BLOCKS; i++)
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	uint8_t result = flash_cache_search_b2(emulated_pc);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+#endif // dead code
+
+//============================================================================================================
+// Compile-time functions — banked in BANK_COMPILE (bank 17).
+// These run only during JIT compilation or init, never at dispatch time.
+// Functions that read cross-bank data use peek_bank_byte() (WRAM helper)
+// instead of bankswitch_prg() to avoid unmapping their own code.
+// flash_byte_program() is safe (lives in WRAM, handles its own bankswitch).
+//============================================================================================================
+#pragma section bank17
+
+extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+
+static uint8_t flash_sector_alloc_b17(uint8_t total_size)
+{
+	// total_size = code + epilogue bytes (header added internally)
+	uint16_t need = (uint16_t)total_size + BLOCK_HEADER_SIZE;
+	
+	uint8_t s = next_free_sector;
+	uint8_t start_sector = s;
+	uint8_t checked_any = 0;
+	
+	// Loop through all sectors looking for one with enough space.
+	// Use start_sector wrap-around detection instead of a separate counter,
+	// because vbcc optimizes away unused loop counters causing infinite loops.
+	for (;;)
 	{
-		if (flash_block_flags[i] & FLASH_AVAILABLE)					
-			return (i + 1);		
+		if (s >= FLASH_CACHE_SECTORS) s = 0;  // wrap without modulo
+		if (checked_any && s == start_sector)
+			break;  // wrapped all the way around — no space
+		checked_any = 1;
+		
+		uint16_t cur = sector_free_offset[s];
+		
+		// Align code entry to 16-byte boundary:
+		// header goes at (aligned - BLOCK_HEADER_SIZE), code at aligned
+		uint16_t code_start = (cur + BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT_MASK) & ~BLOCK_ALIGNMENT_MASK;
+		uint16_t header_start = code_start - BLOCK_HEADER_SIZE;
+		uint16_t end = code_start + total_size;
+		
+		if (end > FLASH_ERASE_SECTOR_SIZE)
+		{
+			s++;
+			continue;  // doesn't fit in this sector
+		}
+		
+		// Compute bank and address from sector index
+		// Use >>2 and &3 instead of /4 and %4 to avoid 32-bit division
+		uint8_t bank = (s >> 2) + BANK_CODE;
+		uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(s & 3) << 12);
+		
+		flash_code_bank = bank;
+		flash_code_address = sector_base + header_start;  // points to header start
+		
+		// Advance the free pointer past this allocation
+		sector_free_offset[s] = end;
+		next_free_sector = s;  // start next search here
+		
+		return 1;  // success
 	}
-	return 0;
+	return 0;  // all sectors full
 }	
 
 //============================================================================================================
-void flash_cache_copy(uint8_t src_idx, uint16_t dest_idx)
+
+static uint8_t lookup_native_addr_safe_b17(uint16_t target_pc)
 {
-	uint8_t i;
-	for (i = 0; (i < FLASH_CACHE_BLOCK_SIZE - 6) && (i < cache_vpc[src_idx]); i++)
+	// Read flag via peek_bank_byte (safe from banked code)
+	uint8_t flag_bank = (target_pc >> 14) + BANK_PC_FLAGS;
+	uint8_t flag = peek_bank_byte(flag_bank,
+	    (uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
+	if (flag & RECOMPILED)
+		return 0;  // not compiled
+	reserve_result_bank = flag & 0x1F;
+
+	// Read native address via peek_bank_byte
+	uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
+	uint8_t pc_bank = (target_pc >> 13) + BANK_PC;
+	uint16_t na = peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pa])
+	            | ((uint16_t)peek_bank_byte(pc_bank, (uint16_t)&flash_cache_pc[pa + 1]) << 8);
+	reserve_result_addr = na;
+
+	return 1;
+}
+
+static uint8_t lookup_entry_list_b17(uint16_t target_pc)
+{
+	uint8_t target_lo = (uint8_t)target_pc;
+	uint8_t target_hi = (uint8_t)(target_pc >> 8);
+
+	for (uint16_t i = 0; i < entry_list_offset; i += ENTRY_LIST_STRIDE)
 	{
-		uint8_t data = cache_code[src_idx][i];
-		flash_byte_program((flash_code_address + i), flash_code_bank, data);
+		uint8_t b0 = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i);
+		uint8_t b1 = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 1);
+		if (b0 == 0xFF && b1 == 0xFF)
+			break;  // end sentinel
+		if (b0 == target_lo && b1 == target_hi)
+		{
+			reserve_result_addr = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 4)
+			                    | ((uint16_t)peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 5) << 8);
+			reserve_result_bank = peek_bank_byte(BANK_ENTRY_LIST, FLASH_BANK_BASE + i + 6);
+			return 1;
+		}
 	}
-	flash_byte_program((flash_code_address + i + 0), flash_code_bank, 0x4C); //opJMP
-	flash_byte_program((flash_code_address + i + 1), flash_code_bank, (uint8_t) ((uint16_t) &flash_dispatch_return)); //opJMP
-	flash_byte_program((flash_code_address + i + 2), flash_code_bank, (uint8_t) (((uint16_t) &flash_dispatch_return) >> 8)); //opJMP
-		
-	bankswitch_prg(BANK_FLASH_BLOCK_FLAGS);
-	flash_byte_program((uint16_t) &flash_block_flags[0] + dest_idx, mapper_prg_bank, flash_block_flags[dest_idx] & ~FLASH_AVAILABLE);
+
+	return 0;
 }
 
 //============================================================================================================
+
+static void flash_cache_pc_update_b17(uint8_t code_address, uint8_t flags)
+{
+	// Code starts at flash_code_address + BLOCK_PREFIX_SIZE (after header)
+	uint16_t native_addr = flash_code_address + code_address + BLOCK_PREFIX_SIZE;
+	
+	// Guard against flash AND corruption: if slot already programmed, skip.
+	uint8_t current_flag = peek_bank_byte(pc_jump_flag_bank,
+	    (uint16_t)&flash_cache_pc_flags[pc_jump_flag_address]);
+	
+	if (current_flag != 0xFF)
+		return;  // slot already programmed — don't AND-corrupt it
+	
+	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t)native_addr);
+	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t)(native_addr >> 8));			
+	
+	uint8_t flag_byte;
+	if (flags == RECOMPILED)
+		flag_byte = flash_code_bank;  // Bit 7 clear = execute compiled code from flash
+	else  // INTERPRETED - this instruction needs to be interpreted
+		flag_byte = RECOMPILED;   // Bit 7 set, bit 6 clear = dispatch returns 2 (interpret)
+	
+	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, flag_byte);
+}
+
+//============================================================================================================
+
+static void setup_flash_pc_tables_b17(uint16_t emulated_pc)
+{
+	uint32_t full_address;
+	full_address = (emulated_pc << 1);
+	pc_jump_bank = ((emulated_pc >> 13) + BANK_PC);
+	pc_jump_address = (full_address & FLASH_BANK_MASK);
+
+	lookup_pc_jump_flag(emulated_pc);
+}
+
+// Combined setup + update in a single bank17 call (avoids double bankswitch)
+static void setup_and_update_pc_b17(uint16_t emulated_pc, uint8_t code_address, uint8_t flags)
+{
+	setup_flash_pc_tables_b17(emulated_pc);
+	flash_cache_pc_update_b17(code_address, flags);
+}
+
+static void setup_flash_address_b17(uint16_t emulated_pc, uint16_t block_number)
+{
+	if (block_number) {}  // suppress unused-parameter warning
+	setup_flash_pc_tables_b17(emulated_pc);
+}
+
+//============================================================================================================
+
+static void flash_cache_init_sectors_b17(void)
+{
+	// Zero the free-pointer table
+	for (uint8_t i = 0; i < FLASH_CACHE_SECTORS; i++)
+		sector_free_offset[i] = 0;
+	next_free_sector = 0;
+}
+
+//============================================================================================================
+
+#ifdef ENABLE_OPTIMIZER_V2
+static uint8_t invert_branch_b17(uint8_t opcode) {
+    return opcode ^ 0x20;
+}
+#endif
+
+//============================================================================================================
+// Intra-block backward branch helper (bank 17 — callable via trampoline).
+//============================================================================================================
+static uint8_t try_intra_block_branch_b17(uint16_t target_pc, uint8_t branch_opcode)
+{
+	if (block_has_jsr & 2)
+		return 0;
+	
+#ifdef ENABLE_PEEPHOLE
+	if (block_has_skip)
+		return 0;
+#endif
+	
+	uint16_t block_entry = (uint16_t)cache_entry_pc_lo[cache_index]
+	                     | ((uint16_t)cache_entry_pc_hi[cache_index] << 8);
+	
+	if (target_pc < block_entry || target_pc >= pc)
+		return 0;
+	
+	uint8_t ci_slot = (uint8_t)(target_pc - block_entry) & 0x3F;
+	uint8_t ci_val = block_ci_map[ci_slot];
+	if (ci_val == 0)
+		return 0;
+	uint8_t target_code_index = ci_val - 1;
+	
+	int16_t offset16 = (int16_t)target_code_index - (int16_t)(code_index + 2);
+	
+	if (offset16 < -128 || offset16 > 127)
+		return 0;
+	
+	cache_code[cache_index][code_index+0] = branch_opcode;
+	cache_code[cache_index][code_index+1] = (uint8_t)(int8_t)offset16;
+	
+	setup_flash_address_b17(pc, flash_cache_index);
+	flash_cache_pc_update_b17(code_index, RECOMPILED);
+	
+	pc += 2;
+	code_index += 2;
+	cache_branches++;
+	cache_flag[cache_index] |= READY_FOR_NEXT;
+	return 1;
+}
+
+#ifdef PLATFORM_NES
+// nes_rom_data_copy_b17 — allocate 256 bytes in a flash sector and copy
+// ROM data there.  Returns the absolute flash address of the data, or 0
+// on failure (all sectors full).
+//
+// rom_offset: offset into PRG ROM (encoded_address & 0x3FFF)
+// Result: absolute address in flash ($8000-$BFFF range) of 256 data bytes,
+//         with the correct bank stored in nes_rom_copy_bank.
+//
+// The caller emits e.g. LDA flash_addr,X using the returned address.
+// At runtime, dispatch_on_pc switches to the code block's bank, and the
+// ROM data copy lives in the SAME flash sector — zero bank switching.
+
+static uint16_t nes_rom_data_copy_b17(uint16_t rom_offset)
+{
+	// Find a sector with >= 256 free bytes
+	uint8_t s = next_free_sector;
+	uint8_t start_s = s;
+	uint8_t checked = 0;
+	for (;;) {
+		if (s >= FLASH_CACHE_SECTORS) s = 0;
+		if (checked && s == start_s) return 0;  // all full
+		checked = 1;
+		uint16_t cur = sector_free_offset[s];
+		if (cur + 256 <= FLASH_ERASE_SECTOR_SIZE) break;  // fits
+		s++;
+	}
+	uint8_t bank = (s >> 2) + BANK_CODE;
+	uint16_t sector_base = FLASH_BANK_BASE + ((uint16_t)(s & 3) << 12);
+	uint16_t flash_addr = sector_base + sector_free_offset[s];
+
+	// Copy 256 ROM bytes from BANK_NES_PRG_LO into flash
+	uint16_t rom_base = (uint16_t)&ROM_NAME[rom_offset];
+	for (uint16_t i = 0; i < 256; i++) {
+		uint8_t byte = peek_bank_byte(BANK_NES_PRG_LO, rom_base + i);
+		flash_byte_program(flash_addr + i, bank, byte);
+	}
+
+	sector_free_offset[s] += 256;
+	// Prevent post-compile shrink from reclaiming this data copy
+	if (sector_free_offset[s] > sector_alloc_floor)
+		sector_alloc_floor = sector_free_offset[s];
+	nes_rom_copy_bank = bank;
+	return flash_addr;
+}
+#endif
+
+//============================================================================================================
+// Fixed-bank trampolines for BANK_COMPILE functions.
+// Save caller's bank, switch to bank 17, call _b17 impl, restore bank.
+//============================================================================================================
+#pragma section default
+
+uint8_t flash_sector_alloc(uint8_t total_size)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = flash_sector_alloc_b17(total_size);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+
+#ifdef PLATFORM_NES
+uint8_t nes_rom_copy_bank;   // bank of last successful ROM data copy
+uint16_t nes_rom_data_copy(uint16_t rom_offset)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint16_t result = nes_rom_data_copy_b17(rom_offset);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+#endif
+
+// Result globals for lookup_native_addr_safe (and formerly reserve_block_for_pc)
+uint16_t reserve_result_addr;    // native entry address of looked-up block
+uint8_t  reserve_result_bank;    // flash bank of looked-up block
+
+uint8_t lookup_native_addr_safe(uint16_t target_pc)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = lookup_native_addr_safe_b17(target_pc);
+	bankswitch_prg(saved_bank);
+	return result;
+}
+
+uint8_t lookup_entry_list(uint16_t target_pc)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = lookup_entry_list_b17(target_pc);
+	bankswitch_prg(saved_bank);
+	return result;
+}
 
 void flash_cache_pc_update(uint8_t code_address, uint8_t flags)
-{		
-	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 0, pc_jump_bank, (uint8_t) flash_code_address + code_address);
-	flash_byte_program((uint16_t) &flash_cache_pc[0] + pc_jump_address + 1, pc_jump_bank, (uint8_t) ((flash_code_address + code_address) >> 8));			
-	
-	flash_byte_program((uint16_t) &flash_cache_pc_flags[0] + pc_jump_flag_address, pc_jump_flag_bank, flash_code_bank | ((~flags) & 0xE0));
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	flash_cache_pc_update_b17(code_address, flags);
+	bankswitch_prg(saved_bank);
 }
 
-//============================================================================================================
+void setup_flash_pc_tables(uint16_t emulated_pc)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	setup_flash_pc_tables_b17(emulated_pc);
+	bankswitch_prg(saved_bank);
+}
+
+// Combined setup + update with a single bankswitch pair (vs 2 pairs for
+// separate setup_flash_pc_tables + flash_cache_pc_update calls).
+void setup_and_update_pc(uint16_t emulated_pc, uint8_t code_address, uint8_t flags)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	setup_and_update_pc_b17(emulated_pc, code_address, flags);
+	bankswitch_prg(saved_bank);
+}
 
 void setup_flash_address(uint16_t emulated_pc, uint16_t block_number)
 {
-	uint32_t full_address;
-	//full_address = (block_number * FLASH_CACHE_BLOCK_SIZE);
-	
-	flash_code_bank = (block_number / 0x40) + BANK_CODE ; //(uint32_t) (full_address >> 13) + BANK_CODE; //((full_address / FLASH_BANK_SIZE) + BANK_CODE);
-	flash_code_address = ((block_number % 0x40) << 8) + FLASH_BANK_BASE; //((full_address & FLASH_BANK_MASK) + FLASH_BANK_BASE);
-	
-	full_address = (emulated_pc << 1);
-	pc_jump_bank = ((emulated_pc >> 13) + BANK_PC);
-	pc_jump_address = (full_address & FLASH_BANK_MASK);	
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	setup_flash_address_b17(emulated_pc, block_number);
+	bankswitch_prg(saved_bank);
+}
 
-	lookup_pc_jump_flag(emulated_pc);	
-	//bankswitch_prg((jump_target / FLASH_BANK_SIZE) + BANK_PC);	
+void flash_cache_init_sectors(void)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	flash_cache_init_sectors_b17();
+	bankswitch_prg(saved_bank);
+}
+
+uint8_t try_intra_block_branch(uint16_t target_pc, uint8_t branch_opcode)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = try_intra_block_branch_b17(target_pc, branch_opcode);
+	bankswitch_prg(saved_bank);
+	return result;
 }
 
 //============================================================================================================
-
-uint8_t recompile_opcode()
+// Pass-2 forward/backward branch helper — moved to bank2 (compile-time only).
+// For static pass 2 only: looks up target_pc in the entry list and emits
+// a 2-byte native branch or 5-byte Bxx_inv+JMP if same-bank.
+// Returns the emit length (2 or 5) on success, 0 if unable to resolve.
+// The caller provides the branch opcode and code buffer pointer.
+//============================================================================================================
+#ifdef ENABLE_IR
+//============================================================================================================
+// ir_emit_direct_branch_placeholder — FIXED-BANK implementation.
+// Records a direct-branch entry in ir_ctx and writes the 5-byte placeholder
+// (Bxx_inv +3 / JMP $FFFE) into cache_code[].  The wrapper recompile_opcode_b2()
+// will see code_index advanced, pick up these bytes, and record them as
+// IR_RAW_BYTE nodes during normal IR recording.
+// Returns cache_flag[cache_index] for the caller to return, or 0 if unable.
+//
+// IMPORTANT: This was previously split into a bank17 _b17 function + trampoline,
+// but vbcc -O2 optimized away ALL the cache_code writes, ir_ctx writes,
+// code_index/pc updates from the bank17 function (only the pc_jump_*
+// address computations survived, making it identical to setup_flash_pc_tables_b17).
+// Moving everything into the fixed bank with volatile writes prevents this.
+// All accessed data is in WRAM ($6000-$7FFF), so no bankswitch is needed.
+//============================================================================================================
+uint8_t ir_emit_direct_branch_placeholder(uint16_t target_pc, uint8_t branch_opcode)
 {
+	/* Capacity / space checks */
+	if ((code_index + 5 + EPILOGUE_SIZE + 6) >= CODE_SIZE ||
+	    ir_ctx.direct_branch_count >= IR_MAX_DIRECT_BRANCHES)
+		return 0;
+
+	/* Record direct-branch entry in ir_ctx.
+	 * Use volatile casts to prevent vbcc -O2 dead-store elimination. */
+	uint8_t idx = ir_ctx.direct_branch_count;
+	*(volatile uint16_t *)&ir_ctx.direct_branches[idx].target_pc = target_pc;
+	*(volatile uint8_t  *)&ir_ctx.direct_branches[idx].branch_opcode = branch_opcode;
+	*(volatile uint8_t  *)&ir_ctx.direct_branches[idx].pad = 0;
+	*(volatile uint8_t  *)&ir_ctx.direct_branch_count = idx + 1;
+
+	/* Write 5-byte placeholder to code buffer.
+	 * Direct array access (not through pointer) + volatile to ensure
+	 * vbcc emits all five stores. */
+	uint8_t ci = code_index;
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 0] = branch_opcode ^ 0x20;  /* inverted branch */
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 1] = 3;                     /* skip next JMP */
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 2] = 0x4C;                  /* JMP */
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 3] = (uint8_t)(DIRECT_BRANCH_SENTINEL & 0xFF);
+	*(volatile uint8_t *)&cache_code[cache_index][ci + 4] = (uint8_t)(DIRECT_BRANCH_SENTINEL >> 8);
+
+	pc += 2;
+	code_index += 5;
+	cache_branches++;
+	cache_flag[cache_index] |= READY_FOR_NEXT;
+	return cache_flag[cache_index];
+}
+#endif
+
+#pragma section bank2
+#ifndef ENABLE_IR
+uint8_t try_direct_branch(uint16_t target_pc, uint8_t branch_opcode, uint8_t *code_ptr)
+{
+	if (!lookup_native_addr_safe(target_pc))
+		return 0;
+	if (reserve_result_bank != flash_code_bank)
+		return 0;
+
+	int16_t native_offset = (int16_t)reserve_result_addr
+	    - (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + code_index + 2);
+
+	if (native_offset >= -128 && native_offset <= 127 &&
+	    (code_index + 2 + EPILOGUE_SIZE + 6) < CODE_SIZE)
+	{
+		code_ptr[code_index+0] = branch_opcode;
+		code_ptr[code_index+1] = (uint8_t)(int8_t)native_offset;
+		return 2;
+	}
+	if ((code_index + 5 + EPILOGUE_SIZE + 6) < CODE_SIZE)
+	{
+		code_ptr[code_index+0] = branch_opcode ^ 0x20;  // invert
+		code_ptr[code_index+1] = 3;
+		code_ptr[code_index+2] = 0x4C;
+		code_ptr[code_index+3] = reserve_result_addr & 0xFF;
+		code_ptr[code_index+4] = (reserve_result_addr >> 8) & 0xFF;
+		return 5;
+	}
+	return 0;
+}
+#endif
+
+// ==========================================================================
+// recompile_opcode — moved to bank 2 to save ~6KB of fixed-bank space.
+// This is the single largest consumer (37% of fixed bank).
+// Performance of the recompiler itself doesn't matter — only the output.
+//
+// BANK 2 SAFETY RULES:
+//   - NEVER call bankswitch_prg() directly (would unmap self)
+//   - Use peek_bank_byte() for cross-bank reads (WRAM helper)
+//   - flash_byte_program() is safe (WRAM, restores mapper_prg_bank)
+//   - Fixed-bank functions ($C000+) are always reachable
+//   - opt2_record_pending_branch_safe() is a fixed-bank trampoline
+
+// Dirty-flag WRAM subroutines (defined in dynamos-asm.s).
+// Declared here so both emit_native_sta_indy and emit_dirty_flag can see them.
+extern void dirty_flag_screen(void);
+extern void dirty_flag_char(void);
+
+#ifdef ENABLE_POINTER_SWIZZLE
+// Mirror helpers — now in bank2 (compile-time only, called from recompile_opcode_b2).
+
+const mirrored_ptr_t *find_zp_mirror(uint8_t guest_zp)
+{
+	for (uint8_t i = 0; i < ZP_MIRROR_COUNT; i++) {
+		if (mirrored_ptrs[i].guest_lo == guest_zp ||
+		    mirrored_ptrs[i].guest_hi == guest_zp)
+			return &mirrored_ptrs[i];
+	}
+	return 0;
+}
+
+const mirrored_ptr_t *find_zp_mirror_lo(uint8_t guest_zp)
+{
+	for (uint8_t i = 0; i < ZP_MIRROR_COUNT; i++) {
+		if (mirrored_ptrs[i].guest_lo == guest_zp)
+			return &mirrored_ptrs[i];
+	}
+	return 0;
+}
+
+// emit_zp_mirror_write — bank2 helper called from recompile_opcode_b2.
+// If zp_addr is a tracked pointer byte, emits a 2-byte ZP opcode
+// (same opcode, mirror slot) to keep the NES mirror in sync.
+// The mirror always stays in Exidy address space; translation to
+// NES-space is deferred to the STA (zp),Y emit path.
+// Returns bytes emitted (0 or 2).
+uint8_t emit_zp_mirror_write(uint8_t *code_ptr, uint8_t ci, uint8_t opcode, uint8_t zp_addr)
+{
+	const mirrored_ptr_t *mp = find_zp_mirror(zp_addr);
+	if (!mp) return 0;
+	uint8_t mirror_zp = (zp_addr == mp->guest_lo) ? mp->nes_zp : (mp->nes_zp + 1);
+	code_ptr[ci]   = opcode;
+	code_ptr[ci+1] = mirror_zp;
+	return 2;
+}
+
+// emit_native_sta_indy — bank2 helper called from recompile_opcode_b2.
+// Copies the native_sta_indy_tmpl template, patching the emulated
+// RAM addresses.  The template reads the pointer from emulated RAM
+// (the ground truth) and translates the hi byte via the
+// address_decoding_table at runtime — correct for ANY Exidy address
+// (screen pointers, RAM offsets, ROM addresses).
+// Returns bytes emitted, or 0 if zp_addr is not a mirrored pointer.
+uint8_t emit_native_sta_indy(uint8_t *code_ptr, uint8_t ci,
+                             uint8_t zp_addr, uint8_t scrn_zp, uint8_t char_zp)
+{
+	extern uint8_t native_sta_indy_tmpl[];
+	extern uint8_t native_sta_indy_tmpl_size;
+	extern uint16_t native_sta_indy_emu_lo;
+	extern uint16_t native_sta_indy_emu_hi;
+
+	const mirrored_ptr_t *mp = find_zp_mirror_lo(zp_addr);
+	if (!mp) return 0;
+
+	// Patch template with emulated RAM addresses for this pointer
+	native_sta_indy_emu_lo = (uint16_t)mp->guest_lo + (uint16_t)&RAM_BASE[0];
+	native_sta_indy_emu_hi = (uint16_t)mp->guest_hi + (uint16_t)&RAM_BASE[0];
+	uint8_t n = native_sta_indy_tmpl_size;
+	for (uint8_t i = 0; i < n; i++)
+		code_ptr[ci + i] = native_sta_indy_tmpl[i];
+
+	if (mp->side_effect) {
+		uint16_t target = (mp->side_effect == 1)
+		    ? (uint16_t)&dirty_flag_screen
+		    : (uint16_t)&dirty_flag_char;
+		code_ptr[ci + n++] = 0x20;  // JSR abs
+		code_ptr[ci + n++] = (uint8_t)target;
+		code_ptr[ci + n++] = (uint8_t)(target >> 8);
+	}
+	return n;
+}
+
+// ZP mirror slots defined in dynamos-asm.s (linker assigns ZP addresses)
+__zpage extern uint8_t zp_mirror_0[2];
+__zpage extern uint8_t zp_mirror_1[2];
+__zpage extern uint8_t zp_mirror_2[2];
+
+// Table initializer uses linker-assigned ZP addresses for nes_zp field.
+// Can't use static initializer with address-of in vbcc, so we initialize
+// at first use.  The mirrored_ptrs array is writable (not const).
+mirrored_ptr_t mirrored_ptrs[ZP_MIRROR_COUNT];
+
+static uint8_t zp_mirror_initialized = 0;
+void init_zp_mirror_table(void)
+{
+	if (zp_mirror_initialized) return;
+	mirrored_ptr_t init_table[ZP_MIRROR_COUNT] = { ZP_MIRROR_TABLE };
+	uint8_t zp_addrs[ZP_MIRROR_COUNT];
+	zp_addrs[0] = (uint8_t)((uint16_t)&zp_mirror_0);
+	zp_addrs[1] = (uint8_t)((uint16_t)&zp_mirror_1);
+	zp_addrs[2] = (uint8_t)((uint16_t)&zp_mirror_2);
+
+	for (uint8_t i = 0; i < ZP_MIRROR_COUNT; i++) {
+		mirrored_ptrs[i] = init_table[i];
+		mirrored_ptrs[i].nes_zp = zp_addrs[i];
+	}
+
+	zp_mirror_initialized = 1;
+}
+
+// (bank2 continues — no section switch needed)
+#endif
+
+// emit_dirty_flag — bank2 helper (compile-time only).
+// Emits JSR to a WRAM subroutine that does PHP/INC zp/PLP/RTS.
+// This replaces the old inline PHP/INC/PLP sequence.  The PLP is now
+// inside a fixed WRAM routine, making it impossible for the IR optimizer,
+// peephole, or flash write path to lose the PLP byte.
+// Returns bytes emitted (3 for JSR) or 0 if not a screen/char store.
+uint8_t emit_dirty_flag(uint8_t *code_ptr, uint8_t ci,
+                        uint8_t opcode, uint8_t msb,
+                        uint8_t scrn_zp, uint8_t char_zp)
+{
+	(void)scrn_zp; (void)char_zp;  // no longer used
+	// Only for store opcodes to $40xx-$4Fxx
+	if ((opcode == 0x8D || opcode == 0x8E || opcode == 0x8C ||
+	     opcode == 0x9D || opcode == 0x99) &&
+	    msb >= 0x40 && msb < 0x50)
+	{
+		uint16_t target = (msb < 0x48)
+		    ? (uint16_t)&dirty_flag_screen
+		    : (uint16_t)&dirty_flag_char;
+		code_ptr[ci]   = 0x20;  // JSR abs
+		code_ptr[ci+1] = (uint8_t)target;
+		code_ptr[ci+2] = (uint8_t)(target >> 8);
+		return 3;
+	}
+	return 0;
+}
+
+// ==========================================================================
+// (already in bank2 — section continues from try_direct_branch/emit_dirty_flag)
+
+// Shared helper: emit a fixed-size opcode template (PHA/PLA/PHP/PLP).
+// Peephole: if previous template deferred its trailing PLP and this
+// template starts with PHP, skip the redundant PLP/PHP pair.
+// If this template ends with PLP (and started with PHP), defer the
+// trailing PLP for the next instruction to potentially elide.
+uint8_t emit_template(uint8_t *tmpl, uint8_t sz)
+{
+#ifdef ENABLE_PEEPHOLE
+	// Peephole: determine skip/trim
+	uint8_t skip = 0;  // bytes to skip at start (leading PHP)
+	uint8_t trim = 0;  // bytes to trim at end (trailing PLP)
+
+#ifdef ENABLE_PEEPHOLE_SKIP
+	// Skip: if previous template deferred its PLP (block_flags_saved)
+	// and this template starts with PHP, elide the redundant PLP/PHP pair.
+	// Limit to PHA/PLA-sized templates for safety (PHP template has inner
+	// PHP/PLA pairs whose stack balance depends on the outer PHP).
+	if (block_flags_saved && tmpl[0] == 0x08 && sz == opcode_6502_pha_size) {
+		skip = 1;
+		block_flags_saved = 0;  // cancel deferred PLP (elided)
+		peephole_skipped = 1;   // mark: leading PHP was skipped
+		block_has_skip = 1;     // block contains skip instructions
+		metrics_peephole_remove(1, 1);
+	} else if (block_flags_saved) {
+		// Deferred PLP but template can't elide — flush now.
+		*(volatile uint8_t *)&cache_code[cache_index][code_index] = 0x28;  // PLP
+		code_index++;
+		block_flags_saved = 0;
+	}
+#endif
+
+	// Only trim PHA (sz=13) and PLA (sz=13) templates — NOT PHP (sz=15).
+	// PHP's trailing PLP restores guest P from an inner PHA/PHP pair;
+	// deferring it would leave guest flags corrupted.
+	if (tmpl[0] == 0x08 && tmpl[sz - 1] == 0x28 && sz == opcode_6502_pha_size) {
+		// Template starts with PHP and ends with PLP (PHA/PLA):
+		// defer the trailing PLP for the compile loop to flush.
+#ifdef ENABLE_PEEPHOLE_TRIM
+		trim = 1;
+#endif
+	}
+	uint8_t emit_sz = sz - skip - trim;
+#else
+	uint8_t skip = 0;
+	uint8_t emit_sz = sz;
+#endif
+	// Size check: use sz-skip (not emit_sz) so the deferred PLP byte
+	// from trim is still counted against the space budget.
+	if ((code_index + sz - skip + 3) < CODE_SIZE) {
+		uint8_t *dst = &cache_code[cache_index][code_index];
+		for (uint8_t i = 0; i < emit_sz; i++)
+			dst[i] = tmpl[skip + i];
+		pc += 1;
+		code_index += emit_sz;
+#ifdef ENABLE_PEEPHOLE
+		block_flags_saved = trim;  // 1 = PLP deferred, 0 = not
+#endif
+		cache_flag[cache_index] |= READY_FOR_NEXT;
+		return cache_flag[cache_index];
+	}
+#ifdef ENABLE_PEEPHOLE
+	// Out of space — flush deferred PLP if any before bailing
+	// NOTE: volatile pointer cast on cache_code write prevents vbcc DCE.
+	// code_index uses plain ++ so compiler tracks the new value.
+	if (block_flags_saved) {
+		*(volatile uint8_t *)&cache_code[cache_index][code_index] = 0x28;  // PLP
+		code_index++;
+		block_flags_saved = 0;
+	}
+#endif
+	cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
+	cache_flag[cache_index] &= ~READY_FOR_NEXT;
+	return cache_flag[cache_index];
+}
+
+/* ==========================================================================
+ * IR Phase A: lookup tables and per-instruction IR recorder (bank 2).
+ *
+ * These replicate the native_to_ir / native_instr_size tables that
+ * previously lived in bank 1 (rodata1) so we can emit IR nodes from
+ * bank 2 without cross-bank calls.  ir_record_native_b2() is a lean
+ * version of the old ir_record_from_buffer(): it walks a short byte
+ * buffer (one instruction) and emits the corresponding IR node(s).
+ * ========================================================================== */
+#ifdef ENABLE_IR
+
+#pragma section rodata2
+
+/* Native 6502 opcode → IR opcode (0 = no mapping, emit as raw bytes) */
+static const uint8_t native_to_ir_b2[256] = {
+/*        0          1          2          3          4          5          6          7  */
+/* 0 */   IR_BRK,    0,         0,         0,         0,         IR_ORA_ZP, IR_ASL_ZP, 0,
+/* 0 */   IR_PHP,    IR_ORA_IMM,IR_ASL_A,  0,         0,         IR_ORA_ABS,IR_ASL_ABS,0,
+/* 1 */   IR_BPL,    0,         0,         0,         0,         0,         0,         0,
+/* 1 */   IR_CLC,    IR_ORA_ABSY,0,        0,         0,         IR_ORA_ABSX,IR_ASL_ABSX,0,
+/* 2 */   IR_JSR,    0,         0,         0,         IR_BIT_ZP, IR_AND_ZP, IR_ROL_ZP, 0,
+/* 2 */   IR_PLP,    IR_AND_IMM,IR_ROL_A,  0,         IR_BIT_ABS,IR_AND_ABS,IR_ROL_ABS,0,
+/* 3 */   IR_BMI,    0,         0,         0,         0,         0,         0,         0,
+/* 3 */   IR_SEC,    IR_AND_ABSY,0,        0,         0,         IR_AND_ABSX,IR_ROL_ABSX,0,
+/* 4 */   0,         0,         0,         0,         0,         IR_EOR_ZP, IR_LSR_ZP, 0,
+/* 4 */   IR_PHA,    IR_EOR_IMM,IR_LSR_A,  0,         IR_JMP_ABS,IR_EOR_ABS,IR_LSR_ABS,0,
+/* 5 */   IR_BVC,    0,         0,         0,         0,         0,         0,         0,
+/* 5 */   IR_CLI,    IR_EOR_ABSY,0,        0,         0,         IR_EOR_ABSX,IR_LSR_ABSX,0,
+/* 6 */   IR_RTS,    0,         0,         0,         0,         IR_ADC_ZP, IR_ROR_ZP, 0,
+/* 6 */   IR_PLA,    IR_ADC_IMM,IR_ROR_A,  0,         0,         IR_ADC_ABS,IR_ROR_ABS,0,
+/* 7 */   IR_BVS,    0,         0,         0,         0,         0,         0,         0,
+/* 7 */   IR_SEI,    IR_ADC_ABSY,0,        0,         0,         IR_ADC_ABSX,IR_ROR_ABSX,0,
+/* 8 */   0,         0,         0,         0,         IR_STY_ZP, IR_STA_ZP, IR_STX_ZP, 0,
+/* 8 */   IR_DEY,    0,         IR_TXA,    0,         IR_STY_ABS,IR_STA_ABS,IR_STX_ABS,0,
+/* 9 */   IR_BCC,    0,         0,         0,         0,         0,         0,         0,
+/* 9 */   IR_TYA,    IR_STA_ABSY,IR_TXS,   0,         0,         IR_STA_ABSX,0,        0,
+/* A */   IR_LDY_IMM,0,         IR_LDX_IMM,0,         IR_LDY_ZP, IR_LDA_ZP, IR_LDX_ZP, 0,
+/* A */   IR_TAY,    IR_LDA_IMM,IR_TAX,    0,         IR_LDY_ABS,IR_LDA_ABS,IR_LDX_ABS,0,
+/* B */   IR_BCS,    0,         0,         0,         IR_LDY_ABSX,0,         0,         0,
+/* B */   IR_CLV,    IR_LDA_ABSY,IR_TSX,   0,         IR_LDY_ABSX,IR_LDA_ABSX,IR_LDX_ABSY,0,
+/* C */   IR_CPY_IMM,0,         0,         0,         IR_CPY_ZP, IR_CMP_ZP, IR_DEC_ZP, 0,
+/* C */   IR_INY,    IR_CMP_IMM,IR_DEX,    0,         IR_CPY_ABS,IR_CMP_ABS,IR_DEC_ABS,0,
+/* D */   IR_BNE,    0,         0,         0,         0,         0,         0,         0,
+/* D */   IR_CLD,    IR_CMP_ABSY,0,        0,         0,         IR_CMP_ABSX,IR_DEC_ABSX,0,
+/* E */   IR_CPX_IMM,0,         0,         0,         IR_CPX_ZP, IR_SBC_ZP, IR_INC_ZP, 0,
+/* E */   IR_INX,    IR_SBC_IMM,IR_NOP,    0,         IR_CPX_ABS,IR_SBC_ABS,IR_INC_ABS,0,
+/* F */   IR_BEQ,    0,         0,         0,         0,         0,         0,         0,
+/* F */   IR_SED,    IR_SBC_ABSY,0,        0,         0,         IR_SBC_ABSX,IR_INC_ABSX,0,
+};
+
+/* Instruction size by native 6502 opcode (1/2/3 bytes, 0 = unknown) */
+static const uint8_t native_instr_size_b2[256] = {
+/*        0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F */
+/* 0 */   1, 2, 0, 0, 0, 2, 2, 0, 1, 2, 1, 0, 0, 3, 3, 0,
+/* 1 */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* 2 */   3, 2, 0, 0, 2, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* 3 */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* 4 */   1, 2, 0, 0, 0, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* 5 */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* 6 */   1, 2, 0, 0, 0, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* 7 */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* 8 */   0, 2, 0, 0, 2, 2, 2, 0, 1, 0, 1, 0, 3, 3, 3, 0,
+/* 9 */   2, 2, 0, 0, 2, 2, 2, 0, 1, 3, 1, 0, 0, 3, 0, 0,
+/* A */   2, 2, 2, 0, 2, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* B */   2, 2, 0, 0, 2, 2, 2, 0, 1, 3, 1, 0, 3, 3, 3, 0,
+/* C */   2, 2, 0, 0, 2, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* D */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+/* E */   2, 2, 0, 0, 2, 2, 2, 0, 1, 2, 1, 0, 3, 3, 3, 0,
+/* F */   2, 2, 0, 0, 0, 2, 2, 0, 1, 3, 0, 0, 0, 3, 3, 0,
+};
+
+/* IR opcode → register-side-effect flags (indexed 0x00..0x73).
+ * Matches the annotation logic in ir_emit_imm/ir_emit_zp/ir_emit_abs
+ * but as a flat table — callable from any bank without code. */
+static const uint8_t ir_op_flags_b2[116] = {
+/*  0x00 unused          */ 0x00,
+/*  0x01 IR_LDA_IMM      */ 0x90,  /*  W:A,F           */
+/*  0x02 IR_LDA_ZP       */ 0x90,
+/*  0x03 IR_LDA_ABS      */ 0x90,
+/*  0x04 IR_LDX_IMM      */ 0xA0,  /*  W:X,F           */
+/*  0x05 IR_LDX_ZP       */ 0xA0,
+/*  0x06 IR_LDX_ABS      */ 0xA0,
+/*  0x07 IR_LDY_IMM      */ 0xC0,  /*  W:Y,F           */
+/*  0x08 IR_LDY_ZP       */ 0xC0,
+/*  0x09 IR_LDY_ABS      */ 0xC0,
+/*  0x0A IR_STA_ZP       */ 0x01,  /*  R:A             */
+/*  0x0B IR_STA_ABS      */ 0x01,
+/*  0x0C IR_STX_ZP       */ 0x02,  /*  R:X             */
+/*  0x0D IR_STX_ABS      */ 0x02,
+/*  0x0E IR_STY_ZP       */ 0x04,  /*  R:Y             */
+/*  0x0F IR_STY_ABS      */ 0x04,
+/*  0x10 IR_JMP_ABS      */ 0x00,
+/*  0x11 IR_JSR          */ 0x00,
+/*  0x12 IR_RTS          */ 0x00,
+/*  0x13 IR_PHP          */ 0x08,  /*  R:F             */
+/*  0x14 IR_PLP          */ 0x80,  /*  W:F             */
+/*  0x15 IR_PHA          */ 0x01,  /*  R:A             */
+/*  0x16 IR_PLA          */ 0x90,  /*  W:A,F           */
+/*  0x17 IR_NOP          */ 0x00,
+/*  0x18 IR_CLC          */ 0x80,  /*  W:F             */
+/*  0x19 IR_SEC          */ 0x80,
+/*  0x1A IR_CLD          */ 0x80,
+/*  0x1B IR_SED          */ 0x80,
+/*  0x1C IR_CLI          */ 0x80,
+/*  0x1D IR_SEI          */ 0x80,
+/*  0x1E IR_CLV          */ 0x80,
+/*  0x1F IR_BRK          */ 0x00,
+/*  0x20 IR_BPL          */ 0x08,  /*  R:F             */
+/*  0x21 IR_BMI          */ 0x08,
+/*  0x22 IR_BVC          */ 0x08,
+/*  0x23 IR_BVS          */ 0x08,
+/*  0x24 IR_BCC          */ 0x08,
+/*  0x25 IR_BCS          */ 0x08,
+/*  0x26 IR_BNE          */ 0x08,
+/*  0x27 IR_BEQ          */ 0x08,
+/*  0x28 IR_TAX          */ 0xA1,  /*  R:A W:X,F       */
+/*  0x29 IR_TAY          */ 0xC1,  /*  R:A W:Y,F       */
+/*  0x2A IR_TXA          */ 0x92,  /*  R:X W:A,F       */
+/*  0x2B IR_TYA          */ 0x94,  /*  R:Y W:A,F       */
+/*  0x2C IR_TSX          */ 0xA0,  /*  W:X,F           */
+/*  0x2D IR_TXS          */ 0x02,  /*  R:X             */
+/*  0x2E IR_INX          */ 0xA2,  /*  R:X W:X,F       */
+/*  0x2F IR_DEX          */ 0xA2,
+/*  0x30 IR_INY          */ 0xC4,  /*  R:Y W:Y,F       */
+/*  0x31 IR_DEY          */ 0xC4,
+/*  0x32 IR_ADC_IMM      */ 0x99,  /*  R:A,F W:A,F     */
+/*  0x33 IR_SBC_IMM      */ 0x99,
+/*  0x34 IR_AND_IMM      */ 0x91,  /*  R:A W:A,F       */
+/*  0x35 IR_ORA_IMM      */ 0x91,
+/*  0x36 IR_EOR_IMM      */ 0x91,
+/*  0x37 IR_CMP_IMM      */ 0x81,  /*  R:A W:F         */
+/*  0x38 IR_CPX_IMM      */ 0x82,  /*  R:X W:F         */
+/*  0x39 IR_CPY_IMM      */ 0x84,  /*  R:Y W:F         */
+/*  0x3A IR_ADC_ZP       */ 0x99,
+/*  0x3B IR_SBC_ZP       */ 0x99,
+/*  0x3C IR_AND_ZP       */ 0x91,
+/*  0x3D IR_ORA_ZP       */ 0x91,
+/*  0x3E IR_EOR_ZP       */ 0x91,
+/*  0x3F IR_CMP_ZP       */ 0x81,
+/*  0x40 IR_CPX_ZP       */ 0x82,
+/*  0x41 IR_CPY_ZP       */ 0x84,
+/*  0x42 IR_ADC_ABS      */ 0x99,
+/*  0x43 IR_SBC_ABS      */ 0x99,
+/*  0x44 IR_AND_ABS      */ 0x91,
+/*  0x45 IR_ORA_ABS      */ 0x91,
+/*  0x46 IR_EOR_ABS      */ 0x91,
+/*  0x47 IR_CMP_ABS      */ 0x81,
+/*  0x48 IR_CPX_ABS      */ 0x82,
+/*  0x49 IR_CPY_ABS      */ 0x84,
+/*  0x4A IR_INC_ZP       */ 0x80,  /*  W:F             */
+/*  0x4B IR_DEC_ZP       */ 0x80,
+/*  0x4C IR_ASL_ZP       */ 0x80,
+/*  0x4D IR_LSR_ZP       */ 0x80,
+/*  0x4E IR_ROL_ZP       */ 0x80,
+/*  0x4F IR_ROR_ZP       */ 0x80,
+/*  0x50 IR_INC_ABS      */ 0x80,
+/*  0x51 IR_DEC_ABS      */ 0x80,
+/*  0x52 IR_ASL_ABS      */ 0x80,
+/*  0x53 IR_LSR_ABS      */ 0x80,
+/*  0x54 IR_ROL_ABS      */ 0x80,
+/*  0x55 IR_ROR_ABS      */ 0x80,
+/*  0x56 IR_ASL_A        */ 0x91,  /*  R:A W:A,F       */
+/*  0x57 IR_LSR_A        */ 0x91,
+/*  0x58 IR_ROL_A        */ 0x91,
+/*  0x59 IR_ROR_A        */ 0x91,
+/*  0x5A IR_LDA_ABSX     */ 0x90,
+/*  0x5B IR_LDA_ABSY     */ 0x90,
+/*  0x5C IR_STA_ABSX     */ 0x01,
+/*  0x5D IR_STA_ABSY     */ 0x01,
+/*  0x5E IR_ADC_ABSX     */ 0x99,
+/*  0x5F IR_SBC_ABSX     */ 0x99,
+/*  0x60 IR_AND_ABSX     */ 0x91,
+/*  0x61 IR_ORA_ABSX     */ 0x91,
+/*  0x62 IR_EOR_ABSX     */ 0x91,
+/*  0x63 IR_CMP_ABSX     */ 0x81,
+/*  0x64 IR_ADC_ABSY     */ 0x99,
+/*  0x65 IR_SBC_ABSY     */ 0x99,
+/*  0x66 IR_AND_ABSY     */ 0x91,
+/*  0x67 IR_ORA_ABSY     */ 0x91,
+/*  0x68 IR_EOR_ABSY     */ 0x91,
+/*  0x69 IR_CMP_ABSY     */ 0x81,
+/*  0x6A IR_LDX_ABSY     */ 0xA0,
+/*  0x6B IR_LDY_ABSX     */ 0xC0,
+/*  0x6C IR_INC_ABSX     */ 0x80,
+/*  0x6D IR_DEC_ABSX     */ 0x80,
+/*  0x6E IR_ASL_ABSX     */ 0x80,
+/*  0x6F IR_LSR_ABSX     */ 0x80,
+/*  0x70 IR_ROL_ABSX     */ 0x80,
+/*  0x71 IR_ROR_ABSX     */ 0x80,
+/*  0x72 IR_BIT_ZP       */ 0x81,  /*  R:A W:F  (fix)  */
+/*  0x73 IR_BIT_ABS      */ 0x81,
+};
+
+#pragma section bank2
+
+/* -------------------------------------------------------------------
+ * ir_record_native_b2 — scan a short byte buffer produced by one
+ * instruction handler and emit the corresponding IR nodes.
+ * Lean version of the old bank-1 ir_record_from_buffer(), using
+ * rodata2 tables instead of bank-1 tables.
+ * ------------------------------------------------------------------- */
+static void ir_record_native_b2(const uint8_t *buf, uint8_t len)
+{
+	uint8_t pos = 0;
+	while (pos < len) {
+		/* Guard: if node buffer is nearly full, disable IR for this
+		 * block rather than silently dropping nodes (which causes
+		 * ir_lower to produce fewer bytes → NOP padding corruption). */
+		if (ir_ctx.node_count + 3 > IR_MAX_NODES) {
+			ir_ctx.enabled = 0;
+			return;
+		}
+		uint8_t opcode = buf[pos];
+		uint8_t sz     = native_instr_size_b2[opcode];
+		uint8_t ir_op  = native_to_ir_b2[opcode];
+
+		/* Unknown opcode or truncated instruction → raw byte(s) */
+		if (sz == 0 || (uint8_t)(pos + sz) > len) {
+			IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)opcode);
+			pos++;
+			continue;
+		}
+		if (ir_op == 0) {
+			/* No IR mapping → emit as raw bytes */
+			uint8_t i;
+			for (i = 0; i < sz; i++)
+				IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)buf[pos + i]);
+			pos += sz;
+			continue;
+		}
+
+		/* Construct operand from instruction bytes */
+		uint16_t operand = 0;
+		if (sz == 2)
+			operand = (uint16_t)buf[pos + 1];
+		else if (sz == 3)
+			operand = (uint16_t)buf[pos + 1] | ((uint16_t)buf[pos + 2] << 8);
+
+		IR_EMIT(&ir_ctx, ir_op, ir_op_flags_b2[ir_op], operand);
+		pos += sz;
+	}
+}
+
+#endif /* ENABLE_IR */
+
+#ifdef ENABLE_IR
+/* Template ID set by recompile_opcode_b2_inner() when it emits an
+ * NRTS/JSR/NJSR template.  The outer wrapper emits these as atomic
+ * IR_TEMPLATE nodes instead of decomposing into individual IR nodes
+ * (which lets ir_opt_php_plp_elision remove the leading PHP and
+ * break the dispatch return stack contract).  0 = no template.
+ *
+ * CRITICAL: these MUST be in a RAM-backed section (#pragma section
+ * default = WRAM).  Under #pragma section bank2, static variables
+ * land in bank2 flash ROM where writes are silently ignored — the
+ * variable always reads as its zero-initialized value, causing the
+ * NRTS template to be decomposed instead of atomic.  Same fix as
+ * the scratch variables in ir_opt.c (see comment there). */
+#pragma section default
+static uint8_t ir_tmpl_id;
+static uint8_t ir_dirty_flag_bytes;
+#endif
+
+#pragma section bank2
+
+#ifdef ENABLE_INLINE_TINY_SUB
+// -------------------------------------------------------------------------
+// try_inline_tiny_sub — attempt to inline a stack-clean subroutine body.
+//
+// Scans from 'target' to RTS, translating each instruction just as the
+// main compiler would.  If the body fits within INLINE_TINY_MAX_BODY
+// translated bytes and every instruction is compilable, emits the
+// translated bytes directly into code_ptr[code_index..] and returns the
+// number of translated bytes.  Returns 0 if the subroutine can't be
+// inlined (too long, contains branches, JSR, indirect modes, etc.).
+// The trailing RTS is NOT emitted.
+// -------------------------------------------------------------------------
+static uint8_t try_inline_tiny_sub(uint16_t target, uint8_t *code_ptr)
+{
+	uint8_t ci_save = code_index;  // rollback point
+	uint16_t cur = target;
+	uint8_t steps = 0;
+
+	while (steps < 32)
+	{
+		steps++;
+		uint8_t op = read6502(cur);
+
+		// RTS — end of subroutine body (don't emit it)
+		if (op == 0x60)
+			break;
+
+		// Reject: any control flow or unpredictable instruction
+		if (op == 0x20 || op == 0x4C || op == 0x6C || // JSR, JMP abs, JMP ind
+		    op == 0x40 || op == 0x00 ||                // RTI, BRK
+		    op == 0xBA || op == 0x9A ||                // TSX, TXS
+		    op == 0x48 || op == 0x68 ||                // PHA, PLA
+		    op == 0x08 || op == 0x28 ||                // PHP, PLP
+		    op == 0x58 || op == 0x78 ||                // CLI, SEI
+		    op == 0xF8 ||                              // SED
+		    op == 0x96 || op == 0x94)                   // STX ZP,Y / STY ZP,X
+		{
+			code_index = ci_save;
+			return 0;
+		}
+
+		uint8_t mode = addrmodes[op];
+
+		// Reject: branches, indirect modes
+		if (mode == rel || mode == indx || mode == indy || mode == ind)
+		{
+			code_index = ci_save;
+			return 0;
+		}
+
+		// Check space: worst case is ZP->ABS expansion (2->3 bytes)
+		if ((code_index + 3 + EPILOGUE_SIZE + 6) >= CODE_SIZE)
+		{
+			code_index = ci_save;
+			return 0;
+		}
+
+		switch (mode)
+		{
+			case imp:
+			case acc:
+			{
+				// NOP: skip entirely (no emit)
+				if (op == 0xEA) {
+					cur += 1;
+					continue;
+				}
+				code_ptr[code_index] = op;
+				cur += 1;
+				code_index += 1;
+				break;
+			}
+
+			case imm:
+			{
+				code_ptr[code_index] = op;
+				code_ptr[code_index + 1] = read6502(cur + 1);
+				cur += 2;
+				code_index += 2;
+				break;
+			}
+
+			case zp:
+			{
+				// ZP -> ABS: opcode |= 0x08, address = zp + &RAM_BASE
+				code_ptr[code_index] = op | 0x08;
+				uint8_t zp_addr = read6502(cur + 1);
+				uint16_t address = (uint16_t)zp_addr + (uint16_t)&RAM_BASE[0];
+				code_ptr[code_index + 1] = (uint8_t)address;
+				code_ptr[code_index + 2] = (uint8_t)(address >> 8);
+				cur += 2;
+				code_index += 3;
+				break;
+			}
+
+			case zpx:
+			case zpy:
+			{
+#ifdef ENABLE_ZP_INDEX_WRAP
+				code_index = ci_save;
+				return 0;
+#else
+				// ZPX/ZPY -> ABSX/ABSY: opcode |= 0x08
+				code_ptr[code_index] = op | 0x08;
+				uint16_t address = read6502(cur + 1);
+				address += (uint16_t)&RAM_BASE[0];
+				code_ptr[code_index + 1] = (uint8_t)address;
+				code_ptr[code_index + 2] = (uint8_t)(address >> 8);
+				cur += 2;
+				code_index += 3;
+				break;
+#endif
+			}
+
+			case abso:
+			case absx:
+			case absy:
+			{
+				uint16_t encoded = (uint16_t)read6502(cur + 1)
+				                 | ((uint16_t)read6502(cur + 2) << 8);
+				uint16_t decoded = translate_address(encoded);
+				if (!decoded)
+				{
+#ifdef PLATFORM_NES
+					// NES ROM constant-fold: non-indexed abs read -> immediate
+					if (encoded >= 0x8000 && mode == abso) {
+						uint8_t imm_op = nes_abs_to_imm(op);
+						if (imm_op) {
+							extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+							code_ptr[code_index] = imm_op;
+							code_ptr[code_index + 1] = peek_bank_byte(
+								BANK_NES_PRG_LO,
+								(uint16_t)&ROM_NAME[encoded & 0x3FFF]);
+							cur += 3;
+							code_index += 2;
+							break;
+						}
+					}
+#endif
+					// Can't translate -- reject
+					code_index = ci_save;
+					return 0;
+				}
+				code_ptr[code_index] = op;
+				code_ptr[code_index + 1] = (uint8_t)decoded;
+				code_ptr[code_index + 2] = (uint8_t)(decoded >> 8);
+				cur += 3;
+				code_index += 3;
+				break;
+			}
+
+			default:
+				// Unknown mode -- reject
+				code_index = ci_save;
+				return 0;
+		}
+
+		// Check translated body size
+		if ((uint8_t)(code_index - ci_save) > INLINE_TINY_MAX_BODY)
+		{
+			code_index = ci_save;
+			return 0;
+		}
+	}
+
+	return (uint8_t)(code_index - ci_save);
+}
+#endif /* ENABLE_INLINE_TINY_SUB */
+
+static uint8_t invert_branch(uint8_t opcode) {
+	return opcode ^ 0x20;
+}
+
+static uint8_t recompile_opcode_b2_inner()
+{
+	// WRAM helper for cross-bank reads (safe from bank2)
+	extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+
+	// Dirty flags from exidy.c (ZP) — needed for INC emission on screen/char stores
+	extern __zpage uint8_t screen_ram_updated;
+	extern __zpage uint8_t character_ram_updated;
+
+#ifdef ENABLE_POINTER_SWIZZLE
+	init_zp_mirror_table();
+#endif
+
 	uint8_t op_buffer_0;
 	uint8_t op_buffer_1;
 	uint8_t op_buffer_2;
+	uint8_t *code_ptr = cache_code[cache_index];
+
 	op_buffer_0 = read6502(pc);
+
+#ifdef ENABLE_PEEPHOLE
+	// Flush deferred PLP from previous instruction's trim.
+	// Done here (bank2) so ALL compile loops get it for free.
+	// NOTE: volatile pointer casts required — vbcc -O2 eliminates
+	// plain stores inside if(block_flags_saved) blocks.
+#ifdef ENABLE_PEEPHOLE_SKIP
+	// For template opcodes (PHA/PLA/PHP/PLP) defer the flush —
+	// emit_template() will elide the PLP/PHP pair if possible.
+	if (block_flags_saved &&
+	    op_buffer_0 != 0x48 && op_buffer_0 != 0x68 &&
+	    op_buffer_0 != 0x08 && op_buffer_0 != 0x28) {
+		*(volatile uint8_t *)&code_ptr[code_index] = 0x28;  // PLP
+		code_index++;
+		block_flags_saved = 0;
+	}
+#else
+	if (block_flags_saved) {
+		*(volatile uint8_t *)&code_ptr[code_index] = 0x28;  // PLP
+		code_index++;  // plain increment so compiler tracks new value
+		block_flags_saved = 0;
+	}
+#endif
+#endif
+	recompile_instr_start = code_index;
 
 	switch (op_buffer_0)
 	{
@@ -430,96 +2655,849 @@ uint8_t recompile_opcode()
 		case opBVC:
 		case opBVS:				
 		{
-			#ifdef ENABLE_LINKING
 			op_buffer_1 = read6502(pc+1);
-			uint16_t branch_loc = op_buffer_1;			
-			if (branch_loc & 0x80)
-				branch_loc |= 0xFF00;
-			branch_loc += pc+2;
-			cache_branch_pc_lo[cache_index] = (uint8_t) branch_loc;
-			cache_branch_pc_hi[cache_index] = (uint8_t) (branch_loc >> 8);
 			
-			// allow backwards branch within the cache block
-			
-			branch_loc = op_buffer_1;
-			
-			/*
-			if (branch_loc & 0x80)	// only branch back	// UNSTABLE removed for now
-			{								
-				branch_loc |= 0xFF00;
-				IO8(0x4020) = ((branch_loc + pc) >> 8);
-				if (((branch_loc + pc) >> 8) >= (cache_entry_pc_hi[cache_index]))	// only within the current cache
-				{					
-					IO8(0x4020) = ((branch_loc + pc) & 0xFF);
-					if (((branch_loc + pc) & 0xFF) >= (cache_entry_pc_lo[cache_index]))
-					{						
-						uint8_t temp = op_buffer_1;
-						uint16_t start_pc = ((cache_entry_pc_hi[cache_index] << 8) | cache_entry_pc_lo[cache_index]);
-						temp -= (code_index - ((pc + code_index) - start_pc));
-						cache_branches++;
-						if (temp & 0x80)	// only if branch still reaches
-						{
-							cache_code[cache_index][code_index] = op_buffer_0;
-							cache_code[cache_index][code_index+1] = temp;
-							pc += 2;
-							code_index += 2;									
-							break;
-						}								
-						else
-						{							
-							encoded_address = (branch_loc + pc);
-							if (encoded_address >= ROM_OFFSET)
-							{
-								decoded_address = ((uint16_t) &cache_code[cache_index][code_index+3]) + temp;
-							}
-							else							
-								//decode_address_asm();				
-								decode_address_c();				
-							
-							cache_code[cache_index][code_index] = op_buffer_0 ^ 0x20;	// reverse branch condition (refer to 6502 opcode matrix)
-							cache_code[cache_index][code_index+1] = 3;	// skip next JMP
-							cache_code[cache_index][code_index+2] = 0x4C;							
-							cache_code[cache_index][code_index+3] = (uint8_t) decoded_address;
-							cache_code[cache_index][code_index+4] = (uint8_t) (decoded_address >> 8);
-							pc += 2;
-							code_index += 5;
-							cache_branch_long++;
-							break;							
-						}
-					}							
+			int8_t branch_offset = (int8_t) op_buffer_1;
+
+			if (branch_offset >= 0)
+			{
+				// Forward branch
+				uint16_t target_pc = pc + 2 + branch_offset;
+
+#ifdef ENABLE_OPTIMIZER_V2
+				branch_forward++;
+
+				// --- Static pass 2: all native addresses known, emit direct ---
+				// Under IR, emit a 5-byte placeholder (Bxx_inv+3 / JMP $FFFE)
+				// as IR_RAW_BYTE nodes.  ir_resolve_direct_branches() patches
+				// the sentinel post-lowering with the correct native address.
+				// IMPORTANT: use lookup_native_addr_safe (PC tables) NOT
+				// lookup_entry_list.  The entry list has pass-1 native addrs
+				// which may diverge from pass-2 addrs when data copies or
+				// different code sizes shift sector allocations.
+#ifdef ENABLE_IR
+				if (lookup_native_addr_safe(target_pc) &&
+				    reserve_result_bank == flash_code_bank)
+				{
+					// IMPORTANT: Reload op_buffer_0 from guest ROM.
+					// VBCC -O2 may corrupt the ZP register holding it
+					// during the lookup_native_addr_safe cross-bank call
+					// (same class of bug as the entry_pc corruption).
+					op_buffer_0 = read6502(pc);
+					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
+					if (r) return r;
 				}
-				enable_interpret();						
+#else
+				if (sa_compile_pass == 2)
+				{
+					uint8_t emit_len = try_direct_branch(target_pc, op_buffer_0, code_ptr);
+					if (emit_len)
+					{
+						pc += 2;
+						code_index += emit_len;
+						cache_branches++;
+						cache_flag[cache_index] |= READY_FOR_NEXT;
+						return cache_flag[cache_index];
+					}
+					// Not resolved — fall through to patchable template
+				}
+#endif
+
+				// --- Dynamic / pass-1: patchable template ---
+				{
+				uint16_t pattern_flash_address = flash_code_address;
+				uint8_t pattern_flash_bank = flash_code_bank;
+				uint8_t pattern_code_index = code_index;
+
+#ifdef ENABLE_FFF0_TEMPLATES
+				// --- $FFF0 patchable branch template (17 bytes) ---
+				// Pre-sets _pc to the taken target so the $FFF0 trampoline
+				// can dispatch without inline epilogue code.  On the fast
+				// path (patched JMP → target), the _pc writes are wasted
+				// but harmless; A is saved and restored so the target block
+				// receives correct guest registers.
+				//
+				// +0:  STA _a          ; 2B  save guest A
+				// +2:  PHP             ; 1B  save guest flags
+				// +3:  LDA #<target    ; 2B
+				// +5:  STA _pc         ; 2B
+				// +7:  LDA #>target    ; 2B
+				// +9:  STA _pc+1       ; 2B
+				// +11: LDA _a          ; 2B  restore guest A
+				// +13: PLP             ; 1B  restore guest flags
+				// +14: Bxx_inv +3      ; 2B  not taken → +19 (continue)
+				// +16: JMP $FFF0       ; 3B  PATCHABLE → dispatch or target
+				// +19: [continue]
+				//
+				// Patching: 2 flash writes (JMP lo + JMP hi).  No branch byte.
+				// If target not aligned by 16, a local JMP trampoline at an
+				// aligned offset is emitted within the block (see sweep).
+
+				if ((code_index + 19 + 14) >= CODE_SIZE)
+				{
+					enable_interpret();
+				}
+				else
+				{
+				// +0: STA _a
+				code_ptr[code_index+0] = 0x85;
+				code_ptr[code_index+1] = (uint8_t)((uint16_t)&a);
+
+				// +2: PHP (save guest flags across LDA/STA)
+				code_ptr[code_index+2] = 0x08;
+
+				// +3: LDA #<target_pc
+				code_ptr[code_index+3] = 0xA9;
+				code_ptr[code_index+4] = target_pc & 0xFF;
+
+				// +5: STA _pc
+				code_ptr[code_index+5] = 0x85;
+				code_ptr[code_index+6] = (uint8_t)((uint16_t)&pc);
+
+				// +7: LDA #>target_pc
+				code_ptr[code_index+7] = 0xA9;
+				code_ptr[code_index+8] = (target_pc >> 8) & 0xFF;
+
+				// +9: STA _pc+1
+				code_ptr[code_index+9] = 0x85;
+				code_ptr[code_index+10] = (uint8_t)(((uint16_t)&pc) + 1);
+
+				// +11: LDA _a (restore guest A)
+				code_ptr[code_index+11] = 0xA5;
+				code_ptr[code_index+12] = (uint8_t)((uint16_t)&a);
+
+				// +13: PLP (restore guest flags)
+				code_ptr[code_index+13] = 0x28;
+
+				// +14: Inverted branch +3 (skip JMP if NOT taken)
+				code_ptr[code_index+14] = invert_branch(op_buffer_0);
+				code_ptr[code_index+15] = 3;
+
+				// +16: JMP $FFF0 (taken: dispatch via trampoline, PATCHABLE)
+				code_ptr[code_index+16] = 0x4C;
+				code_ptr[code_index+17] = FFF0_DISPATCH & 0xFF;
+				code_ptr[code_index+18] = (FFF0_DISPATCH >> 8) & 0xFF;
+
+				// Record pending patch (JMP operand only, no branch byte)
+#ifndef ENABLE_IR
+				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 17;
+				opt2_record_pending_branch_safe(0, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
+
+				setup_flash_address(pc, flash_cache_index);
+				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+#endif
+
+				pc += 2;
+				code_index += 19;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+				}
+#else  /* !ENABLE_FFF0_TEMPLATES */
+				// --- Old 21-byte patchable template ---
+
+				if ((code_index + 21 + 14) >= CODE_SIZE)
+				{
+					enable_interpret();
+				}
+				else
+				{
+				// +0: Inverted branch $13 (skip 19 bytes to +21)
+				code_ptr[code_index+0] = invert_branch(op_buffer_0);
+				code_ptr[code_index+1] = 19;
+
+				// +2: Original branch $03 (to slow path at +7) - PATCHABLE to $00
+				code_ptr[code_index+2] = op_buffer_0;
+				code_ptr[code_index+3] = 3;
+
+				// +4: JMP $FFFF - fast path (operand PATCHABLE)
+				code_ptr[code_index+4] = 0x4C;
+				code_ptr[code_index+5] = 0xFF;
+				code_ptr[code_index+6] = 0xFF;
+
+				// +7: STA _a (slow path epilogue)
+				code_ptr[code_index+7] = 0x85;
+				code_ptr[code_index+8] = (uint8_t)((uint16_t)&a);
+
+				// +9: PHP
+				code_ptr[code_index+9] = 0x08;
+
+				// +10: LDA #<target_pc
+				code_ptr[code_index+10] = 0xA9;
+				code_ptr[code_index+11] = target_pc & 0xFF;
+
+				// +12: STA _pc
+				code_ptr[code_index+12] = 0x85;
+				code_ptr[code_index+13] = (uint8_t)((uint16_t)&pc);
+
+				// +14: LDA #>target_pc
+				code_ptr[code_index+14] = 0xA9;
+				code_ptr[code_index+15] = (target_pc >> 8) & 0xFF;
+
+				// +16: STA _pc+1
+				code_ptr[code_index+16] = 0x85;
+				code_ptr[code_index+17] = (uint8_t)(((uint16_t)&pc) + 1);
+
+				// +18: JMP cross_bank_dispatch
+				code_ptr[code_index+18] = 0x4C;
+				code_ptr[code_index+19] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+				code_ptr[code_index+20] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+
+				// Record pending patch
+#ifndef ENABLE_IR
+				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
+				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
+				opt2_record_pending_branch_safe(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
+
+				setup_flash_address(pc, flash_cache_index);
+				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+#endif
+
+				pc += 2;
+				code_index += 21;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+				}
+#endif  /* ENABLE_FFF0_TEMPLATES */
+				}  // end fallback block
+#else
+				branch_forward++;
+				enable_interpret();
+#endif
 			}
 			else
-			*/
-				enable_interpret();	
-			#else
+			{
+			// Backward branch - can optimize if target compiled
+			uint16_t target_pc = pc + 2 + branch_offset;
+			
+			// Look up target's flag via peek_bank_byte (safe from bank2)
+			uint8_t target_flag_bank = ((target_pc >> 14) + BANK_PC_FLAGS);
+			uint8_t target_flag = peek_bank_byte(target_flag_bank,
+				(uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
+			
+			// Check if target is compiled (bit 7 clear = RECOMPILED)
+			if (target_flag & RECOMPILED)
+			{
+#ifdef ENABLE_OPTIMIZER_V2
+				branch_not_compiled++;
+
+				// No reservation for backward-uncompiled targets.
+				// During batch compile, the forward scan already passed
+				// backward addresses; if the target wasn't compiled, it's
+				// not in the bitmap.  Reserving would compile garbage.
+				{
+				uint16_t pattern_flash_address = flash_code_address;
+				uint8_t pattern_flash_bank = flash_code_bank;
+				uint8_t pattern_code_index = code_index;
+
+#ifdef ENABLE_FFF0_TEMPLATES
+				// --- $FFF0 patchable branch template (19 bytes) ---
+				if ((code_index + 19 + 14) >= CODE_SIZE)
+				{
+					enable_interpret();
+				}
+				else
+				{
+				// +0: STA _a
+				code_ptr[code_index+0] = 0x85;
+				code_ptr[code_index+1] = (uint8_t)((uint16_t)&a);
+
+				// +2: PHP (save guest flags across LDA/STA)
+				code_ptr[code_index+2] = 0x08;
+
+				// +3: LDA #<target_pc
+				code_ptr[code_index+3] = 0xA9;
+				code_ptr[code_index+4] = target_pc & 0xFF;
+
+				// +5: STA _pc
+				code_ptr[code_index+5] = 0x85;
+				code_ptr[code_index+6] = (uint8_t)((uint16_t)&pc);
+
+				// +7: LDA #>target_pc
+				code_ptr[code_index+7] = 0xA9;
+				code_ptr[code_index+8] = (target_pc >> 8) & 0xFF;
+
+				// +9: STA _pc+1
+				code_ptr[code_index+9] = 0x85;
+				code_ptr[code_index+10] = (uint8_t)(((uint16_t)&pc) + 1);
+
+				// +11: LDA _a (restore guest A)
+				code_ptr[code_index+11] = 0xA5;
+				code_ptr[code_index+12] = (uint8_t)((uint16_t)&a);
+
+				// +13: PLP (restore guest flags)
+				code_ptr[code_index+13] = 0x28;
+
+				// +14: Inverted branch +3
+				code_ptr[code_index+14] = invert_branch(op_buffer_0);
+				code_ptr[code_index+15] = 3;
+
+				// +16: JMP $FFF0 (PATCHABLE)
+				code_ptr[code_index+16] = 0x4C;
+				code_ptr[code_index+17] = FFF0_DISPATCH & 0xFF;
+				code_ptr[code_index+18] = (FFF0_DISPATCH >> 8) & 0xFF;
+
+#ifndef ENABLE_IR
+				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 17;
+				opt2_record_pending_branch_safe(0, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
+
+				setup_flash_address(pc, flash_cache_index);
+				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+#endif
+
+				pc += 2;
+				code_index += 19;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+				}
+#else  /* !ENABLE_FFF0_TEMPLATES */
+				// Use 21-byte patchable template (runtime patching).
+				
+				// Check space: need 21 bytes + epilogue room
+				if ((code_index + 21 + 14) >= CODE_SIZE)
+				{
+					enable_interpret();
+					// Fall through - not enough space for 21-byte pattern
+				}
+				else
+				{
+				// Pattern:
+				//   +0:  Bxx_inv $13   ; 2B - skip 19 bytes to +21 if NOT taken
+				//   +2:  Bxx $03       ; 2B - original opcode (unconditional!) -> slow at +7
+				//                      ;      PATCH to $00 -> fast at +4
+				//   +4:  JMP $FFFF     ; 3B - fast path (PATCH operand to native addr)
+				//   +7:  STA _a        ; 2B - slow path epilogue
+				//   +9:  PHP           ; 1B
+				//   +10: LDA #<target  ; 2B
+				//   +12: STA _pc       ; 2B
+				//   +14: LDA #>target  ; 2B
+				//   +16: STA _pc+1     ; 2B
+				//   +18: JMP dispatch  ; 3B - to dispatcher
+				//   +21: [continues]   ; path 1 - branch not taken
+				
+				// +0: Inverted branch $13 (skip 19 bytes to +21)
+				code_ptr[code_index+0] = invert_branch(op_buffer_0);
+				code_ptr[code_index+1] = 19;  // Skip to +21
+				
+				// +2: Original branch $03 (to slow path at +7) - PATCHABLE to $00
+				code_ptr[code_index+2] = op_buffer_0;  // original opcode
+				code_ptr[code_index+3] = 3;  // offset to slow path
+				
+				// +4: JMP $FFFF - fast path (operand PATCHABLE)
+				code_ptr[code_index+4] = 0x4C;  // JMP
+				code_ptr[code_index+5] = 0xFF;  // Low byte
+				code_ptr[code_index+6] = 0xFF;  // High byte
+				
+				// +7: STA _a
+				code_ptr[code_index+7] = 0x85;  // STA zp
+				code_ptr[code_index+8] = (uint8_t)((uint16_t)&a);
+				
+				// +9: PHP
+				code_ptr[code_index+9] = 0x08;  // PHP
+				
+				// +10: LDA #<target_pc
+				code_ptr[code_index+10] = 0xA9;  // LDA immediate
+				code_ptr[code_index+11] = target_pc & 0xFF;
+				
+				// +12: STA _pc
+				code_ptr[code_index+12] = 0x85;  // STA zp
+				code_ptr[code_index+13] = (uint8_t)((uint16_t)&pc);
+				
+				// +14: LDA #>target_pc
+				code_ptr[code_index+14] = 0xA9;  // LDA immediate
+				code_ptr[code_index+15] = (target_pc >> 8) & 0xFF;
+				
+				// +16: STA _pc+1
+				code_ptr[code_index+16] = 0x85;  // STA zp
+				code_ptr[code_index+17] = (uint8_t)(((uint16_t)&pc) + 1);
+				
+				// +18: JMP cross_bank_dispatch
+				code_ptr[code_index+18] = 0x4C;  // JMP
+				code_ptr[code_index+19] = (uint8_t)((uint16_t)&cross_bank_dispatch);
+				code_ptr[code_index+20] = (uint8_t)(((uint16_t)&cross_bank_dispatch) >> 8);
+				
+				// Record pending patch:
+				// - Branch offset at +3 (patch $03 -> $00)
+				// - JMP operand at +5 (patch $FFFF -> native)
+#ifndef ENABLE_IR
+				uint16_t branch_offset_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 3;
+				uint16_t jmp_operand_addr = pattern_flash_address + BLOCK_PREFIX_SIZE + pattern_code_index + 5;
+				// Call via fixed-bank trampoline (safe from bank2)
+				opt2_record_pending_branch_safe(branch_offset_addr, jmp_operand_addr, pattern_flash_bank, target_pc, 0);
+				
+				// Update PC table to point to this pattern
+				setup_flash_address(pc, flash_cache_index);
+				flash_cache_pc_update(pattern_code_index, RECOMPILED);
+#endif
+				
+				pc += 2;
+				code_index += 21;
+				cache_branches++;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+				}
+#endif  /* ENABLE_FFF0_TEMPLATES */
+				}  // end fallback block
+#else
+				// Target not compiled - interpret
+				branch_not_compiled++;
 				enable_interpret();
-			#endif // ENABLE_LINKING
+				// Fall through to emit interpreted branch
+#endif
+			}
+			else
+			{
+				// Target IS compiled.
+				//
+				// INTRA-BLOCK BACKWARD BRANCH: if the target is within
+				// this block, emit a native 2-byte branch (fixed-bank helper).
+				// Under IR, emit a 5-byte placeholder — fence_native_offset[]
+				// will resolve the correct offset post-lowering.
+#ifdef ENABLE_IR
+				/* Intra-block: target is within this block's fence table.
+				 * Emit 5-byte placeholder for post-lowering resolution.
+				 * NMI safety: ir_lower.c emits a BIT nmi_yield / BMI
+				 * backward-branch stub that yields to the dispatch loop
+				 * when VBlank fires, guaranteeing NMI processing. */
+				if (!(block_has_jsr & 2))
+				{
+					/* Stack-clean JSRs (NJSR) are safe: the trampoline
+					 * handles VBlank between subroutine blocks, and the
+					 * backward branch stub (BIT nmi_yield / BMI) yields
+					 * to dispatch on real VBlank.  Only dirty (emulated)
+					 * JSRs block intra-block backward branches. */
+					uint16_t blk_entry = (uint16_t)cache_entry_pc_lo[cache_index]
+					                   | ((uint16_t)cache_entry_pc_hi[cache_index] << 8);
+					if (target_pc >= blk_entry && target_pc < pc) {
+						// Reload op_buffer_0 — vbcc register corruption safety
+						op_buffer_0 = read6502(pc);
+						uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
+						if (r) return r;
+					}
+				}
+#else
+				if (try_intra_block_branch(target_pc, op_buffer_0))
+					return cache_flag[cache_index];
+#endif
+				
+				// INTER-BLOCK BACKWARD BRANCH: target is compiled in a
+				// different block.  Same-bank: try 2-byte native branch
+				// first, then 5-byte Bxx_inv+JMP.
+				// Cross-bank: fall through to interpret.
+				// Under IR, emit a 5-byte placeholder for post-lowering
+				// resolution via ir_resolve_direct_branches().
+#ifdef ENABLE_IR
+				// Inter-block backward branches are inherently safe:
+				// the JMP lands at the target block's entry, which runs
+				// to its epilogue and returns to cross_bank_dispatch →
+				// dispatch loop → VBlank/NMI check.
+				if ((target_flag & 0x1F) == flash_code_bank &&
+				    lookup_native_addr_safe(target_pc))
+				{
+					// Reload op_buffer_0 — vbcc register corruption safety
+					op_buffer_0 = read6502(pc);
+					uint8_t r = ir_emit_direct_branch_placeholder(target_pc, op_buffer_0);
+					if (r) return r;
+				}
+#else
+				if ((target_flag & 0x1F) == flash_code_bank &&
+				    (code_index + 2 + EPILOGUE_SIZE + 6) < CODE_SIZE &&
+				    lookup_native_addr_safe(target_pc))
+				{
+					// Same bank — try native 2-byte branch, else 5-byte
+					int16_t native_offset = (int16_t)reserve_result_addr
+					    - (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + code_index + 2);
+					uint8_t emit_len = 0;
+					if (native_offset >= -128 && native_offset <= 127)
+					{
+						code_ptr[code_index+0] = op_buffer_0;
+						code_ptr[code_index+1] = (uint8_t)(int8_t)native_offset;
+						emit_len = 2;
+					}
+					else if ((code_index + 5 + EPILOGUE_SIZE + 6) < CODE_SIZE)
+					{
+						code_ptr[code_index+0] = invert_branch(op_buffer_0);
+						code_ptr[code_index+1] = 3;
+						code_ptr[code_index+2] = 0x4C;
+						code_ptr[code_index+3] = reserve_result_addr & 0xFF;
+						code_ptr[code_index+4] = (reserve_result_addr >> 8) & 0xFF;
+						emit_len = 5;
+					}
+					if (emit_len)
+					{
+						setup_flash_address(pc, flash_cache_index);
+						flash_cache_pc_update(code_index, RECOMPILED);
+						pc += 2;
+						code_index += emit_len;
+						cache_branches++;
+						cache_flag[cache_index] |= READY_FOR_NEXT;
+						return cache_flag[cache_index];
+					}
+				}
+#endif
+				// Cross-bank or no space — interpret
+				enable_interpret();
+			}  // end else (target is compiled)
+			}  // end else (backward branch)
+			break;  // Phase B: prevent fallthrough to case opJMP
 		}
 		
 		case opJMP:
-		case opJSR:
 		{
-			cache_branch_pc_lo[cache_index] = read6502(pc+1);
-			cache_branch_pc_hi[cache_index] = read6502(pc+2);
-			enable_interpret();
+			uint16_t target_pc = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
+
+			// --- Static pass 2: target address known, emit direct JMP ---
+			// Use lookup_native_addr_safe (not lookup_entry_list) to get
+			// current-pass native addresses, avoiding stale pass-1 addrs.
+			if (sa_compile_pass == 2 &&
+			    code_index + 3 < CODE_SIZE &&
+			    lookup_native_addr_safe(target_pc))
+			{
+				if (reserve_result_bank == flash_code_bank)
+				{
+					// Same bank — direct JMP (3 bytes)
+					code_ptr[code_index+0] = 0x4C;
+					code_ptr[code_index+1] = reserve_result_addr & 0xFF;
+					code_ptr[code_index+2] = (reserve_result_addr >> 8) & 0xFF;
+
+					pc = target_pc;
+					code_index += 3;
+					cache_flag[cache_index] &= ~READY_FOR_NEXT;
+					return cache_flag[cache_index];
+				}
+				// Cross-bank — fall through to patchable
+			}
+
+			// --- Fallback: patchable JMP pattern ---
+#ifdef ENABLE_FFF0_TEMPLATES
+			// --- $FFF0 patchable JMP template (17 bytes) ---
+			// Self-contained: sets _pc inline, saves/restores A and flags,
+			// JMPs to $FFF0 trampoline (slow) or directly to target (fast,
+			// patched).  PHP/PLP preserve guest flags across the LDA/STA
+			// sequence so both the patched fast-path and the $FFF0 slow-path
+			// deliver correct A, X, Y, and flags to the next block.
+			//
+			// +0:  STA _a          ; 2B  save guest A
+			// +2:  PHP             ; 1B  save guest flags
+			// +3:  LDA #<target    ; 2B
+			// +5:  STA _pc         ; 2B
+			// +7:  LDA #>target    ; 2B
+			// +9:  STA _pc+1       ; 2B
+			// +11: LDA _a          ; 2B  restore guest A
+			// +13: PLP             ; 1B  restore guest flags
+			// +14: JMP $FFF0       ; 3B  slow: dispatch. fast (patched): → target
+			//
+			// Patching: 2 flash writes (JMP lo + JMP hi).
+			if (code_index + 17 < CODE_SIZE) {
+				// +0: STA _a
+				code_ptr[code_index+0] = 0x85;
+				code_ptr[code_index+1] = (uint8_t)((uint16_t)&a);
+
+				// +2: PHP (save guest flags across LDA/STA)
+				code_ptr[code_index+2] = 0x08;
+
+				// +3: LDA #<target_pc
+				code_ptr[code_index+3] = 0xA9;
+				code_ptr[code_index+4] = target_pc & 0xFF;
+
+				// +5: STA _pc
+				code_ptr[code_index+5] = 0x85;
+				code_ptr[code_index+6] = (uint8_t)((uint16_t)&pc);
+
+				// +7: LDA #>target_pc
+				code_ptr[code_index+7] = 0xA9;
+				code_ptr[code_index+8] = (target_pc >> 8) & 0xFF;
+
+				// +9: STA _pc+1
+				code_ptr[code_index+9] = 0x85;
+				code_ptr[code_index+10] = (uint8_t)(((uint16_t)&pc) + 1);
+
+				// +11: LDA _a (restore guest A)
+				code_ptr[code_index+11] = 0xA5;
+				code_ptr[code_index+12] = (uint8_t)((uint16_t)&a);
+
+				// +13: PLP (restore guest flags)
+				code_ptr[code_index+13] = 0x28;
+
+				// +14: JMP $FFF0 (PATCHABLE)
+				code_ptr[code_index+14] = 0x4C;
+				code_ptr[code_index+15] = FFF0_DISPATCH & 0xFF;
+				code_ptr[code_index+16] = (FFF0_DISPATCH >> 8) & 0xFF;
+
+#ifndef ENABLE_IR
+				uint16_t jmp_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 15;
+				opt2_record_pending_branch_safe(0, jmp_operand_addr, flash_code_bank, target_pc, 0);
+#endif
+
+				pc = target_pc;
+				code_index += 17;
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			} else {
+				enable_interpret();
+			}
+#else  /* !ENABLE_FFF0_TEMPLATES */
+			// --- Old 9-byte patchable JMP pattern ---
+			if (code_index + 9 < CODE_SIZE) {
+				// +0: PHP
+				code_ptr[code_index] = 0x08;
+				// +1: CLC
+				code_ptr[code_index+1] = 0x18;
+				// +2: BCC +4 (always taken → slow PLP at +8)
+				code_ptr[code_index+2] = 0x90;
+				code_ptr[code_index+3] = 4;
+				// +4: PLP (fast path: restore flags)
+				code_ptr[code_index+4] = 0x28;
+				// +5: JMP $FFFF (fast path, patchable)
+				code_ptr[code_index+5] = 0x4C;
+				code_ptr[code_index+6] = 0xFF;
+				code_ptr[code_index+7] = 0xFF;
+				// +8: PLP (slow path: restore flags before epilogue)
+				code_ptr[code_index+8] = 0x28;
+				
+#ifndef ENABLE_IR
+				uint16_t bcc_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 3;
+				uint16_t jmp_operand_addr = flash_code_address + BLOCK_PREFIX_SIZE + code_index + 6;
+				opt2_record_pending_branch_safe(bcc_operand_addr, jmp_operand_addr, flash_code_bank, target_pc, 0);
+#endif
+				// (Under IR, deferred patches are recorded by the bank2 wrapper
+				// and resolved post-lowering by ir_resolve_deferred_patches.)
+				
+				pc = target_pc;
+				code_index += 9;
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;  // JMP ends the block
+				return cache_flag[cache_index];
+			} else {
+				enable_interpret();
+			}
+#endif  /* ENABLE_FFF0_TEMPLATES */
+			break;
 		}
 		
-		case opJMPi:		
-		case opRTS:
+		case opJSR:
+		{			
+			// JSR: push return address onto emulated stack, set _pc to target.
+			//
+			// ENABLE_NATIVE_STACK: uses NS_JSR template which pushes return addr
+			// onto the hardware guest stack via PHA (25 bytes vs 34).  No NJSR
+			// trampoline — the dispatch handles subroutine blocks normally.
+			//
+			// ENABLE_NATIVE_JSR (non-NS): Stack-clean subroutines use NJSR
+			// template with WRAM trampoline.
+			//
+			// Otherwise: emulated JSR template (manual _RAM_BASE+$100 push).
+			//
+			// 6502 JSR convention: pushes (pc+2) hi then lo (address of last byte of JSR).
+			// RTS pops lo then hi, adds 1, jumps there -> lands on pc+3.
+			
+			uint16_t target = (uint16_t)read6502(pc+1) | ((uint16_t)read6502(pc+2) << 8);
+			uint16_t return_addr = pc + 2;  // 6502 convention: push PC+2 (addr of last byte)
+
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: push return addr via PHA onto hardware guest stack
+			if ((code_index + opcode_6502_ns_jsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_ns_jsr_size; i++)
+					code_ptr[code_index+i] = opcode_6502_ns_jsr[i];
+				
+				code_ptr[code_index + opcode_6502_ns_jsr_ret_hi] = (uint8_t)(return_addr >> 8);
+				code_ptr[code_index + opcode_6502_ns_jsr_ret_lo] = (uint8_t)(return_addr);
+				code_ptr[code_index + opcode_6502_ns_jsr_tgt_lo] = (uint8_t)(target);
+				code_ptr[code_index + opcode_6502_ns_jsr_tgt_hi] = (uint8_t)(target >> 8);
+				
+				pc += 3;
+				code_index += opcode_6502_ns_jsr_size;
+				block_has_jsr |= 3;  // bits 0+1: native-stack JSR (conservative: treat as dirty)
+#ifdef ENABLE_STATIC_ANALYSIS
+				sa_record_subroutine_runtime(target);
+#endif
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_JSR;
+#endif
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			else
+			{
+				// NS_JSR didn't fit — can't fall back to emulated template
+				// (it uses _sp directly, which is stale under native stack)
+				cache_branch_pc_lo[cache_index] = read6502(pc+1);
+				cache_branch_pc_hi[cache_index] = read6502(pc+2);
+				enable_interpret();
+			}
+#elif defined(ENABLE_NATIVE_JSR)
+#ifdef ENABLE_INLINE_TINY_SUB
+			// Try inlining tiny stack-clean subroutines before NJSR path
+			if (sa_subroutine_lookup(target) == SA_SUB_CLEAN)
+			{
+				uint8_t inlined = try_inline_tiny_sub(target, code_ptr);
+				if (inlined)
+				{
+					pc += 3;
+					// No block_has_jsr — inlined code is just normal instructions
+#ifdef ENABLE_STATIC_ANALYSIS
+					sa_record_subroutine_runtime(target);
+#endif
+					// ir_tmpl_id stays 0 — outer wrapper records via ir_record_native_b2
+					cache_flag[cache_index] |= READY_FOR_NEXT;
+					return cache_flag[cache_index];
+				}
+			}
+#endif
+			// Check if subroutine is stack-clean — use native trampoline template
+			if (sa_subroutine_lookup(target) == SA_SUB_CLEAN &&
+			    (code_index + opcode_6502_njsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_njsr_size; i++)
+					code_ptr[code_index+i] = opcode_6502_njsr[i];
+				
+				code_ptr[code_index + opcode_6502_njsr_ret_hi] = (uint8_t)(return_addr >> 8);
+				code_ptr[code_index + opcode_6502_njsr_ret_lo] = (uint8_t)(return_addr);
+				code_ptr[code_index + opcode_6502_njsr_tgt_lo] = (uint8_t)(target);
+				code_ptr[code_index + opcode_6502_njsr_tgt_hi] = (uint8_t)(target >> 8);
+				
+				pc += 3;
+				code_index += opcode_6502_njsr_size;
+				block_has_jsr |= 1;  // bit 0 only: stack-clean JSR
+#ifdef ENABLE_STATIC_ANALYSIS
+				sa_record_subroutine_runtime(target);
+#endif
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_NJSR;
+#endif
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			else
+			// Emulated JSR: standard template (stack-dirty, unknown, or no SA)
+			if ((code_index + opcode_6502_jsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_jsr_size; i++)
+					code_ptr[code_index+i] = opcode_6502_jsr[i];
+				
+				code_ptr[code_index + opcode_6502_jsr_ret_hi] = (uint8_t)(return_addr >> 8);
+				code_ptr[code_index + opcode_6502_jsr_ret_lo] = (uint8_t)(return_addr);
+				code_ptr[code_index + opcode_6502_jsr_tgt_lo] = (uint8_t)(target);
+				code_ptr[code_index + opcode_6502_jsr_tgt_hi] = (uint8_t)(target >> 8);
+				
+				pc += 3;
+				code_index += opcode_6502_jsr_size;
+				block_has_jsr |= 3;  // bits 0+1: dirty (non-clean) JSR
+#ifdef ENABLE_STATIC_ANALYSIS
+				// Record JSR target for stack-safety analysis on next boot
+				sa_record_subroutine_runtime(target);
+#endif
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_JSR;
+#endif
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			else
+			{
+				// Not enough space -- fall back to interpreter
+				cache_branch_pc_lo[cache_index] = read6502(pc+1);
+				cache_branch_pc_hi[cache_index] = read6502(pc+2);
+				enable_interpret();
+			}
+#else
+			// Emulated JSR: standard template (no SA, manual _RAM_BASE+$100 push)
+			if ((code_index + opcode_6502_jsr_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_jsr_size; i++)
+					code_ptr[code_index+i] = opcode_6502_jsr[i];
+				
+				code_ptr[code_index + opcode_6502_jsr_ret_hi] = (uint8_t)(return_addr >> 8);
+				code_ptr[code_index + opcode_6502_jsr_ret_lo] = (uint8_t)(return_addr);
+				code_ptr[code_index + opcode_6502_jsr_tgt_lo] = (uint8_t)(target);
+				code_ptr[code_index + opcode_6502_jsr_tgt_hi] = (uint8_t)(target >> 8);
+				
+				pc += 3;
+				code_index += opcode_6502_jsr_size;
+				block_has_jsr |= 3;  // bits 0+1: dirty (non-clean) JSR
+#ifdef ENABLE_STATIC_ANALYSIS
+				// Record JSR target for stack-safety analysis on next boot
+				sa_record_subroutine_runtime(target);
+#endif
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_JSR;
+#endif
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			else
+			{
+				// Not enough space -- fall back to interpreter
+				cache_branch_pc_lo[cache_index] = read6502(pc+1);
+				cache_branch_pc_hi[cache_index] = read6502(pc+2);
+				enable_interpret();
+			}
+#endif
+			break;
+		}
+		
+		case opJMPi:
+		case opRTI:
 		{
 			enable_interpret();
+			break;
+		}
+		
+		case opRTS:
+		{
+			// Compiled RTS: pop return addr, add 1, set _pc, exit to dispatcher.
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: pop return addr via PLA from hardware guest stack
+			if ((code_index + opcode_6502_ns_rts_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_ns_rts_size; i++)
+					code_ptr[code_index+i] = opcode_6502_ns_rts[i];
+				
+				pc += 1;
+				code_index += opcode_6502_ns_rts_size;
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_NRTS;
+#endif
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+#else
+			// Emulated stack: pop from _RAM_BASE+$100
+			if ((code_index + opcode_6502_nrts_size + EPILOGUE_SIZE + 6) < CODE_SIZE)
+			{
+				for (uint8_t i = 0; i < opcode_6502_nrts_size; i++)
+					code_ptr[code_index+i] = opcode_6502_nrts[i];
+				
+				pc += 1;
+				code_index += opcode_6502_nrts_size;
+#ifdef ENABLE_IR
+				ir_tmpl_id = IR_TMPL_NRTS;
+#endif
+				cache_flag[cache_index] &= ~READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+#endif
+			enable_interpret();
+			break;
 		}
 		
 		case opTSX:
 		{
 			if ((code_index + 3 + 3) < CODE_SIZE)
 			{				
-				cache_code[cache_index][code_index] = opLDX_ZP;
-				cache_code[cache_index][code_index+1] = (uint16_t) &sp;				
+#ifdef ENABLE_NATIVE_STACK
+				// Native stack: real SP = guest SP, emit native TSX
+				code_ptr[code_index] = 0xBA;  // TSX
+				pc += 1;
+				code_index += 1;
+#else
+				code_ptr[code_index] = opLDX_ZP;
+				code_ptr[code_index+1] = (uint16_t) &sp;				
 				pc += 1;
 				code_index += 2;
+#endif
 				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
 			}			
@@ -533,10 +3511,21 @@ uint8_t recompile_opcode()
 		
 		case opTXS:
 		{
+#ifdef ENABLE_NATIVE_STACK
+			// TXS under native stack is complex: must clamp SP to guest
+			// range ($00-$7F), preserve flags (real TXS affects none), and
+			// handle the hardware SP change without PHP/PLP mismatch
+			// (PHP pushes at OLD SP, PLP pops at NEW SP after TXS).
+			// Since TXS is extremely rare (typically once at reset),
+			// interpret it safely.  The interpreter clamps via:
+			//   sp = (x >= 0x80) ? 0x7F : x;
+			enable_interpret();
+			break;
+#else
 			if ((code_index + 3 + 3) < CODE_SIZE)
 			{				
-				cache_code[cache_index][code_index] = opSTX_ZP;
-				cache_code[cache_index][code_index+1] = (uint16_t) &sp;				
+				code_ptr[code_index] = opSTX_ZP;
+				code_ptr[code_index+1] = (uint16_t) &sp;				
 				pc += 1;
 				code_index += 2;
 				cache_flag[cache_index] |= READY_FOR_NEXT;
@@ -547,123 +3536,256 @@ uint8_t recompile_opcode()
 				cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
 				cache_flag[cache_index] &= ~READY_FOR_NEXT;
 				return cache_flag[cache_index];
-			}																				
+			}
+#endif
 		}		
 		
 		case opPHA:
-		{
-			if ((code_index + opcode_6502_pha_size + 3) < CODE_SIZE)
-			{
-				for (uint8_t i = 0; i < opcode_6502_pha_size; i++)
-					{
-						cache_code[cache_index][code_index+i] = opcode_6502_pha[i];
-					}						
-					pc += 2;
-					code_index += opcode_6502_pha_size;
-					cache_flag[cache_index] |= READY_FOR_NEXT;
-					return cache_flag[cache_index];
-			}
-			else
-			{
-				cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
-				cache_flag[cache_index] &= ~READY_FOR_NEXT;
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: emit single PHA instruction
+			if ((code_index + 1 + 3) < CODE_SIZE) {
+				code_ptr[code_index++] = 0x48;  // PHA
+				pc += 1;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
-			}																				
-		}
-		case opPLA:				
-		{
-			if ((code_index + opcode_6502_pla_size + 3) < CODE_SIZE)
-			{
-				for (uint8_t i = 0; i < opcode_6502_pla_size; i++)
-					{
-						cache_code[cache_index][code_index+i] = opcode_6502_pla[i];
-					}						
-					pc += 2;
-					cache_flag[cache_index] |= READY_FOR_NEXT;
-					code_index += opcode_6502_pla_size;
-					return cache_flag[cache_index];
 			}
-			else
-			{
-				cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
-				cache_flag[cache_index] &= ~READY_FOR_NEXT;
+			enable_interpret();
+			break;
+#else
+			return emit_template(opcode_6502_pha, opcode_6502_pha_size);
+#endif
+		case opPLA:
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: emit single PLA instruction
+			if ((code_index + 1 + 3) < CODE_SIZE) {
+				code_ptr[code_index++] = 0x68;  // PLA
+				pc += 1;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
 				return cache_flag[cache_index];
-			}																				
-		}
+			}
+			enable_interpret();
+			break;
+#else
+			return emit_template(opcode_6502_pla, opcode_6502_pla_size);
+#endif
+		case opPHP:
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: emit single PHP instruction
+			if ((code_index + 1 + 3) < CODE_SIZE) {
+				code_ptr[code_index++] = 0x08;  // PHP
+				pc += 1;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			enable_interpret();
+			break;
+#else
+			return emit_template(opcode_6502_php, opcode_6502_php_size);
+#endif
+		case opPLP:
+#ifdef ENABLE_NATIVE_STACK
+			// Native stack: emit single PLP instruction
+			if ((code_index + 1 + 3) < CODE_SIZE) {
+				code_ptr[code_index++] = 0x28;  // PLP
+				pc += 1;
+				cache_flag[cache_index] |= READY_FOR_NEXT;
+				return cache_flag[cache_index];
+			}
+			enable_interpret();
+			break;
+#else
+			return emit_template(opcode_6502_plp, opcode_6502_plp_size);
+#endif
 		case opCLI:
 		case opSEI:
-		case opPHP:
-		case opPLP:
 		{
 			enable_interpret();
+			break;
 		}		
 		case opSTX_ZPY:
 		case opSTY_ZPX:
 		{			
 			enable_interpret();
+			break;
 		}
 		
 		case opSED:
 		{
 			decimal_mode = 1;
 			enable_interpret();
+			break;
 		}		
 
 		case opNOP:
 		{
-			pc +=1;
+			// Skip NOP — no code emitted, just advance pc
+			pc += 1;
 			cache_flag[cache_index] |= READY_FOR_NEXT;
-			return cache_flag[cache_index]; //continue; // do while
+			return cache_flag[cache_index];
 		}
 		
 		case opBRK:
 		{
-			IO8(0x4021) = 0;			
+			// BRK triggers interrupt - must be interpreted
+			IO8(0x4021) = 0;	// debug marker?
+			enable_interpret();
+			break;  // safety: enable_interpret() returns, but guard against macro changes
 		}
 
 		default:
-		{			
-			cache_code[cache_index][code_index] = op_buffer_0;
+		{
+			code_ptr[code_index] = op_buffer_0;
 			switch (addrmodes[op_buffer_0])	// use address mode type to determine instruction size
 			{					
-				case abso:
+					case abso:
 				case absx:
 				case absy:
 				case ind:
 				{					
 					encoded_address = (uint16_t) ((read6502(pc+1)) | (read6502(pc+2) << 8));					
 					
-					//decode_address_asm();
-					decode_address_c();
+					// Use modular platform for address translation
+					decoded_address = translate_address(encoded_address);
 					
 					if (decoded_address)
 					{
-						cache_code[cache_index][code_index+1] = (uint8_t) decoded_address;
-						cache_code[cache_index][code_index+2] = (uint8_t) (decoded_address >> 8);
+						code_ptr[code_index+1] = (uint8_t) decoded_address;
+						code_ptr[code_index+2] = (uint8_t) (decoded_address >> 8);
 					}
 					else
-						enable_interpret();							
-		
+					{
+#ifdef PLATFORM_NES
+						// NES ROM at $8000+: translate_address returns 0
+						// because ROM_NAME lives in the flash cache window.
+						if (encoded_address >= 0x8000) {
+							uint8_t am = addrmodes[op_buffer_0];
+							// Constant-fold: non-indexed abs reads → immediate
+							if (am == abso) {
+								uint8_t imm_op = nes_abs_to_imm(op_buffer_0);
+								if (imm_op) {
+									extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+									code_ptr[code_index] = imm_op;
+									code_ptr[code_index+1] = peek_bank_byte(
+										BANK_NES_PRG_LO,
+										(uint16_t)&ROM_NAME[encoded_address & 0x3FFF]);
+									pc += 3;
+									code_index += 2;
+									break;
+								}
+							}
+							// Indexed ROM reads (abs,X / abs,Y): copy ROM data into
+							// the flash cache sector, then emit the original opcode
+							// pointing at the flash copy.  Zero bank-switch overhead
+							// at runtime — normal 3-byte instruction, ~4 cycles.
+							else if (am == absx || am == absy) {
+								extern uint16_t nes_rom_data_copy(uint16_t rom_offset);
+								extern uint8_t nes_rom_copy_bank;
+								uint16_t fa = nes_rom_data_copy(encoded_address & 0x3FFF);
+								if (fa) {
+									// Verify the copy ended up in the same bank as
+									// the code block.  If not, fall through to interpret
+									// (cross-bank data ref would need a bankswitch).
+									if (nes_rom_copy_bank == flash_code_bank) {
+										code_ptr[code_index+1] = (uint8_t)fa;
+										code_ptr[code_index+2] = (uint8_t)(fa >> 8);
+										pc += 3;
+										code_index += 3;
+										break;
+									}
+								}
+							}
+						}
+#endif
+						enable_interpret();
+					}
 					pc += 3;
 					code_index += 3;
+
+					// Emit dirty flag for stores to screen/char RAM.
+					// Skip if we already INC'd that region in this block.
+					// NES: disabled — NES has no screen/char RAM at $40xx-$4Fxx.
+					// $40xx on NES = APU registers (no dirty tracking needed).
+					// Millipede: disabled — video RAM at $10xx-$13xx is interpreted.
+#if !defined(PLATFORM_NES) && !defined(PLATFORM_MILLIPEDE) && !defined(PLATFORM_ASTEROIDS)
+					if (decoded_address)
+					{
+						uint8_t msb = encoded_address >> 8;
+						if (msb >= 0x40 && msb < 0x50 &&
+						    !((msb < 0x48) ? block_dirty_screen : block_dirty_char) &&
+						    (code_index + 3 + EPILOGUE_SIZE) < CODE_SIZE)
+						{
+							uint8_t n = emit_dirty_flag(code_ptr, code_index,
+							    op_buffer_0, msb,
+							    0, 0);
+							if (n) {
+								code_index += n;
+								if (msb < 0x48) block_dirty_screen = 1;
+								else            block_dirty_char = 1;
+#ifdef ENABLE_IR
+								ir_dirty_flag_bytes = n;
+#endif
+							}
+						}
+					}
+#endif
 					break;
 				}						
 				
-				case zp:
-				case zpx:
-				case zpy:												
+				case zp:				
 				{															
-					cache_code[cache_index][code_index] |= 0x08; // change ZP to ABS (refer to 6502 opcode matrix) - note: except for STX ZP,Y and STY ZP,X !! (interpreted for now)
-					uint16_t address = read6502(pc+1);
-					address += (uint16_t) &RAM_BASE[0];
-					cache_code[cache_index][code_index+1] = (uint8_t) address;
-					cache_code[cache_index][code_index+2] = (uint8_t) (address >> 8);
+					code_ptr[code_index] |= 0x08; // change ZP to ABS (refer to 6502 opcode matrix) - note: except for STX ZP,Y and STY ZP,X !! (interpreted for now)
+					uint8_t zp_addr = read6502(pc+1);
+					uint16_t address = (uint16_t)zp_addr + (uint16_t) &RAM_BASE[0];
+					code_ptr[code_index+1] = (uint8_t) address;
+					code_ptr[code_index+2] = (uint8_t) (address >> 8);
 					pc += 2;
 					code_index += 3;
+
+#ifdef ENABLE_POINTER_SWIZZLE
+					// Mirror write: if this ZP is a tracked pointer byte,
+					// also write/modify the NES ZP mirror slot.
+					// Mirror stays in Exidy-space — always a 2-byte opcode.
+					if ((op_buffer_0 == 0x85 || op_buffer_0 == 0x86 || op_buffer_0 == 0x84 ||
+					     op_buffer_0 == 0xE6 || op_buffer_0 == 0xC6) &&
+					    (code_index + 2 + EPILOGUE_SIZE) < CODE_SIZE)
+					{
+						code_index += emit_zp_mirror_write(code_ptr, code_index, op_buffer_0, zp_addr);
+					}
+#endif
 					break;
 				}
+				case zpx:
+				case zpy:
+				{
+#ifdef ENABLE_ZP_INDEX_WRAP
+					// Interpret to preserve correct 6502 ZP index wrapping:
+					// (zp_addr + X/Y) & 0xFF stays within zero page
+					enable_interpret();
+#else
+					// Remap zpx→absx / zpy→absy (opcode |= 0x08, same as zp→abs)
+					// Assumes program doesn't rely on ZP index wrap-around.
+					// Note: STX zpy (0x96) and STY zpx (0x94) have no abs,X/Y
+					// equivalent and are handled by explicit cases above.
+					code_ptr[code_index] |= 0x08;
+					uint16_t address = read6502(pc+1);
+					address += (uint16_t) &RAM_BASE[0];
+					code_ptr[code_index+1] = (uint8_t) address;
+					code_ptr[code_index+2] = (uint8_t) (address >> 8);
+					pc += 2;
+					code_index += 3;
+#endif
+					break;
+				}
+
 				case indx:
 				{
+					// Indx pointers can point to ROM in the switchable bank ($8000-$BFFF).
+					// At runtime, the flash cache bank is at $8000, so ROM reads would fail.
+					// Always interpret indx instructions to ensure correct bank switching.
+					enable_interpret();
+					break;
+					
+					/* Original compiled indx - disabled due to bank conflict:
 					uint8_t address_8 = read6502(pc+1);
 					uint16_t address = address_8;
 					address += (uint16_t) &RAM_BASE[0];							
@@ -675,7 +3797,7 @@ uint8_t recompile_opcode()
 						indx_address_hi = address+1;
 						for (uint8_t i = 0; i < addr_6502_indx_size; i++)
 						{
-							cache_code[cache_index][code_index+i] = addr_6502_indx[i];
+							code_ptr[code_index+i] = addr_6502_indx[i];
 						}						
 						pc += 2;
 						code_index += addr_6502_indx_size;
@@ -687,43 +3809,98 @@ uint8_t recompile_opcode()
 						return cache_flag[cache_index];
 					}																				
 					break;
+					*/
 				}
 				case indy:
 				{
-					uint8_t address_8 = read6502(pc+1);
-					uint16_t address = address_8;
-					address += (uint16_t) &RAM_BASE[0];							
-					
-					if ((code_index + addr_6502_indy_size + 3) < CODE_SIZE)
-					{	
-						indy_opcode_location = op_buffer_0;
-						indy_address_lo = address;
-						indy_address_hi = address+1;
-						for (uint8_t i = 0; i < addr_6502_indy_size; i++)
+					enable_interpret();
+					uint8_t zp_addr = read6502(pc+1);
+
+					if (op_buffer_0 == 0x91)
+					{
+#ifdef ENABLE_POINTER_SWIZZLE
+						// Try native STA via address_decoding_table
 						{
-							cache_code[cache_index][code_index+i] = addr_6502_indy[i];
-						}						
-						pc += 2;
-						code_index += addr_6502_indy_size;
+							uint8_t n = 0;
+							if ((code_index + 25 + EPILOGUE_SIZE) < CODE_SIZE) {
+								n = emit_native_sta_indy(code_ptr, code_index,
+								    zp_addr,
+								    (uint8_t)((uint16_t)&screen_ram_updated),
+								    (uint8_t)((uint16_t)&character_ram_updated));
+							}
+							if (n) {
+								code_index += n;
+								pc += 2;
+							} else
+#endif
+						{
+						// STA ($zp),Y: route through write6502() for side effects
+						if ((code_index + sta_indy_template_size + 3) < CODE_SIZE)
+						{
+							sta_indy_zp_patch = zp_addr;
+							for (uint8_t i = 0; i < sta_indy_template_size; i++)
+								code_ptr[code_index+i] = sta_indy_template[i];
+							pc += 2;
+							code_index += sta_indy_template_size;
+						}
+						else
+						{
+							cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
+							cache_flag[cache_index] &= ~READY_FOR_NEXT;
+							return cache_flag[cache_index];
+						}
+						}
+#ifdef ENABLE_POINTER_SWIZZLE
+						}
+#endif
 					}
 					else
 					{
-						cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
-						cache_flag[cache_index] &= ~READY_FOR_NEXT;
-						return cache_flag[cache_index];
-					}																				
+						// Read-type indy (LDA, AND, ORA, EOR, ADC, SBC, CMP):
+						// use generic indy template with bank-switch trampoline.
+						// handle_io_indy detects ROM addresses at runtime and
+						// temporarily switches to bank1 for the read.
+						uint16_t address = (uint16_t)zp_addr + (uint16_t)&RAM_BASE[0];
+						if ((code_index + addr_6502_indy_size + 3) < CODE_SIZE)
+						{
+							indy_opcode_location = op_buffer_0;
+							indy_address_lo = address;
+							indy_address_hi = address + 1;
+							for (uint8_t i = 0; i < addr_6502_indy_size; i++)
+								code_ptr[code_index+i] = addr_6502_indy[i];
+							pc += 2;
+							code_index += addr_6502_indy_size;
+						}
+						else
+						{
+							cache_flag[cache_index] |= (OUT_OF_CACHE | INTERPRET_NEXT_INSTRUCTION);
+							cache_flag[cache_index] &= ~READY_FOR_NEXT;
+							return cache_flag[cache_index];
+						}
+					}
 					break;
 				}
 				
 				case imm:
 				case rel:
-					cache_code[cache_index][code_index+1] = read6502(pc+1);								
+				{
+					// Immediate values are kept in original Exidy-space.
+					// The NES ZP mirror applies hi_offset at the STA point.
+					code_ptr[code_index+1] = read6502(pc+1);
 					pc += 2;
 					code_index += 2;
 					break;
+				}
 				case imp:
-				case acc:						
+				case acc:
 				{
+					// Any legal imp/acc opcode (NOP, CLC, TAX, PHA, ASL A …)
+					// has its own explicit case in the outer switch and never
+					// reaches this default handler.  An imp/acc opcode here
+					// is therefore an illegal/undocumented instruction (e.g.
+					// $D2 = STP/KIL).  Copying it verbatim into native flash
+					// would halt the real 6502.  Fall through to interpret.
+					enable_interpret();
 					pc += 1;
 					code_index += 1;
 					break;
@@ -742,234 +3919,326 @@ uint8_t recompile_opcode()
 	return cache_flag[cache_index];
 }
 
-//============================================================================================================
-
-void check_cache_links()
+/* -------------------------------------------------------------------
+ * recompile_opcode_b2 — bank2 wrapper around _inner().
+ * Handles per-instruction IR recording so the post-loop IR block
+ * only needs to run optimise + lower (no replay from buffer).
+ *
+ * Phase B: patchable templates (21-byte branch, 9-byte JMP) contain
+ * internal relative offsets and JMP $FFFF placeholders.  These are
+ * recorded as IR_RAW_BYTE nodes so the optimizer cannot touch them.
+ * Deferred-patch info is extracted from the emitted bytes and stored
+ * in ir_ctx.deferred_patches[] for post-lowering resolution.
+ * ------------------------------------------------------------------- */
+static uint8_t recompile_opcode_b2()
 {
-		#ifdef ENABLE_LINKING
-		// see if caches can be linked together
-		/*
-		// if it loops into itself - sounds dangerous
-		for (uint16_t i = 0; i < BLOCK_COUNT; i++)
-		{
-			if ((cache_entry_pc_lo[i] | (cache_entry_pc_hi[i] << 8)) == (cache_exit_pc_lo[i] | (cache_exit_pc_hi[i] << 8)))
-			{
-				cache_links_found++;
-				cache_link[cache_index] = i;
-				cache_flag[cache_index] |= LINKED;
-			}
+#ifdef ENABLE_IR
+	uint8_t ci_before = code_index;
+	ir_tmpl_id = 0;
+	ir_dirty_flag_bytes = 0;
+	if (ci_before == 0) {
+		/* Zero seed fields for dynamic path.  SA pass 2 pre-sets them
+		 * with predecessor exit state before calling sa_compile_one_block,
+		 * so we only zero here when not in SA pass 2. */
+		if (sa_compile_pass != 2) {
+			ir_ctx.seed_a_known = 0;
+			ir_ctx.seed_x_known = 0;
+			ir_ctx.seed_y_known = 0;
 		}
-		*/
-		
-		// if exit of this cache leads to the entrance of another
-		for (uint16_t i = 0; i < BLOCK_COUNT; i++)
-		{
-			if ((cache_entry_pc_lo[i] | (cache_entry_pc_hi[i] << 8)) == (cache_exit_pc_lo[cache_index] | (cache_exit_pc_hi[cache_index] << 8)))
-			{				
-				//cache_links_found++;
-				cache_link[cache_index] = i;
-				cache_flag[cache_index] |= LINKED;
-				//combine_caches(cache_index);
+		IR_INIT(&ir_ctx);
+	}
+	else if (ir_ctx.enabled) {
+		/* Mid-block fence: check if this PC was identified by the ROM
+		 * pre-scan as a branch target within this block.  Only branch
+		 * targets get fences — fencing every instruction would kill
+		 * cross-instruction IR optimizations. */
+		uint8_t _ft;
+		for (_ft = 0; _ft < ir_fence_target_count; _ft++) {
+			if (ir_fence_targets[_ft] == pc) {
+				IR_EMIT_FENCE(&ir_ctx, pc);
 				break;
 			}
 		}
-		
-		// if another cache leads into this one
-		for (uint16_t i = 0; i < BLOCK_COUNT; i++)
+	}
+#endif
+	uint8_t result = recompile_opcode_b2_inner();
+#ifdef ENABLE_IR
+	if (code_index > ci_before) {
+		uint8_t *buf = cache_code[cache_index] + ci_before;
+		uint8_t delta = (uint8_t)(code_index - ci_before);
+
+		/* Scan emitted bytes for patchable JMP $FFFF, JMP $FFF0, or JMP $FFFE */
+		uint8_t patchable_jmp_pos = 0xFF; /* 0xFF = not found */
+		uint8_t patchable_is_fff0 = 0;
 		{
-			if ((cache_entry_pc_lo[cache_index] | (cache_entry_pc_hi[cache_index] << 8)) == (cache_exit_pc_lo[i] | (cache_exit_pc_hi[i] << 8)))
-			{			
-				//cache_links_found++;
-				cache_link[i] = cache_index;
-				cache_flag[i] |= LINKED;
+			uint8_t j;
+			for (j = 0; (uint8_t)(j + 2) < delta; j++) {
+				if (buf[j] == 0x4C && buf[j+2] == 0xFF) {
+					if (buf[j+1] == 0xFF) {
+						patchable_jmp_pos = j;
+						break;
+					}
+#ifdef ENABLE_FFF0_TEMPLATES
+					if (buf[j+1] == (FFF0_DISPATCH & 0xFF)) {
+						patchable_jmp_pos = j;
+						patchable_is_fff0 = 1;
+						break;
+					}
+#endif
+#ifdef ENABLE_IR
+					/* IR direct branch placeholder: JMP $FFFE.
+					 * Must be recorded as IR_RAW_BYTE (not structured
+					 * IR) so the optimizer cannot decompose or corrupt
+					 * the 5-byte Bxx_inv+JMP sentinel sequence. */
+					if (buf[j+1] == (DIRECT_BRANCH_SENTINEL & 0xFF)) {
+						patchable_jmp_pos = j;
+						break;
+					}
+#endif
+				}
 			}
 		}
 
-		// if branch is linked to another cache
-		for (uint16_t i = 0; i < BLOCK_COUNT; i++)
-		{
-			if ((cache_entry_pc_lo[i] | (cache_entry_pc_hi[i] << 8)) == (cache_branch_pc_lo[cache_index] | (cache_branch_pc_hi[cache_index] << 8)))
-			{				
-				//cache_links_found++;
-				cache_branch_link[cache_index] = i;
-				cache_flag[cache_index] |= BRANCH_LINKED;
-				break;
+		if (ir_tmpl_id && ir_ctx.enabled) {
+			/* NRTS/JSR/NJSR: emit as atomic IR_TEMPLATE.  This prevents
+			 * ir_opt_php_plp_elision from pairing a preceding PLP with
+			 * the template's leading PHP — removing that PHP breaks the
+			 * dispatch return stack contract (PLA pops JSR return byte
+			 * instead of guest status → RTS to garbage address). */
+			/* Safety: check if enough patch slots remain for this template.
+			 * JSR/NJSR need 4 patches each.  If we'd overflow, disable IR
+			 * for this block — the raw bytes in cache_code[] are already
+			 * correctly patched, so falling back is safe.  Without this,
+			 * IR_TMPL_PATCH silently drops patches → ir_lower emits the
+			 * pristine template with $FF placeholders → guest PC = $FFFF. */
+			uint8_t patches_needed = 0;
+			if (ir_tmpl_id == IR_TMPL_JSR || ir_tmpl_id == IR_TMPL_NJSR)
+				patches_needed = 4;
+			if (ir_ctx.tmpl_patch_count + patches_needed > IR_MAX_TMPL_PATCHES) {
+				ir_ctx.enabled = 0;  /* fall back to raw bytes */
+			} else {
+			uint8_t pre = recompile_instr_start - ci_before;
+			if (pre) {
+				/* Record any flushed PLP bytes before the template */
+				ir_record_native_b2(buf, pre);
+			}
+			uint8_t tmpl_node_idx = ir_ctx.node_count;
+			IR_EMIT(&ir_ctx, IR_TEMPLATE, 0xFF, (uint16_t)ir_tmpl_id);
+			/* Record template patches for JSR/NJSR immediate operands */
+			if (ir_tmpl_id == IR_TMPL_JSR) {
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_ret_hi, buf[pre + opcode_6502_jsr_ret_hi]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_ret_lo, buf[pre + opcode_6502_jsr_ret_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_tgt_lo, buf[pre + opcode_6502_jsr_tgt_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_tgt_hi, buf[pre + opcode_6502_jsr_tgt_hi]);
+			} else if (ir_tmpl_id == IR_TMPL_NJSR) {
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_ret_hi, buf[pre + opcode_6502_njsr_ret_hi]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_ret_lo, buf[pre + opcode_6502_njsr_ret_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_tgt_lo, buf[pre + opcode_6502_njsr_tgt_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_tgt_hi, buf[pre + opcode_6502_njsr_tgt_hi]);
+			}
+			} /* end patches_needed check */
+			/* NRTS has no patches — template is fully fixed */
+		} else if (patchable_jmp_pos != 0xFF) {
+			/* Patchable template — record all bytes as IR_RAW_BYTE
+			 * to prevent optimizer from touching internal offsets.
+			 * Guard: if the node buffer can't hold all bytes, disable
+			 * IR for this block.  Silent drops would produce fewer
+			 * lowered bytes and NOP padding would overwrite template
+			 * data ($EA over dispatch addresses → crash). */
+			if (ir_ctx.node_count + delta > IR_MAX_NODES) {
+				ir_ctx.enabled = 0;  /* skip ir_lower, use raw bytes */
+			} else {
+			uint8_t j;
+			for (j = 0; j < delta; j++)
+				IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)buf[j]);
+
+			/* Extract and store deferred patch info.
+			 * JMP $FFFE (IR direct branch sentinel) is resolved by
+			 * ir_resolve_direct_branches(), not the deferred patch
+			 * system — skip deferred patch creation to avoid reading
+			 * out-of-bounds from the 5-byte placeholder.  Still set
+			 * carry_live_at_exit for the optimizer. */
+#ifdef ENABLE_IR
+			if (patchable_jmp_pos != 0xFF &&
+			    (uint8_t)(patchable_jmp_pos + 1) < delta &&
+			    buf[patchable_jmp_pos + 1] == (DIRECT_BRANCH_SENTINEL & 0xFF)) {
+				/* $FFFE sentinel: set carry_live from inverted branch */
+				if (patchable_jmp_pos >= 2) {
+					uint8_t bop = buf[patchable_jmp_pos - 2];
+					ir_ctx.carry_live_at_exit = (bop == 0x90 || bop == 0xB0) ? 1 : 0;
+				}
+				/* No deferred patch — ir_resolve_direct_branches handles it */
+			} else
+#endif
+			if (ir_ctx.deferred_patch_count < IR_MAX_DEFERRED_PATCHES) {
+				ir_deferred_patch_t *dp = &ir_ctx.deferred_patches[ir_ctx.deferred_patch_count];
+				uint8_t p = patchable_jmp_pos;
+#ifdef ENABLE_FFF0_TEMPLATES
+				if (patchable_is_fff0) {
+					/* $FFF0 template: target_pc is in the inline LDA#/STA _pc
+					 * sequence preceding the JMP.
+					 *
+					 * Branch (19B): ...PHP/LDA#lo/STA/LDA#hi/STA/LDA_a/PLP/Bxx/JMP
+					 *   JMP is at p, Bxx at p-2.
+					 *   LDA#lo byte at p-12, LDA#hi byte at p-8.
+					 *
+					 * JMP (17B):    ...PHP/LDA#lo/STA/LDA#hi/STA/LDA_a/PLP/JMP
+					 *   JMP is at p, PLP at p-1.
+					 *   LDA#lo byte at p-10, LDA#hi byte at p-6.
+					 */
+					/* Detect branch vs JMP: Bxx_inv at p-2 has bit pattern xxxx0000 in low nibble */
+					if (p >= 2 && (buf[p - 2] & 0x1F) == 0x10) {
+						/* Branch template (19B) */
+						dp->target_pc = (uint16_t)buf[p - 12]
+						              | ((uint16_t)buf[p - 8] << 8);
+						dp->is_branch = DEFERRED_PATCH_FFF0_BRANCH;
+						uint8_t bop = buf[p - 2];
+						/* The branch is INVERTED, so the original opcode is the
+						 * opposite.  For carry-live detection, check if the
+						 * ORIGINAL branch reads carry: BCC→BCS and BCS→BCC.
+						 * Inverted BCC(90) means original was BCS(B0) and vice versa. */
+						ir_ctx.carry_live_at_exit = (bop == 0x90 || bop == 0xB0) ? 1 : 0;
+					} else {
+						/* JMP template (17B) */
+						dp->target_pc = (uint16_t)buf[p - 10]
+						              | ((uint16_t)buf[p - 6] << 8);
+						dp->is_branch = DEFERRED_PATCH_FFF0_JMP;
+					}
+				} else
+#endif
+				{
+				/* Old templates */
+				/* 21-byte branch template: Bxx $03 immediately before JMP */
+				if (p >= 2 && buf[p - 1] == 0x03 && (buf[p - 2] & 0x1F) == 0x10) {
+					/* target_pc is LDA# at +7 (lo) and +11 (hi) from JMP */
+					dp->target_pc = (uint16_t)buf[p + 7]
+					              | ((uint16_t)buf[p + 11] << 8);
+					dp->is_branch = DEFERRED_PATCH_BRANCH_OLD;
+					/* Tell optimizer whether this branch reads carry.
+					 * BCC=$90 BCS=$B0 read carry; all others don't. */
+					{ uint8_t bop = buf[p - 2];
+					  ir_ctx.carry_live_at_exit = (bop == 0x90 || bop == 0xB0) ? 1 : 0;
+					}
+				} else {
+					/* 9-byte JMP template — target is where pc was set */
+					dp->target_pc = pc;
+					dp->is_branch = DEFERRED_PATCH_JMP_OLD;
+				}
+				}
+				ir_ctx.deferred_patch_count++;
+			}
+			}  /* end else (node buffer had room) */
+		} else {
+			if (ir_dirty_flag_bytes && ir_dirty_flag_bytes <= delta) {
+				/* Split: record the store instruction as structured IR
+				 * nodes, but emit the dirty flag (PHP/INC zp/PLP) as
+				 * IR_RAW_BYTE nodes so the optimizer cannot strip the
+				 * PLP and leave an unmatched PHP on the hardware stack. */
+				uint8_t store_len = delta - ir_dirty_flag_bytes;
+				if (store_len)
+					ir_record_native_b2(buf, store_len);
+				for (uint8_t _df = 0; _df < ir_dirty_flag_bytes; _df++)
+					IR_EMIT(&ir_ctx, IR_RAW_BYTE, 0, (uint16_t)buf[store_len + _df]);
+			} else {
+				ir_record_native_b2(buf, delta);
 			}
 		}
-
-		#endif // ENABLE_LINKING
+	}
+#endif
+	return result;
 }
 
-//============================================================================================================
+#pragma section default
 
-void ready()
-{	
-	bankswitch_prg(1);
-	run_again:	
-
-	dispatch_cache_asm();
-	
-	#ifdef TRACK_TICKS
-	clockticks6502 += cache_cycles[cache_index];
-	#else
-	frame_time += cache_cycles[cache_index];
-	#endif
-	
-	if (cache_flag[cache_index] & INTERPRET_NEXT_INSTRUCTION)
-	{
-		bankswitch_prg(0);
-		interpret_6502();					
-	}
-	
-	#ifdef ENABLE_LINKING
-
-	if (verify_link_type1(cache_index))
-	{
-		cache_index = verify_link_type1(cache_index) - 1;
-		goto run_again;
-	}	
-	
-
-	if (verify_link_type0(cache_index))
-	{
-		cache_index = verify_link_type0(cache_index) - 1;
-		goto run_again;
-	}
-		
-	#endif // ENABLE_LINKING	
-	
-	bankswitch_prg(0);
-}
-
-//============================================================================================================
-// return 0 - bad link, otherwise return link+1
-uint8_t verify_link_type0(uint8_t ix)
+// Fixed-bank trampoline for recompile_opcode
+uint8_t recompile_opcode(void)
 {
-	if (cache_flag[ix] & LINKED)
-	{		
-		if (((uint8_t) pc == cache_entry_pc_lo[cache_link[ix]])  && (((uint8_t) pc >> 8) == cache_entry_pc_hi[cache_link[ix]]))
-		{			
-			cache_links++;
-			return (cache_link[ix]) + 1;
-		}
-		else
-		{
-			cache_link[ix] = 0;	// delete link
-			cache_flag[ix] &= ~LINKED;
-			cache_links_dropped++;
-			return 0;
-		}
-	}
-	return 0;
-}
-//============================================================================================================
-uint8_t verify_link_type1(uint8_t ix)
-{
-	if (cache_flag[ix] & BRANCH_LINKED)
-	{		
-		if (((uint8_t) pc == cache_entry_pc_lo[cache_branch_link[ix]]) && (((uint8_t) pc >> 8) == cache_entry_pc_hi[cache_branch_link[ix]]))
-		{			
-			cache_links++;
-			return (cache_branch_link[ix]) + 1;
-		}
-		else
-		{
-			cache_branch_link[ix] = 0;	// delete link
-			cache_flag[ix] &= ~BRANCH_LINKED;
-			cache_links_dropped++;
-			return 0;
-		}
-	}
-	return 0;
-}
-//============================================================================================================
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(2);
+	uint8_t result = recompile_opcode_b2();
+	bankswitch_prg(saved_bank);
 
-// rewrite
-void combine_caches(uint8_t start_with)
-{
-	int i = start_with;	
-	uint16_t vpc_count = 0;
-	
-	uint8_t ix2 = 0;
-	if ((verify_link_type0(i)) && (cache_flag[i] & OUT_OF_CACHE))
-	{			
-		uint8_t ix = 0;
-		vpc_count += cache_vpc[i];
-		do
-		{					
-			do
-			{					
-				l1_cache_code[ix2++] = cache_code[i][ix++];				
-			} while (ix < cache_vpc[i]);
-						
-			uint8_t temp_i = i;
-			i = cache_link[temp_i];
-			
-			vpc_count += cache_vpc[i]; // check size including next cache
-		} while (vpc_count < CACHE_L1_CODE_SIZE);		
+#ifdef ENABLE_COMPILE_PPU_EFFECT
+	// Toggle greyscale per instruction (SA boot only — darkened screen)
+	if (compile_ppu_active) {
+		compile_ppu_effect ^= 0x01;
+		lnPPUMASK = 0x1A | 0xE0 | compile_ppu_effect;
+		*(volatile uint8_t*)0x2001 = lnPPUMASK;
 	}
-	else
-	{
-		l1_cache_code[0] = 0x60;		
-	}	
+#endif
+
+	return result;
 }
 
-//============================================================================================================
-void decode_address_c(void)
-{
-	uint8_t msb_compare = encoded_address >> 8;
-	if (msb_compare < 4)
-		decoded_address = (uint16_t) encoded_address + (uint16_t) RAM_BASE;			
-	else if (msb_compare < 0x40)	
-		decoded_address = (uint16_t) (encoded_address - ROM_OFFSET) + (uint16_t) ROM_NAME;
-	else if (msb_compare < 0x48)
-		decoded_address = (encoded_address - 0x4000) + (uint16_t) SCREEN_RAM_BASE;
-	else if (msb_compare < 0x50)
-		decoded_address = (encoded_address - 0x4800) + (uint16_t) CHARACTER_RAM_BASE;
-	else
-		decoded_address = 0;	
-}
+// Removed: check_cache_links(), ready(), verify_link_type0(), verify_link_type1(), combine_caches()
+// These were all part of the old RAM cache execution system that is no longer used.
+// Flash cache execution uses dispatch_on_pc() and flash_dispatch_return instead.
+
+// Removed: decode_address_c() - now using platform_exidy.translate_addr() from platform/platform_exidy.c
 
 //============================================================================================================
-void cache_bit_enable(uint16_t addr)
+// ==========================================================================
+// cache_bit_enable / cache_bit_check — moved to bank 17 (BANK_COMPILE).
+// Not performance-critical. Saves ~506 bytes of fixed-bank space.
+// ==========================================================================
+#pragma section bank17
+
+static void cache_bit_enable_b17(uint16_t addr)
 {	
 	uint8_t bit_mask = ~(1 << (addr & 3));
 	addr = addr >> 3;
-	bankswitch_prg(3);
-	uint8_t value = bit_mask & cache_bit_array[addr];
+	uint8_t value = bit_mask & peek_bank_byte(3, (uint16_t) &cache_bit_array[0] + addr);
 	flash_byte_program((uint16_t) &cache_bit_array[0] + addr, 3, value);
-	bankswitch_prg(0);
+}
+
+//============================================================================================================
+static uint8_t cache_bit_check_b17(uint16_t addr)
+{
+	uint8_t bit_number = addr & 3;
+	uint8_t value;
+	addr = addr >> 3;
+	uint8_t byte_val = peek_bank_byte(3, (uint16_t) &cache_bit_array[0] + addr);
+	switch (bit_number)
+	{
+		case 0:
+			value = 0x01 & byte_val;
+		case 1:
+			value = 0x02 & byte_val;
+		case 2:
+			value = 0x04 & byte_val;
+		case 3:
+			value = 0x08 & byte_val;
+		case 4:
+			value = 0x10 & byte_val;
+		case 5:
+			value = 0x20 & byte_val;
+		case 6:
+			value = 0x40 & byte_val;
+		case 7:
+			value = 0x80 & byte_val;
+		default:
+	}
+	return value;
+}
+
+#pragma section default
+
+void cache_bit_enable(uint16_t addr)
+{
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	cache_bit_enable_b17(addr);
+	bankswitch_prg(saved_bank);
 }
 
 //============================================================================================================
 uint8_t cache_bit_check(uint16_t addr)
 {
-	uint8_t bit_number = addr & 3;
-	uint8_t value;
-	addr = addr >> 3;
-	bankswitch_prg(3);
-	switch (bit_number)
-	{
-		case 0:
-			value = 0x01 & cache_bit_array[addr];
-		case 1:
-			value = 0x02 & cache_bit_array[addr];
-		case 2:
-			value = 0x04 & cache_bit_array[addr];
-		case 3:
-			value = 0x08 & cache_bit_array[addr];
-		case 4:
-			value = 0x10 & cache_bit_array[addr];
-		case 5:
-			value = 0x20 & cache_bit_array[addr];
-		case 6:
-			value = 0x40 & cache_bit_array[addr];
-		case 7:
-			value = 0x80 & cache_bit_array[addr];
-		default:
-	}
-	bankswitch_prg(0);
-	return value;
+	uint8_t saved_bank = mapper_prg_bank;
+	bankswitch_prg(BANK_COMPILE);
+	uint8_t result = cache_bit_check_b17(addr);
+	bankswitch_prg(saved_bank);
+	return result;
 }
 
 //============================================================================================================

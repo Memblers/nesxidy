@@ -5,7 +5,7 @@
 
 #pragma section default
 
-uint8_t mapper_prg_bank = 0;
+uint8_t mapper_prg_bank = 0;  // Startup maps bank 0; must match hardware state
 uint8_t mapper_chr_bank = 0;
 uint8_t mapper_register = 0;
 
@@ -59,7 +59,6 @@ void bankswitch_prg(__reg("a") uint8_t bank)
 }	
 
 // ******************************************************************************************
-
 void bankswitch_chr(__reg("a") uint8_t bank)
 {
 	mapper_chr_bank = bank;

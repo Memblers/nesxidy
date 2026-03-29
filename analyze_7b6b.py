@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Analyze Asteroids reset routine and NMI interlock"""
+
+roms = bytearray()
+roms += open('roms/asteroid/035145-04e.ef2','rb').read()
+roms += open('roms/asteroid/035144-04e.h2','rb').read()
+roms += open('roms/asteroid/035143-02.j2','rb').read()
+
+lengths = [1]*256
+imm = [0x09,0x29,0x49,0x69,0x89,0xA0,0xA2,0xA9,0xC0,0xC9,0xE0,0xE9]
+zp  = [0x05,0x06,0x24,0x25,0x26,0x45,0x46,0x65,0x66,0x84,0x85,0x86,0xA4,0xA5,0xA6,0xC4,0xC5,0xC6,0xE4,0xE5,0xE6]
+zpx = [0x15,0x16,0x35,0x36,0x55,0x56,0x75,0x76,0x94,0x95,0xB4,0xB5,0xD5,0xD6,0xF5,0xF6]
+zpy = [0x96,0xB6]
+rel = [0x10,0x30,0x50,0x70,0x90,0xB0,0xD0,0xF0]
+izx = [0x01,0x21,0x41,0x61,0x81,0xA1,0xC1,0xE1]
+izy = [0x11,0x31,0x51,0x71,0x91,0xB1,0xD1,0xF1]
+abso= [0x0D,0x0E,0x20,0x2C,0x2D,0x2E,0x4C,0x4D,0x4E,0x6C,0x6D,0x6E,0x8C,0x8D,0x8E,0xAC,0xAD,0xAE,0xCC,0xCD,0xCE,0xEC,0xED,0xEE]
+abx = [0x1D,0x1E,0x3D,0x3E,0x5D,0x5E,0x7D,0x7E,0x9D,0xBD,0xDD,0xDE,0xFD,0xFE]
+aby = [0x19,0x39,0x59,0x79,0x99,0xB9,0xD9,0xF9]
+for o in imm+zp+zpx+zpy+rel+izx+izy: lengths[o] = 2
+for o in abso+abx+aby: lengths[o] = 3
+names = {0x4C:'JMP',0x20:'JSR',0x60:'RTS',0x40:'RTI',0x00:'BRK',
+    0xA9:'LDA#',0xA5:'LDA z',0xAD:'LDA a',0xBD:'LDA a,X',0xB9:'LDA a,Y',0xA1:'LDA (z,X)',0xB1:'LDA (z),Y',0xB5:'LDA z,X',
+    0xA2:'LDX#',0xA6:'LDX z',0xAE:'LDX a',0xBE:'LDX a,Y',
+    0xA0:'LDY#',0xA4:'LDY z',0xAC:'LDY a',0xB4:'LDY z,X',0xBC:'LDY a,X',
+    0x85:'STA z',0x8D:'STA a',0x9D:'STA a,X',0x99:'STA a,Y',0x81:'STA (z,X)',0x91:'STA (z),Y',0x95:'STA z,X',
+    0x86:'STX z',0x8E:'STX a',0x96:'STX z,Y',0x84:'STY z',0x8C:'STY a',0x94:'STY z,X',
+    0xE8:'INX',0xC8:'INY',0xCA:'DEX',0x88:'DEY',0xAA:'TAX',0xA8:'TAY',0x8A:'TXA',0x98:'TYA',0x9A:'TXS',0xBA:'TSX',
+    0x48:'PHA',0x68:'PLA',0x08:'PHP',0x28:'PLP',
+    0x18:'CLC',0x38:'SEC',0x58:'CLI',0x78:'SEI',0xD8:'CLD',0xF8:'SED',0xB8:'CLV',0xEA:'NOP',
+    0x29:'AND#',0x25:'AND z',0x2D:'AND a',0x35:'AND z,X',0x3D:'AND a,X',0x39:'AND a,Y',
+    0x09:'ORA#',0x05:'ORA z',0x0D:'ORA a',0x15:'ORA z,X',0x1D:'ORA a,X',0x19:'ORA a,Y',
+    0x49:'EOR#',0x45:'EOR z',0x4D:'EOR a',
+    0x69:'ADC#',0x65:'ADC z',0x6D:'ADC a',0x79:'ADC a,Y',0x75:'ADC z,X',0x7D:'ADC a,X',
+    0xE9:'SBC#',0xE5:'SBC z',0xED:'SBC a',0xF5:'SBC z,X',0xFD:'SBC a,X',0xF9:'SBC a,Y',
+    0xC9:'CMP#',0xC5:'CMP z',0xCD:'CMP a',0xD5:'CMP z,X',0xDD:'CMP a,X',0xD9:'CMP a,Y',
+    0xE0:'CPX#',0xE4:'CPX z',0xEC:'CPX a',0xC0:'CPY#',0xC4:'CPY z',0xCC:'CPY a',
+    0xE6:'INC z',0xF6:'INC z,X',0xEE:'INC a',0xFE:'INC a,X',
+    0xC6:'DEC z',0xD6:'DEC z,X',0xCE:'DEC a',0xDE:'DEC a,X',
+    0x0A:'ASL A',0x06:'ASL z',0x0E:'ASL a',0x16:'ASL z,X',0x1E:'ASL a,X',
+    0x4A:'LSR A',0x46:'LSR z',0x4E:'LSR a',0x56:'LSR z,X',0x5E:'LSR a,X',
+    0x2A:'ROL A',0x26:'ROL z',0x2E:'ROL a',
+    0x6A:'ROR A',0x66:'ROR z',0x6E:'ROR a',0x76:'ROR z,X',
+    0x10:'BPL',0x30:'BMI',0x50:'BVC',0x70:'BVS',0x90:'BCC',0xB0:'BCS',0xD0:'BNE',0xF0:'BEQ',
+    0x24:'BIT z',0x2C:'BIT a',
+    0x01:'ORA (z,X)',0x11:'ORA (z),Y',0x21:'AND (z,X)',0x31:'AND (z),Y',
+    0x41:'EOR (z,X)',0x51:'EOR (z),Y',0x61:'ADC (z,X)',0x71:'ADC (z),Y',
+    0xC1:'CMP (z,X)',0xD1:'CMP (z),Y',0xE1:'SBC (z,X)',0xF1:'SBC (z),Y',
+}
+
+def disasm_range(start, end):
+    pc = start
+    while pc < end:
+        off = pc - 0x6800
+        if off < 0 or off >= len(roms):
+            print(f"  {pc:04X}: ??? (out of range)")
+            pc += 1
+            continue
+        op = roms[off]
+        l = lengths[op]
+        mn = names.get(op, '???(%02X)' % op)
+        if l == 1:
+            print(f"  {pc:04X}: {op:02X}         {mn}")
+        elif l == 2:
+            b = roms[off+1]
+            if op in rel:
+                target = pc + 2 + (b if b < 128 else b - 256)
+                print(f"  {pc:04X}: {op:02X} {b:02X}      {mn} ${target:04X}")
+            else:
+                print(f"  {pc:04X}: {op:02X} {b:02X}      {mn} ${b:02X}")
+        else:
+            lo = roms[off+1]; hi = roms[off+2]; addr = hi*256+lo
+            print(f"  {pc:04X}: {op:02X} {lo:02X} {hi:02X}   {mn} ${addr:04X}")
+        pc += l
+
+print("=== Reset routine at $7CF3 ===")
+disasm_range(0x7CF3, 0x7D60)
+
+# Now search for ALL references to any address in $0100-$01FF range
+# to find "clear stack page" logic
+print()
+print("=== All STA $01xx references ===")
+for i in range(len(roms)-2):
+    op = roms[i]
+    if op == 0x8D:  # STA absolute
+        lo = roms[i+1]; hi = roms[i+2]
+        addr = hi*256 + lo
+        if 0x0100 <= addr <= 0x01FF:
+            pc = 0x6800 + i
+            print(f"  {pc:04X}: STA ${addr:04X}")
+    elif op == 0x9D:  # STA absolute,X
+        lo = roms[i+1]; hi = roms[i+2]
+        addr = hi*256 + lo
+        if 0x0100 <= addr <= 0x02FF:  # base could be lower
+            pc = 0x6800 + i
+            print(f"  {pc:04X}: STA ${addr:04X},X")
+
+# Check for writes using stack operations
+# PHA writes to $0100+SP
+# The game could use PHA to write to $01FF if SP is $FF
+
+# Also search for writes to any $0000-$03FF by the reset code
+print()
+print("=== Code around NMI interlock context ===")
+print("NMI waiting: LDA $01FF OR $01D0  => BNE $7B71 (spin)")
+print()
+print("$01FF is top of 6502 stack. If reset zeroes all RAM $0000-$03FF,")
+print("$01FF would be zero. Then when game does LDX #$FF; TXS it sets SP=FF")
+print("but doesn't write $01FF. So $01FF is zero (from RAM clear).")
+print("$01D0 is in the stack page too. Also zero from RAM clear.") 
+print()
+print("If our emulator does NOT zero all RAM, these could be non-zero!")

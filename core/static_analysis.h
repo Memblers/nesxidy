@@ -1,0 +1,174 @@
+/**
+ * static_analysis.h - One-time power-on ROM analysis pass
+ *
+ * BFS walk of guest ROM starting from reset/NMI/IRQ vectors, discovering
+ * all reachable code.  Results stored in a persistent bitmap + typed list
+ * in flash bank 3.  Optional batch compilation of discovered entry points.
+ *
+ * Flash bank 3 layout (after existing data):
+ *   $8000-$83BF  flash_block_flags[960]        (existing)
+ *   $83D0-$83D7  cache signature               (existing)
+ *   $83D8-$93D7  cache_bit_array[0x2000]       (existing, 8KB)
+ *   $93D8-$A3D7  sa_code_bitmap[0x1000]        (NEW: 4KB, 1 bit/addr = 32K addrs)
+ *   $A3D8-$A3DF  sa_header                     (NEW: 8 bytes)
+ *   $A3E0-$A7DF  sa_indirect_targets[~340]     (NEW: 1KB, 3 bytes each)
+ *
+ * The code bitmap and indirect-target list survive flash_format() because
+ * flash_format_b2() is patched to skip the sectors containing them.
+ *
+ * On each reset the walker re-discovers code from vectors (cheap BFS) and
+ * seeds additionally from the persisted indirect-jump target list, which
+ * grows at runtime as the interpreter resolves JMP ($xxxx) instructions.
+ */
+
+#ifndef STATIC_ANALYSIS_H
+#define STATIC_ANALYSIS_H
+
+#include <stdint.h>
+#include "../config.h"
+
+// -------------------------------------------------------------------------
+// Flash layout for the static-analysis region in bank 3
+// -------------------------------------------------------------------------
+// All SA data is placed in bank 3 via #pragma section bank3, alongside
+// flash_block_flags and cache_bit_array.  The linker assigns addresses.
+
+// Code bitmap: 4KB = 32768 bits, one bit per guest address.
+// Bit CLEAR = address is known code.  Erased state ($FF) = unknown.
+// This matches the flash-friendly convention (clearing bits is free).
+#define SA_BITMAP_SIZE      0x1000          // 4KB
+
+// Header: 8 bytes — magic(4) + rom_hash(4)
+// Stored inline in the sa_header[] array.
+#define SA_HEADER_SIZE      8
+
+// Indirect-target list: 3 bytes each (addr_lo, addr_hi, type_flags)
+#define SA_INDIRECT_MAX     170             // ~512B / 3 bytes
+
+// Target-type flags (stored in byte 2 of each indirect-target entry)
+#define SA_TYPE_JSR         0x01
+#define SA_TYPE_BRANCH      0x02
+#define SA_TYPE_JMP_IND     0x03    // resolved at runtime
+#define SA_TYPE_JMP_ABS     0x04
+#define SA_TYPE_EMPTY       0xFF    // erased / unused slot
+
+// Signature magic for the SA header (distinct from cache signature)
+#define SA_SIG_MAGIC_0      0x53    // 'S'
+#define SA_SIG_MAGIC_1      0x41    // 'A'
+#define SA_SIG_MAGIC_2      0x56    // 'V'
+#define SA_SIG_MAGIC_3      0x01    // version 1
+
+// -------------------------------------------------------------------------
+// Subroutine table — persisted in flash bank 3.
+// Records every JSR target discovered by the BFS walker, plus a
+// stack-safety flag set after analysis.  Layout per entry (3 bytes):
+//   byte 0: addr_lo
+//   byte 1: addr_hi
+//   byte 2: flags  (0xFF = empty, see SA_SUB_* below)
+//
+// Flash semantics: erased = 0xFF.  A single program operation can
+// clear any combination of bits (1→0).  Entries are written once:
+//   1. Program addr_lo, addr_hi  (marks slot as populated)
+//   2. Program flags byte        (result of stack-safety analysis)
+// -------------------------------------------------------------------------
+#define SA_SUBROUTINE_MAX   128             // 128 entries × 3 bytes = 384 bytes
+
+// Flag values for byte 2 of each subroutine entry.
+// These are written as a whole byte in a single flash program operation.
+#define SA_SUB_EMPTY        0xFF    // erased / unused slot
+#define SA_SUB_CLEAN        0x00    // stack-clean (no TSX/TXS, balanced push/pull)
+#define SA_SUB_DIRTY        0x01    // stack-dirty (TSX/TXS or unbalanced PLA/PLP)
+
+// -------------------------------------------------------------------------
+// BFS walker queue — lives in WRAM during the analysis pass.
+// Reuses flash_compile_buffer (cache_code[0], 256 bytes) as a circular
+// queue of 2-byte PC entries => 128 slots.
+// -------------------------------------------------------------------------
+
+#define SA_QUEUE_SLOTS      64
+
+// -------------------------------------------------------------------------
+// Bank 3 flash storage (defined in static_analysis.c with #pragma section bank3)
+// Callers that need the flash addresses (e.g. flash_format sector skip)
+// must declare their own extern and use the SA_SECTOR macros below.
+// -------------------------------------------------------------------------
+
+// Start/end sector addresses for protecting SA data during flash_format.
+// Sectors are 4KB aligned ($x000).  sa_code_bitmap is the first SA variable
+// placed in bank3; sa_subroutine_list is the last.
+// Usage: declare extern for sa_code_bitmap and sa_subroutine_list first.
+#ifdef ENABLE_AUTO_IDLE_DETECT
+#define SA_SECTOR_FIRST  ((uint16_t)&sa_code_bitmap[0] & 0xF000)
+#define SA_SECTOR_LAST   (((uint16_t)&sa_idle_list[0] + SA_IDLE_MAX * SA_IDLE_ENTRY_SIZE - 1) & 0xF000)
+#else
+#define SA_SECTOR_FIRST  ((uint16_t)&sa_code_bitmap[0] & 0xF000)
+#define SA_SECTOR_LAST   (((uint16_t)&sa_subroutine_list[0] + SA_SUBROUTINE_MAX * 3 - 1) & 0xF000)
+#endif
+
+// -------------------------------------------------------------------------
+// Auto-detected idle loop table — persisted in flash bank 3.
+// Each entry is a 2-byte guest PC identified by the static analysis idle
+// scanner as a tight polling loop (load/compare/branch, no side effects).
+// Terminated by 0xFFFF (erased flash).
+// -------------------------------------------------------------------------
+#ifdef ENABLE_AUTO_IDLE_DETECT
+#define SA_IDLE_ENTRY_SIZE  2               // 2 bytes per entry (addr_lo, addr_hi)
+#endif
+
+// -------------------------------------------------------------------------
+// Public API  (all in bank 2)
+// -------------------------------------------------------------------------
+
+// Run the full static analysis pass:
+//   1. Check / write SA header signature
+//   2. BFS walk from vectors + persisted indirect targets
+//   3. (if ENABLE_STATIC_COMPILE && sa_do_compile) batch-compile discovered entry points
+//
+// sa_do_compile must be set to 1 by the platform main() before calling
+// sa_run() for the two-pass static compile to execute.  On cold boot,
+// leave it 0 — only the BFS walk + subroutine analysis runs.
+void sa_run(void);
+
+// Mark an address as known code in the persistent SA bitmap.
+// Single flash bit-clear (free on SST39SF040 — no erase required).
+// Safe to call from any bank (lives in the fixed bank).
+void sa_bitmap_mark(uint16_t addr);
+
+// Record a runtime-discovered indirect-jump target into the persistent
+// flash list.  Called from the interpreter when JMP ($xxxx) is executed.
+// Safe to call from any bank (lives in the fixed bank).
+void sa_record_indirect_target(uint16_t target_pc, uint8_t type);
+
+// Record a runtime-discovered JSR target into the persistent subroutine
+// table.  Called from the JIT compiler when JSR is compiled at runtime.
+// Safe to call from any bank (WRAM trampoline to BANK_SA_CODE, in dynamos-asm.s).
+void sa_record_subroutine_runtime(uint16_t target);
+
+// Check if a JSR target is stack-clean.  Returns SA_SUB_CLEAN,
+// SA_SUB_DIRTY, or SA_SUB_EMPTY (target not found in subroutine table).
+// Fixed-bank trampoline — callable from any bank.
+uint8_t sa_subroutine_lookup(uint16_t target_pc);
+
+// -------------------------------------------------------------------------
+// Auto idle-loop detection (requires ENABLE_AUTO_IDLE_DETECT)
+// -------------------------------------------------------------------------
+#ifdef ENABLE_AUTO_IDLE_DETECT
+// Check if a guest PC is a known idle-polling loop.
+// Checks the WRAM-cached idle table (loaded from flash + GAME_IDLE_PC).
+// Returns 1 if idle, 0 otherwise.
+// Fixed-bank — callable from any context.  Fast: WRAM-only, no flash reads.
+uint8_t sa_is_idle_pc(uint16_t addr);
+
+// Load auto-detected idle PCs from flash into WRAM cache.
+// Called once at the end of sa_run().
+void sa_load_idle_cache(void);
+
+// Number of auto-detected idle PCs found during the last SA pass.
+extern uint8_t sa_idle_count;
+
+// WRAM cache (loaded by sa_load_idle_cache, read by metrics dump).
+extern uint16_t sa_idle_cache[];
+extern uint8_t  sa_idle_cache_count;
+#endif
+
+#endif // STATIC_ANALYSIS_H

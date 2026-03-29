@@ -1,5 +1,10 @@
 #pragma section text0
 
+#include "config.h"
+#ifdef ENABLE_STATIC_ANALYSIS
+#include "core/static_analysis.h"
+#endif
+
 /* Fake6502 CPU emulator core v1.1 *******************
  * (c)2011 Mike Chambers (miker00lz@gmail.com)       *
  *****************************************************
@@ -111,14 +116,20 @@
 #include <stdint.h>
 #include "config.h"
 
+extern uint8_t decimal_mode;  // dynamos.c: forces interpret while in BCD mode
+
 //6502 defines
 //#define UNDOCUMENTED //when this is defined, undocumented opcodes are handled.
                      //otherwise, they're simply treated as NOPs.
 
+#ifdef PLATFORM_NES
+#define NES_CPU        //Ricoh 2A03 ignores the decimal flag — BCD disabled
+#else
 //#define NES_CPU      //when this is defined, the binary-coded decimal (BCD)
                      //status flag is not honored by ADC and SBC. the 2A03
                      //CPU in the Nintendo Entertainment System does not
                      //support BCD operation.
+#endif
 
 
 
@@ -184,31 +195,59 @@ __zpage uint32_t instructions = 0; //keep track of total instructions executed
 __zpage uint32_t clockticks6502 = 0, clockgoal6502 = 0;
 __zpage uint16_t oldpc, ea, reladdr, value, result;
 __zpage uint8_t opcode, oldstatus;
+__zpage uint16_t interpret_count = 0;  // Debug: count interpret_6502 calls
+__zpage uint8_t last_interpreted_opcode = 0;  // Debug: track last opcode
+__zpage uint8_t sta_indy_interpret_count = 0;  // Debug: count STA indy interpretations
+__zpage uint16_t last_indy_ea = 0;  // Debug: last effective address from indy
+__zpage uint8_t sta_5000_count = 0;  // Debug: count STA to $5000 (sprite X)
 
 //externally supplied functions
 extern uint8_t read6502(uint16_t address);
 extern void write6502(uint16_t address, uint8_t value);
 
 //a few general functions used by various other functions
+//
+// ENABLE_NATIVE_STACK: push/pull access the hardware stack page ($0100)
+// directly, matching the compiled code's native PHA/PLA behavior.
+// Without NS, they go through write6502/read6502 → WRAM ($7100).
 void push16(uint16_t pushval) {
+#ifdef ENABLE_NATIVE_STACK
+    *(volatile uint8_t*)(BASE_STACK + sp) = (pushval >> 8) & 0xFF;
+    *(volatile uint8_t*)(BASE_STACK + ((sp - 1) & 0xFF)) = pushval & 0xFF;
+#else
     write6502(BASE_STACK + sp, (pushval >> 8) & 0xFF);
     write6502(BASE_STACK + ((sp - 1) & 0xFF), pushval & 0xFF);
+#endif
     sp -= 2;
 }
 
 void push8(uint8_t pushval) {
-    write6502(BASE_STACK + sp--, pushval);
+#ifdef ENABLE_NATIVE_STACK
+    *(volatile uint8_t*)(BASE_STACK + sp) = pushval;
+#else
+    write6502(BASE_STACK + sp, pushval);
+#endif
+    sp--;
 }
 
 uint16_t pull16() {
     uint16_t temp16;
+#ifdef ENABLE_NATIVE_STACK
+    temp16 = *(volatile uint8_t*)(BASE_STACK + ((sp + 1) & 0xFF))
+           | ((uint16_t)*(volatile uint8_t*)(BASE_STACK + ((sp + 2) & 0xFF)) << 8);
+#else
     temp16 = read6502(BASE_STACK + ((sp + 1) & 0xFF)) | ((uint16_t)read6502(BASE_STACK + ((sp + 2) & 0xFF)) << 8);
+#endif
     sp += 2;
     return(temp16);
 }
 
 uint8_t pull8() {
+#ifdef ENABLE_NATIVE_STACK
+    return *(volatile uint8_t*)(BASE_STACK + ++sp);
+#else
     return (read6502(BASE_STACK + ++sp));
+#endif
 }
 
 void reset6502() {
@@ -216,7 +255,16 @@ void reset6502() {
     a = 0;
     x = 0;
     y = 0;
+#ifdef ENABLE_NATIVE_STACK
+    // Native stack splits hardware stack page:
+    //   Guest: $0100-$017F (SP $7F→$00, 128 bytes)
+    //   Host:  $0180-$01FF (SP $FF→$80, 128 bytes)
+    // Guest SP starts at $7F (instead of $FD) to stay in guest region.
+    // Games that do LDX #$FF / TXS will be clamped at dispatch entry.
+    sp = 0x7F;
+#else
     sp = 0xFD;
+#endif
     status |= FLAG_CONSTANT;
 }
 
@@ -310,6 +358,7 @@ static void indy() { // (indirect),Y
     ea = (uint16_t)read6502(eahelp) | ((uint16_t)read6502(eahelp2) << 8);
     startpage = ea & 0xFF00;
     ea += (uint16_t)y;
+    last_indy_ea = ea;  // Debug: save last indy EA
 
 #ifdef TRACK_TICKS        	
     if (startpage != (ea & 0xFF00)) { //one cycle penlty for page-crossing on some opcodes
@@ -327,9 +376,17 @@ static uint16_t getvalue16() {
     return((uint16_t)read6502(ea) | ((uint16_t)read6502(ea+1) << 8));
 }
 
+__zpage uint16_t last_write_ea = 0;  // Debug: track last write address
+__zpage uint8_t write_50xx_count = 0;  // Debug: count writes to $50xx
+
 static void putvalue(uint16_t saveval) {
     if (addrtable[opcode] == acc) a = (uint8_t)(saveval & 0x00FF);
-        else write6502(ea, (saveval & 0x00FF));
+    else {
+        last_write_ea = ea;
+        if ((ea & 0xFF00) == 0x5000) write_50xx_count++;
+        if (ea == 0x5000) sta_5000_count++;  // Track sprite X writes specifically
+        write6502(ea, (saveval & 0x00FF));
+    }
 }
 
 
@@ -516,6 +573,7 @@ static void clc() {
 
 static void cld() {
     cleardecimal();
+    decimal_mode = 0;
 }
 
 static void cli() {
@@ -809,6 +867,7 @@ static void sec() {
 
 static void sed() {
     setdecimal();
+    decimal_mode = 1;
 }
 
 static void sei() {
@@ -856,7 +915,13 @@ static void txa() {
 }
 
 static void txs() {
+#ifdef ENABLE_NATIVE_STACK
+    // Clamp SP to guest range ($00-$7F) to avoid host stack region.
+    // Match compiled TXS behavior: cap everything >= $80 to $7F.
+    sp = (x >= 0x80) ? 0x7F : x;
+#else
     sp = x;
+#endif
 }
 
 static void tya() {
@@ -968,6 +1033,7 @@ static void (*const optable[256])() = {
 };
 
 #ifdef TRACK_TICKS
+#pragma section rodata0
 //const uint32_t ticktable[256] = {
 const uint8_t ticktable[256] = {
 /*        |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  |  A  |  B  |  C  |  D  |  E  |  F  |     */
@@ -988,6 +1054,7 @@ const uint8_t ticktable[256] = {
 /* E */      2,    6,    2,    8,    3,    3,    5,    5,    2,    2,    2,    2,    4,    4,    6,    6,  /* E */
 /* F */      2,    5,    2,    8,    4,    4,    6,    6,    2,    4,    2,    7,    4,    4,    7,    7   /* F */
 };
+#pragma section text0
 #endif
 
 
@@ -1034,6 +1101,7 @@ void exec6502(uint32_t tickcount) {
 
 void step6502() {
     opcode = read6502(pc++);
+    last_interpreted_opcode = opcode;
     status |= FLAG_CONSTANT;
 
 #ifdef TRACK_TICKS
@@ -1055,7 +1123,11 @@ void step6502() {
 }
 
 void interpret_6502() {
+    interpret_count++;  // Debug counter
     opcode = read6502(pc++);
+    last_interpreted_opcode = opcode;  // Debug: save opcode
+    if (opcode == 0x91) sta_indy_interpret_count++;  // Debug: track STA (zp),Y
+    if (opcode == 0x40) sta_indy_interpret_count++;  // Debug: reuse counter for RTI (0x40)
     status |= FLAG_CONSTANT;
 
 #ifdef TRACK_TICKS
@@ -1065,6 +1137,14 @@ void interpret_6502() {
 
     (*addrtable[opcode])();
     (*optable[opcode])();
+
+#ifdef ENABLE_STATIC_ANALYSIS
+    // When JMP indirect ($6C) resolves a target, record it for the
+    // static analysis pass on next reset.  pc is now the resolved target.
+    if (opcode == 0x6C)
+        sa_record_indirect_target(pc, SA_TYPE_JMP_IND);
+#endif
+
 #ifdef TRACK_TICKS
     clockticks6502 += ticktable[opcode];
     if (penaltyop && penaltyaddr) clockticks6502++;

@@ -224,6 +224,13 @@ SECTIONS
 	text0: { .=0x8000; *(text0) } >b0 AT>out
 	rodata0: { *(rodata0) } >b0 AT>out
         bank0: { *(bank0) } >b0 AT>out
+	init:   {*(init)}  >b0 AT>out
+	data:   {
+		*(data)
+	} >wram AT>out  /* VMA in WRAM ($6000+), load image in ROM output */
+	data_b0_skip: {
+		. = . + SIZEOF(data);
+	} >b0  /* Advance b0 cursor past data so fill0 pads correctly */
 	fill0: { .=0xC000; } >b0 AT>out
 
 	text1: { .=0x8000; *(text1) } >b1 AT>out
@@ -291,7 +298,7 @@ SECTIONS
         bank13: { *(bank13) } >b13 AT>out
 	fill13: { .=0xC000; } >b13 AT>out
 	
-	text14: { .=0x8000; *(text11) } >b14 AT>out
+	text14: { .=0x8000; *(text14) } >b14 AT>out
 	rodata14: { *(rodata14) } >b14 AT>out
         bank14: { *(bank14) } >b14 AT>out
 	fill14: { .=0xC000; } >b14 AT>out
@@ -376,32 +383,52 @@ SECTIONS
         bank30: { *(bank30) } >b30 AT>out
 	fill30: { .=0xC000; } >b30 AT>out
   
-  text:   {*(text)} >b31 AT>out
+  text:   { . = 0xC000; *(text)} >b31 AT>out
   .dtors: { *(.dtors) } >b31 AT>out
   .ctors: { *(.ctors) } >b31 AT>out
   rodata: {*(rodata)}  >b31 AT>out
-  init:   {*(init)}  >b31 AT>out
-  data:   {*(data)} >wram AT>out  
 
-  /* fill program bank */
-  fill: { .=.+0x10000-6-ADDR(init)-SIZEOF(init)-SIZEOF(data);} >b31 AT>out
-  vectors:{ *(vectors)} >b31 AT>out
+  /* 1. Pad up to $FFF0 */
+  /* Calculate padding to reach $FFF0 (trampoline location) */
+  fill: { 
+      . = 0xFFF0;
+  } >b31 AT>out
 
+  /* 2. Your trampoline segment at $FFF0 */
+  trampoline: { 
+      *(trampoline) 
+  } >b31 AT>out
 
+  /* 3. Pad the gap between trampoline and vectors */
+  /* Trampoline is 10 bytes, vectors are 6 bytes = 16 total.  No fill needed. */
+  /* If trampoline grows/shrinks, adjust: . = . + (16 - 6 - SIZEOF(trampoline)); */
+  fill_vectors: {
+      . = . + (16 - 6 - SIZEOF(trampoline));
+  } >b31 AT>out
+
+  /* 4. The Vectors at $FFFA */
+  vectors: { 
+      *(vectors) 
+  } >b31 AT>out
+
+  
   zpage (NOLOAD) : {*(zpage) *(zp1) *(zp2)} >zero
   nesram (NOLOAD): {*(nesram)} >ram
-  bss (NOLOAD): {*(bss)} >wram  
+  bss (NOLOAD): {*(bss)} >wram
 
-  __DS = ADDR(data);
-  __DE = ADDR(data) + SIZEOF(data);
-  __DC = LOADADDR(data)-0x88000;
-/*
+  /* vbcc's startup copies data from __DC (ROM) to __DS..__DE (WRAM).
+     Bank 0 is mapped at $8000-$BFFF at reset (mapper 30 register = 0),
+     so __DC is directly accessible without any bank switching. */
   __DS = ADDR(data);
   __DE = ADDR(data) + SIZEOF(data);
   __DC = LOADADDR(data);
-*/
 
-  __STACK = 0x8000;
+  /* Stack must start below $8000 so that (sp),Y never reaches ROM.
+     With sp_max = __STACK and Y_max = 255: __STACK + 255 must be < $8000,
+     so __STACK <= $7F01.  Use $7F00 for alignment.
+     For NES builds the Exidy-only screen_shadow ($7B00-$7EFF, 1 KB)
+     becomes an implicit stack guard — harmless overlap.             */
+  __STACK = 0x7F00;
 
   ___heap = ADDR(bss) + SIZEOF(bss);
   ___heapend = __STACK;

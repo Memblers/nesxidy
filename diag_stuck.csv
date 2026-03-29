@@ -1,0 +1,1 @@
+sample,frame,type,nes_pc,emu_pc,emu_a,emu_x,emu_y,emu_sp,emu_status,nmi_ctr,last_nmi,irq_count,int_cond,mapper_bank,cache_idx,scr_upd,chr_upd,flash_addr,flash_bank,info

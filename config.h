@@ -1,4 +1,4 @@
-#define DEBUG_AUDIO 1
+//#define DEBUG_AUDIO 1
 
 //#define DEBUG_CPU_WRITE 1
 //#define DEBUG_CPU_READ 1
@@ -41,7 +41,7 @@
 
 // Normal build (linking + optimizer enabled)
 #define ENABLE_LINKING
-//#define INTERPRETER_ONLY
+#define INTERPRETER_ONLY
 
 // Master optimizer toggle - comment out to disable entire optimizer system
 //#define ENABLE_OPTIMIZER   // DISABLED: v1 sector evacuation approach
@@ -196,14 +196,17 @@
 // Exidy games: define here.  NES games: pass -DGAME_DONKEY_KONG on command line.
 // Millipede arcade: pass -DPLATFORM_MILLIPEDE -DGAME_MILLIPEDE_ARCADE on command line.
 // Asteroids arcade: pass -DPLATFORM_ASTEROIDS -DGAME_ASTEROIDS on command line.
+// Lunar Lander arcade: pass -DPLATFORM_LLANDER -DGAME_LLANDER on command line.
 #ifndef PLATFORM_NES
 #ifndef PLATFORM_MILLIPEDE
 #ifndef PLATFORM_ASTEROIDS
+#ifndef PLATFORM_LLANDER
 #define GAME_SIDE_TRACK
 //#define GAME_TARG
 //#define GAME_TARG_TEST_ROM
 //#define GAME_SPECTAR
 //#define GAME_CPU_6502_TEST
+#endif
 #endif
 #endif
 #endif
@@ -299,6 +302,28 @@
 // only counts non-NMI steps — the 8 quick idle exits don't starve
 // the main game code.
 #define GAME_IDLE_PC  0x680C
+#endif
+
+// --- Lunar Lander arcade ---
+// Program ROM at $6000-$7FFF (8KB, 4 × 2KB EPROMs)
+// Vector ROM at $4800-$5FFF (6KB, 3 × 2KB chips)
+// Uses NMI for 60 Hz game tick (same as Asteroids)
+#ifdef GAME_LLANDER
+#define ROM_ADDR_MIN  0x6000
+#define ROM_ADDR_MAX  0x7FFF
+// Idle loop: wait_nmi at $652D spins on LSR $73 / BCC $652D
+#define GAME_IDLE_PC  0x652D
+#endif
+
+// Common Lunar Lander config
+#ifdef PLATFORM_LLANDER
+#ifndef ROM_ADDR_MIN
+#define ROM_ADDR_MIN  0x6000
+#define ROM_ADDR_MAX  0x7FFF
+#endif
+#ifndef ENABLE_BATCH_DISPATCH
+#define ENABLE_BATCH_DISPATCH
+#endif
 #endif
 
 // --- Millipede arcade ---

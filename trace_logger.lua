@@ -16,7 +16,7 @@
 -- Configuration  —  CHANGE THESE
 ---------------------------------------------------------------------
 -- Game name: must match the .mlb file  (e.g. "nes_donkeykong")
-local GAME = "millipede"
+local GAME = "llander"
 -- Project directory (where .mlb files live)
 local PROJECT_DIR = "c:\\proj\\c\\NES\\nesxidy-co\\nesxidy\\"
 
@@ -24,7 +24,7 @@ local PROJECT_DIR = "c:\\proj\\c\\NES\\nesxidy-co\\nesxidy\\"
 local OUTPUT_PATH = PROJECT_DIR .. "nes_trace_lua.txt"
 
 -- Max lines (0 = unlimited)
-local MAX_LINES   = 2000000
+local MAX_LINES   = 0
 
 -- Buffer flush interval
 local FLUSH_EVERY = 4096
@@ -107,6 +107,8 @@ local ZP_Y      = get_cpu("_y")
 local ZP_STATUS = get_cpu("_status")
 local MAPPER_PRG = get_cpu("_mapper_prg_bank")
 local DISPATCH   = get_cpu("_dispatch_on_pc")
+local STEP6502   = get_cpu("_step6502")
+local INTERP6502 = get_cpu("_interpret_6502")
 
 -- Validate critical symbols
 if not ZP_PC then
@@ -116,8 +118,8 @@ if not ZP_PC then
 end
 
 local fmt = string.format
-emu.log(fmt("Parsed %s.mlb: _pc=$%04X _a=$%04X _sp=$%04X dispatch=$%04X",
-            GAME, ZP_PC, ZP_A or 0, ZP_SP or 0, DISPATCH or 0))
+emu.log(fmt("Parsed %s.mlb: _pc=$%04X _a=$%04X _sp=$%04X dispatch=$%04X step=$%04X interp=$%04X",
+            GAME, ZP_PC, ZP_A or 0, ZP_SP or 0, DISPATCH or 0, STEP6502 or 0, INTERP6502 or 0))
 
 ---------------------------------------------------------------------
 -- Helpers
@@ -138,6 +140,36 @@ end
 local PRG_SIZE = nil
 
 local function read_prg(guest_addr)
+  -- Asteroids: CPU ROM $6800-$7FFF and vector ROM $5000-$57FF
+  -- stored in NES PRG bank 23 (_rom_asteroids at bank offset 0,
+  -- _rom_asteroids_vec at bank offset $1800)
+  if GAME == "asteroids" then
+    local BANK23 = 23 * 0x4000  -- PRG flat offset of bank 23
+    if guest_addr >= 0x6800 and guest_addr <= 0x7FFF then
+      local ok, val = pcall(emu.read, BANK23 + (guest_addr - 0x6800), MEM_PRG)
+      if ok then return val end
+    elseif guest_addr >= 0x5000 and guest_addr <= 0x57FF then
+      local ok, val = pcall(emu.read, BANK23 + 0x1800 + (guest_addr - 0x5000), MEM_PRG)
+      if ok then return val end
+    end
+    return nil
+  end
+
+  -- Lunar Lander: CPU ROM $6000-$7FFF (8KB) and vector ROM $4800-$5FFF (6KB)
+  -- stored in NES PRG bank 23 (_rom_llander at bank offset 0,
+  -- _rom_llander_vec at bank offset $2000)
+  if GAME == "llander" then
+    local BANK23 = 23 * 0x4000  -- PRG flat offset of bank 23
+    if guest_addr >= 0x6000 and guest_addr <= 0x7FFF then
+      local ok, val = pcall(emu.read, BANK23 + (guest_addr - 0x6000), MEM_PRG)
+      if ok then return val end
+    elseif guest_addr >= 0x4800 and guest_addr <= 0x5FFF then
+      local ok, val = pcall(emu.read, BANK23 + 0x2000 + (guest_addr - 0x4800), MEM_PRG)
+      if ok then return val end
+    end
+    return nil
+  end
+
   if guest_addr < 0x8000 then return nil end
 
   if not PRG_SIZE then
@@ -317,6 +349,11 @@ local function log_guest(tag)
   if finished then return end
 
   local gpc = rd16(ZP_PC)
+  -- Dedup: exec hooks fire on CPU address $9221 regardless of which
+  -- PRG bank is mapped (mapper 30 bank aliasing).  When a non-step6502
+  -- bank is mapped, the guest _pc hasn't changed — skip the duplicate.
+  if gpc == last_gpc then return end
+
   local ga  = rd(ZP_A)
   local gx  = rd(ZP_X)
   local gy  = rd(ZP_Y)
@@ -355,31 +392,37 @@ emu.log(fmt("Guest trace started: %s → %s", GAME, OUTPUT_PATH))
 emu.displayMessage("Trace", "Recording " .. GAME)
 
 ---------------------------------------------------------------------
--- Hook: dispatch_on_pc (WRAM — always valid, main trace source)
+-- Hook: dispatch_on_pc (JIT mode — main trace source when run_6502()
+-- dispatches compiled blocks)
 ---------------------------------------------------------------------
 if DISPATCH then
   emu.addMemoryCallback(function()
     log_guest(nil)
   end, emu.callbackType.exec, DISPATCH)
   emu.log(fmt("  Hook: dispatch_on_pc @ $%04X", DISPATCH))
-else
-  emu.log("  WARN: dispatch_on_pc not found, using frame sampling only")
 end
 
 ---------------------------------------------------------------------
--- Hook: writes to _pc high byte (catches ALL guest PC updates)
--- This fires for interpreter steps, NMI/IRQ, compile-time updates, etc.
--- The hi byte write completes the 16-bit PC update.
+-- Hook: step6502 / interpret_6502 entry (INTERPRETER_ONLY mode)
+-- At entry, ZP _pc holds the guest PC of the instruction about to
+-- execute — stable and correct, unlike write hooks which fire on
+-- every pc++ during operand fetches (producing bogus intermediates).
 ---------------------------------------------------------------------
-local ZP_PC_HI = ZP_PC + 1
-emu.addMemoryCallback(function()
-  -- Small dedup: don't double-log if dispatch just fired at the same PC
-  local gpc = rd16(ZP_PC)
-  if gpc ~= last_gpc then
-    log_guest("[pc]")
-  end
-end, emu.callbackType.write, ZP_PC_HI, ZP_PC_HI)
-emu.log(fmt("  Hook: _pc hi-byte write @ $%04X", ZP_PC_HI))
+if STEP6502 then
+  emu.addMemoryCallback(function()
+    log_guest(nil)
+  end, emu.callbackType.exec, STEP6502)
+  emu.log(fmt("  Hook: step6502 @ $%04X", STEP6502))
+end
+if INTERP6502 then
+  emu.addMemoryCallback(function()
+    log_guest(nil)
+  end, emu.callbackType.exec, INTERP6502)
+  emu.log(fmt("  Hook: interpret_6502 @ $%04X", INTERP6502))
+end
+if not DISPATCH and not STEP6502 and not INTERP6502 then
+  emu.log("  WARN: no exec hooks found, using frame sampling only")
+end
 
 ---------------------------------------------------------------------
 -- Frame counter + periodic flush + overlay

@@ -62,6 +62,8 @@
 #define BANK_IR_OPT             29      /* Millipede: dead flag-table bank $8000-$BFFF (ROM mirror, not compiled) */
 #elif defined(PLATFORM_ASTEROIDS)
 #define BANK_IR_OPT             29      /* Asteroids: dead flag-table bank $8000-$BFFF (ROM ends at $7FFF) */
+#elif defined(PLATFORM_LLANDER)
+#define BANK_IR_OPT             29      /* Llander: dead flag-table bank $8000-$BFFF (ROM ends at $7FFF) */
 #else
 #define BANK_IR_OPT             29      /* Exidy: dead flag-table bank $8000-$BFFF (no Exidy guest code there) */
 #endif
@@ -89,6 +91,9 @@
 #elif defined(PLATFORM_ASTEROIDS)
 #define BANK_SA_CODE            19      /* Asteroids: $0000-$1FFF = RAM/IO, no code here */
 #define BANK_INIT_CODE          19      /* Asteroids: shares with SA */
+#elif defined(PLATFORM_LLANDER)
+#define BANK_SA_CODE            19      /* Llander: $0000-$1FFF = RAM/IO, no code here */
+#define BANK_INIT_CODE          19      /* Llander: shares with SA */
 #else
 #define BANK_SA_CODE            24      /* Exidy: $A000-$BFFF dead */
 #define BANK_INIT_CODE          25      /* Exidy: $C000-$DFFF dead */
@@ -118,6 +123,8 @@
 #define BANK_RENDER             20      /* Millipede: $2000-$3FFF = I/O, dead for code */
 #elif defined(PLATFORM_ASTEROIDS)
 #define BANK_RENDER             20      /* Asteroids: $2000-$3FFF = dead, no guest code */
+#elif defined(PLATFORM_LLANDER)
+#define BANK_RENDER             20      /* Llander: $2000-$3FFF = dead, no guest code */
 #else
 #define BANK_RENDER             22
 #endif
@@ -134,6 +141,8 @@
 #define BANK_METRICS            20      /* shares with BANK_RENDER */
 #elif defined(PLATFORM_ASTEROIDS)
 #define BANK_METRICS            21      /* Asteroids: $4000-$5FFF = I/O, dead for guest code */
+#elif defined(PLATFORM_LLANDER)
+#define BANK_METRICS            21      /* Llander: $4000-$5FFF = vector RAM/ROM, dead for guest code */
 #else
 #define BANK_METRICS            21
 #endif

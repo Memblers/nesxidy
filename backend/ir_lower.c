@@ -621,7 +621,7 @@ void ir_resolve_direct_branches(void)
             int16_t branch_from = (int16_t)(flash_code_address + BLOCK_PREFIX_SIZE + p + 2);
             int16_t native_offset = (int16_t)target_native - branch_from;
 
-#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE) || defined(PLATFORM_ASTEROIDS)
+#if defined(PLATFORM_NES) || defined(PLATFORM_MILLIPEDE) || defined(PLATFORM_ASTEROIDS) || defined(PLATFORM_LLANDER)
             if (intra_block && native_offset < 0) {
                 /* VBlank-triggered backward branch stub.
                  * Intra-block backward branches can create tight loops that

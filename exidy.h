@@ -12,6 +12,8 @@
 #include "millipede.h"
 #elif defined(PLATFORM_ASTEROIDS)
 #include "asteroids.h"
+#elif defined(PLATFORM_LLANDER)
+#include "llander.h"
 #else
 // ******************************************************************************************
 
@@ -115,6 +117,6 @@ uint8_t cache_check_signature(void);
 void flash_init_persist(void);
 #endif
 
-#endif  // PLATFORM_NES / PLATFORM_MILLIPEDE / PLATFORM_ASTEROIDS else
+#endif  // PLATFORM_NES / PLATFORM_MILLIPEDE / PLATFORM_ASTEROIDS / PLATFORM_LLANDER else
 #endif  // EXIDY_H
 #pragma section default

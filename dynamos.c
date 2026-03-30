@@ -125,6 +125,26 @@ uint16_t translate_address(uint16_t src_addr) {
     }
     // Vector RAM/ROM ($4000-$4FFF), I/O ($2000-$3FFF) — must interpret
     return 0;
+#elif defined(PLATFORM_LLANDER)
+    // Lunar Lander arcade memory map
+    // $0000-$00FF = RAM (256 bytes)
+    // $2000-$3FFF = I/O (inputs, outputs, thrust ADC — interpret)
+    // $4000-$47FF = Vector RAM (writable, must interpret for DVG)
+    // $4800-$57FF = Vector ROM (read-only, in bank23 flash)
+    // $6000-$7FFF = Program ROM (8KB, in bank23 flash)
+    if (src_addr < 0x0100) {
+        // RAM: $0000-$00FF → RAM_BASE
+        return src_addr + (uint16_t)RAM_BASE;
+    }
+    else if (src_addr >= 0x6000 && src_addr < 0x8000) {
+        // Program ROM: $6000-$7FFF → ROM_NAME with offset
+        uint16_t nes_addr = (src_addr - ROM_OFFSET) + (uint16_t)ROM_NAME;
+        if ((nes_addr >= 0x8000) && (nes_addr < 0xC000))
+            return 0;
+        return nes_addr;
+    }
+    // Vector RAM/ROM ($4000-$57FF), I/O ($2000-$3FFF) — must interpret
+    return 0;
 #else
     // Exidy memory map
     uint8_t msb = src_addr >> 8;
@@ -604,7 +624,7 @@ void run_6502(void)
 	if (pc == GAME_IDLE_PC) break;
 #endif
 	// 4. RTI completed — NMI handler finished, return for state update
-#if defined(PLATFORM_NES) || defined(PLATFORM_ASTEROIDS)
+#if defined(PLATFORM_NES) || defined(PLATFORM_ASTEROIDS) || defined(PLATFORM_LLANDER)
 	if (nmi_active && sp == nmi_sp_guard) break;
 #endif
 	} while (1);
@@ -3722,7 +3742,7 @@ static uint8_t recompile_opcode_b2_inner()
 					// NES: disabled — NES has no screen/char RAM at $40xx-$4Fxx.
 					// $40xx on NES = APU registers (no dirty tracking needed).
 					// Millipede: disabled — video RAM at $10xx-$13xx is interpreted.
-#if !defined(PLATFORM_NES) && !defined(PLATFORM_MILLIPEDE) && !defined(PLATFORM_ASTEROIDS)
+#if !defined(PLATFORM_NES) && !defined(PLATFORM_MILLIPEDE) && !defined(PLATFORM_ASTEROIDS) && !defined(PLATFORM_LLANDER)
 					if (decoded_address)
 					{
 						uint8_t msb = encoded_address >> 8;

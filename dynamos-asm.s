@@ -14,6 +14,10 @@ PLATFORM_MILLIPEDE = 0
 PLATFORM_ASTEROIDS = 0
 	endif
 
+	ifnd PLATFORM_LLANDER
+PLATFORM_LLANDER = 0
+	endif
+
 	ifnd ENABLE_NATIVE_STACK
 ENABLE_NATIVE_STACK = 0
 	endif
@@ -66,6 +70,11 @@ _ROM_OFFSET = $6800
 _ROM_NAME = _rom_asteroids
 	endif
 
+	if (GAME_NUMBER == 7)
+_ROM_OFFSET = $6000
+_ROM_NAME = _rom_llander
+	endif
+
 	if (GAME_NUMBER == 10)
 _ROM_OFFSET = $C000
 _ROM_NAME = _rom_nes_prg
@@ -86,7 +95,7 @@ BANK_PC_FLAGS	=	27
 	if PLATFORM_MILLIPEDE
 BANK_RENDER		=	20
 	else
-	if PLATFORM_ASTEROIDS
+	if PLATFORM_ASTEROIDS || PLATFORM_LLANDER
 BANK_RENDER		=	20
 	else
 	ifnd PLATFORM_NES
@@ -126,8 +135,13 @@ _CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
 _RAM_BASE:	reserve $400
 _CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
 	else
+	if PLATFORM_LLANDER
+_RAM_BASE:	reserve $100
+_CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
+	else
 _RAM_BASE:	reserve $400
 _CHARACTER_RAM_BASE:	reserve $800
+	endif
 	endif
 	endif
 	endif
@@ -255,6 +269,27 @@ _rom_asteroids:
 	align 8
 _rom_asteroids_vec:
 	incbin "roms\asteroid\035127-02.np3"	; $4800-$4FFF vector ROM (2KB)
+	endif
+
+;=======================================================
+; Lunar Lander arcade ROM data
+; Program ROM (8KB, 4 × 2KB) + Vector ROM (6KB, 3 × 2KB) in bank23
+;=======================================================
+
+	if (GAME_NUMBER == 7)
+	section "bank23"
+	global _rom_llander, _rom_llander_vec
+	align 8
+_rom_llander:
+	incbin "roms\llander\034572-02.f1"	; $6000-$67FF (2KB)
+	incbin "roms\llander\034571-02.de1"	; $6800-$6FFF (2KB)
+	incbin "roms\llander\034570-01.c1"	; $7000-$77FF (2KB)
+	incbin "roms\llander\034569-02.b1"	; $7800-$7FFF (2KB)
+	align 8
+_rom_llander_vec:
+	incbin "roms\llander\034599-01.r3"	; $4800-$4FFF vector ROM (2KB)
+	incbin "roms\llander\034598-01.np3"	; $5000-$57FF vector ROM (2KB)
+	incbin "roms\llander\034597-01.m3"	; $5800-$5FFF vector ROM (2KB)
 	endif
 
 ;=======================================================
@@ -819,7 +854,7 @@ not_recompiled:
 	lda _pc+1                    ; guest PC high byte
 	cmp #(_ROM_OFFSET/256)       ; < ROM_ADDR_MIN high byte?
 	bcc .out_of_range
-	if PLATFORM_MILLIPEDE || PLATFORM_ASTEROIDS
+	if PLATFORM_MILLIPEDE || PLATFORM_ASTEROIDS || PLATFORM_LLANDER
 	cmp #$80                     ; >= $8000? (ROM_ADDR_MAX = $7FFF)
 	bcs .out_of_range
 	else
@@ -1155,7 +1190,7 @@ _native_sta_indy_tmpl_size: db (_native_sta_indy_tmpl_end - _native_sta_indy_tmp
 
 ;=======================================================
 	section "data"
-	if !(PLATFORM_NES)
+	if !(PLATFORM_NES) && !(PLATFORM_ASTEROIDS) && !(PLATFORM_LLANDER)
 	global _screen_diff_build_list
 	global _screen_shadow, _vram_update_list, _vram_list_pos
 ;-------------------------------------------------------
@@ -1314,12 +1349,12 @@ _screen_diff_build_list:
 	inx
 	stx _vram_list_pos
 	jmp .p3_next
-	endif  ; !(PLATFORM_NES) — end of screen_diff_build_list + BSS
+	endif  ; !(PLATFORM_NES) && !(PLATFORM_ASTEROIDS) && !(PLATFORM_LLANDER)
 
 ;-------------------------------------------------------
-; BSS for shadow buffer and update list (Exidy only)
+; BSS for shadow buffer and update list (tile-based platforms only)
 	section "bss"
-	if !(PLATFORM_NES)
+	if !(PLATFORM_NES) && !(PLATFORM_ASTEROIDS) && !(PLATFORM_LLANDER)
 _screen_shadow:		reserve $400	; 1024 bytes
 _vram_update_list:	reserve 256	; tiles (96) + attr diff + palette diff + terminator
 	endif
@@ -1892,7 +1927,7 @@ IR_OPT_BANK = 28
 SA_CODE_BANK = 19
 IR_OPT_BANK = 29
 	else
-	if PLATFORM_ASTEROIDS
+	if PLATFORM_ASTEROIDS || PLATFORM_LLANDER
 SA_CODE_BANK = 19
 IR_OPT_BANK = 29
 	else
@@ -2061,19 +2096,23 @@ _flash_cache_code:	reserve 16384
 ;-------------------------------------------------------	
 	ifnd PLATFORM_NES
 	ifnd PLATFORM_ASTEROIDS
+	ifnd PLATFORM_LLANDER
 	align 14		; PC table: $0000-$1FFF (Exidy has no code here)
 	endif
 	endif
-	; bank19 on NES/Asteroids = SA/init code, no align — section used by C code
+	endif
+	; bank19 on NES/Asteroids/Llander = SA/init code, no align — section used by C code
 _flash_cache_pc:	
 	section "bank20"
 	ifnd PLATFORM_NES
 	ifnd PLATFORM_ASTEROIDS
+	ifnd PLATFORM_LLANDER
 	align 14		; PC table: Exidy ROM $2000-$3FFF
 	endif
 	endif
+	endif
 	; bank20 on NES = NES PRG-ROM data, no align — section used by asm incbin
-	; bank20 on Asteroids = BANK_RENDER code, no align — section used by C code
+	; bank20 on Asteroids/Llander = BANK_RENDER code, no align — section used by C code
 	ifdef PLATFORM_NES
 	; NES: skip bank21 entirely — used for BANK_RENDER C code.
 	; If we enter section "bank21" here, the linker overlaps this
@@ -2090,6 +2129,9 @@ _flash_cache_pc:
 	endif
 	ifdef PLATFORM_ASTEROIDS
 	align 14		; PC table: Asteroids ROM $6800-$7FFF
+	endif
+	if PLATFORM_LLANDER
+	align 14		; PC table: Lunar Lander ROM $6000-$7FFF
 	endif
 	; bank22 on Exidy = BANK_RENDER code, no align
 	section "bank23"

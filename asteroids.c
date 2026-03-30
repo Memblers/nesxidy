@@ -75,6 +75,19 @@ __zpage uint16_t dot_count = 0;
 // Sprite multiplex frame counter (0, 1, 2)
 __zpage uint8_t mux_frame = 0;
 
+// Shape instance buffer — filled by dvg_execute, rendered as metasprites
+typedef struct {
+	uint8_t shape_idx;
+	uint8_t screen_x;
+	uint8_t screen_y;
+} shape_instance_t;
+
+#define MAX_SHAPE_INSTANCES 32
+static shape_instance_t shape_instances[MAX_SHAPE_INSTANCES];
+__zpage uint8_t shape_instance_count = 0;
+
+
+
 // POKEY random number LFSR (17-bit, same as Millipede)
 static uint32_t pokey_lfsr = 0x1FFFF;
 
@@ -172,6 +185,8 @@ static uint8_t pokey_random(void)
 // DVG interpreter — parses display list, samples dots
 // ==========================================================================
 #pragma section bank20
+
+#include "tools/asteroids_tiles.h"
 
 // Read a 16-bit word from DVG address space (word-addressed).
 // DVG is mapped starting at CPU $4000 (MAME: set_memory(0x4000)).
@@ -274,6 +289,42 @@ static void dvg_sample_vector(int16_t dx, int16_t dy)
 	}
 }
 
+// Linear search ast_shape_lookup for a DVG byte address.
+// Returns shape_idx (0-89) or 0xFF if not found.
+// Multi-size shapes (rocks, UFO) select variant by global_scale.
+static uint8_t find_shape(uint16_t dvg_byte_addr, uint8_t gs)
+{
+	uint8_t first = 0xFF;
+	uint8_t count = 0;
+	for (uint8_t i = 0; i < AST_SHAPE_COUNT; i++) {
+		if (ast_shape_lookup[i].dvg_addr == dvg_byte_addr) {
+			if (first == 0xFF) first = i;
+			count++;
+		} else if (first != 0xFF) {
+			break;  // entries are grouped — stop after last match
+		}
+	}
+	if (first == 0xFF) return 0xFF;
+
+	// Select size variant based on global_scale.
+	// Asteroids rock status encoding: $04=large, $02=medium, $01=small.
+	// At $7018 the game sets gs from status bits 0-1:
+	//   bit 0 set → gs=14 (small), bit 1 set → gs=15 (medium), neither → gs=0 (large).
+	// Lookup table order: offset 0=large, 1=medium, 2=small.
+	uint8_t offset = 0;
+	if (count == 3) {
+		// Rocks: gs=0 large, gs=15 medium, gs=14 small
+		if (gs < 7) offset = 0;        // large (gs=0)
+		else if (gs >= 15) offset = 1; // medium (gs=15)
+		else offset = 2;               // small (gs=14)
+	} else if (count == 2) {
+		// Ship (0x1252): gs=0 large variant, gs>=14 small variant
+		offset = (gs < 7) ? 0 : 1;
+	}
+
+	return ast_shape_lookup[first + offset].shape_idx;
+}
+
 // Execute the DVG display list.
 static void dvg_execute(void)
 {
@@ -283,7 +334,9 @@ static void dvg_execute(void)
 	dvg.intensity = 0;
 	dvg.global_scale = 0;
 	dot_count = 0;
+	shape_instance_count = 0;
 
+	uint8_t shape_suppress_sp = 0xFF;  // 0xFF = not inside a matched shape
 	uint16_t cmd_count = 0;
 
 	while (!dvg.halted && cmd_count < DVG_MAX_COMMANDS) {
@@ -330,7 +383,8 @@ static void dvg_execute(void)
 
 			if (bright > 0) {
 				dvg.intensity = bright;
-				dvg_sample_vector(sx, sy);
+				if (shape_suppress_sp == 0xFF)
+					dvg_sample_vector(sx, sy);
 			}
 
 			dvg.beam_x += sx;
@@ -346,6 +400,9 @@ static void dvg_execute(void)
 			if (dvg.sp > 0) {
 				dvg.sp--;
 				dvg.pc = dvg.stack[dvg.sp];
+				// Clear shape suppression when exiting matched subroutine
+				if (shape_suppress_sp != 0xFF && dvg.sp < shape_suppress_sp)
+					shape_suppress_sp = 0xFF;
 			} else {
 				dvg.halted = 1;  // stack underflow → halt
 			}
@@ -357,6 +414,28 @@ static void dvg_execute(void)
 			if (dvg.sp < DVG_STACK_DEPTH) {
 				dvg.stack[dvg.sp] = dvg.pc + 1;
 				dvg.sp++;
+
+				// Shape detection: suppress dots for known shapes
+				if (shape_suppress_sp == 0xFF) {
+					uint16_t byte_addr = target << 1;
+					uint8_t idx = find_shape(byte_addr, dvg.global_scale);
+					if (idx != 0xFF) {
+						if (shape_instance_count < MAX_SHAPE_INSTANCES &&
+						    dvg.beam_x >= 0 && dvg.beam_x <= 1023 &&
+						    dvg.beam_y >= 0 && dvg.beam_y <= 1023) {
+							uint8_t sx = (uint8_t)(dvg.beam_x >> 2);
+							uint8_t sy = (uint8_t)(239 - (dvg.beam_y >> 2));
+							if (sy < 240) {
+								shape_instances[shape_instance_count].shape_idx = idx;
+								shape_instances[shape_instance_count].screen_x = sx;
+								shape_instances[shape_instance_count].screen_y = sy;
+								shape_instance_count++;
+							}
+						}
+						shape_suppress_sp = dvg.sp;
+					}
+				}
+
 				dvg.pc = target;
 			} else {
 				dvg.halted = 1;  // stack overflow → halt
@@ -415,7 +494,8 @@ static void dvg_execute(void)
 
 			if (bright > 0) {
 				dvg.intensity = bright;
-				dvg_sample_vector(dx, dy);
+				if (shape_suppress_sp == 0xFF)
+					dvg_sample_vector(dx, dy);
 			}
 
 			dvg.beam_x += dx;
@@ -430,11 +510,15 @@ static void dvg_execute(void)
 	// Always mark halted when execution ends — even if we hit
 	// DVG_MAX_COMMANDS without a HALT opcode, the DVG is done.
 	dvg.halted = 1;
+
 }
+
 
 #pragma section default
 
 #pragma section bank19
+
+#include "tools/asteroids_chr_data.h"
 
 static void generate_chr_tiles(void)
 {
@@ -493,23 +577,26 @@ static void generate_chr_tiles(void)
 			IO8(0x2007) = 0x00;
 	}
 
-	// === Pattern Table 1 ($1000-$1FFF): Sprite tiles ===
-
-	// Tile 0 (sprite PT1): 1x1 center dot
+	// === Pattern Table 1 ($1000-$1FFF): Pre-generated sprite tiles ===
+	// Upload 254 tiles from ast_chr_data (plane 0 only, plane 1 = 0)
 	IO8(0x2006) = 0x10;
-	IO8(0x2006) = 0x00;  // sprite tile 0
-	for (uint8_t r = 0; r < 8; r++)
-		IO8(0x2007) = (r == 3) ? 0x10 : 0x00;
-	for (uint8_t r = 0; r < 8; r++)
-		IO8(0x2007) = 0x00;
+	IO8(0x2006) = 0x00;  // PPU address = $1000
+	{
+		const uint8_t *src = ast_chr_data;
+		for (uint16_t t = 0; t < AST_CHR_TILE_COUNT; t++) {
+			for (uint8_t r = 0; r < 8; r++)
+				IO8(0x2007) = *src++;  // plane 0
+			for (uint8_t r = 0; r < 8; r++)
+				IO8(0x2007) = 0x00;    // plane 1 = 0
+		}
+	}
 
-	// Tile 1 (sprite PT1): 2x2 dot
-	IO8(0x2006) = 0x10;
-	IO8(0x2006) = 0x10;  // sprite tile 1
+	// Tile 254 (sprite PT1): 1x1 center dot for fallback dot rendering
+	// PPU address is already at $1FE0 after uploading 254 tiles
 	for (uint8_t r = 0; r < 8; r++)
-		IO8(0x2007) = (r == 3 || r == 4) ? 0x18 : 0x00;
+		IO8(0x2007) = (r == 3) ? 0x10 : 0x00;  // single pixel at (3,3)
 	for (uint8_t r = 0; r < 8; r++)
-		IO8(0x2007) = 0x00;
+		IO8(0x2007) = 0x00;  // plane 1 = 0
 }
 
 #pragma section default
@@ -547,52 +634,69 @@ static void ln_fire_and_forget(void)
 
 void render_video_b2(void)
 {
-	// --- DVG pass: dot buffer was already populated by dvg_execute()
+	// --- DVG pass: dot buffer + shape instances populated by dvg_execute()
 	// called synchronously from write6502($3000).  Just clear the flag. ---
 	if (dvg_triggered) {
 		dvg_triggered = 0;
 	}
 
-	// --- Sprite pass: place dots for this mux frame ---
-	// OAM shuffle: rotate which dots get placed first each frame.
-	// The NES drops sprites beyond 8 per scanline — by changing
-	// the order each frame, all dots get their turn at the high-
-	// priority OAM slots, producing even flicker instead of
-	// permanent dropout.
 	uint8_t spr_count = 0;
-	uint16_t mux_dot_count = 0;
-	// Count how many dots belong to this mux frame
-	for (uint16_t i = mux_frame; i < dot_count; i += DVG_MUX_FRAMES)
-		mux_dot_count++;
-	// Rotate starting offset within this mux frame's dot set
-	uint16_t oam_offset = 0;
-    
-	if (mux_dot_count > 0) {
-		// Replace modulo with repeated subtraction (mux_frame*17 is small)
-		oam_offset = mux_frame * 17;
-		while (oam_offset >= mux_dot_count) oam_offset -= mux_dot_count;
-	}
-        
-	// Convert oam_offset to a dot_buffer index and stride by DVG_MUX_FRAMES
-	// instead of multiplying each iteration (eliminates __muluint16 calls).
-	// Use repeated addition instead of multiply for the initial offset.
-	uint16_t dot_idx = mux_frame;
-	for (uint16_t k = 0; k < oam_offset; k++) dot_idx += DVG_MUX_FRAMES;
-	uint16_t wrap_span = dot_idx - mux_frame;  // == mux_dot_count * DVG_MUX_FRAMES
-	for (uint16_t k = oam_offset; k < mux_dot_count; k++) wrap_span += DVG_MUX_FRAMES;
-	uint8_t spr_meta[5] = {
-		0, 0, 0, 0x00, 128  // tile 0 in PT1 (1x1 dot), palette 0
-	};
-	for (uint16_t j = 0; j < mux_dot_count && spr_count < 64; j++) {
-		if (dot_idx < dot_count) {
-			lnAddSpr(spr_meta, dot_buffer[dot_idx].x, dot_buffer[dot_idx].y);
-			spr_count++;
+
+	// --- Shape pass: place pre-rendered metasprites ---
+	// For shapes with >4 tiles, flicker alternate tile subsets each frame
+	// to create authentic vector-display phosphor effect.
+	{
+		uint8_t spr_one[5] = {0, 0, 0, 0x00, 128};
+		uint8_t phase = mux_frame & 1;
+		for (uint8_t i = 0; i < shape_instance_count && spr_count < 64; i++) {
+			uint8_t si = shape_instances[i].shape_idx;
+			uint8_t sx = shape_instances[i].screen_x;
+			uint8_t sy = shape_instances[i].screen_y;
+			uint16_t offset = ast_meta_offsets[si];
+			uint8_t count = ast_meta_counts[si];
+
+			for (uint8_t j = 0; j < count && spr_count < 64; j++) {
+				// Flicker: large shapes show even/odd tiles on alternate frames
+				if (count > 4 && (j & 1) != phase) continue;
+				const ast_metasprite_entry_t *e = &ast_metasprites[offset + j];
+				spr_one[2] = e->tile_id;
+				spr_one[3] = e->attr;
+				uint8_t px = (uint8_t)((int16_t)sx + (int8_t)e->x_off);
+				uint8_t py = (uint8_t)((int16_t)sy + (int8_t)e->y_off);
+				lnAddSpr(spr_one, px, py);
+				spr_count++;
+			}
 		}
-		// Advance to next mux slot by striding DVG_MUX_FRAMES
-		dot_idx += DVG_MUX_FRAMES;
-		// Wrap: if past end, subtract total span to wrap around
-		if (dot_idx >= dot_count) {
-			dot_idx -= wrap_span;
+	}
+
+	// --- Dot pass: fill remaining OAM with multiplexed dots ---
+	if (spr_count < 64) {
+		uint16_t mux_dot_count = 0;
+		for (uint16_t i = mux_frame; i < dot_count; i += DVG_MUX_FRAMES)
+			mux_dot_count++;
+
+		uint16_t oam_offset = 0;
+		if (mux_dot_count > 0) {
+			oam_offset = mux_frame * 17;
+			while (oam_offset >= mux_dot_count) oam_offset -= mux_dot_count;
+		}
+
+		uint16_t dot_idx = mux_frame;
+		for (uint16_t k = 0; k < oam_offset; k++) dot_idx += DVG_MUX_FRAMES;
+		uint16_t wrap_span = dot_idx - mux_frame;
+		for (uint16_t k = oam_offset; k < mux_dot_count; k++) wrap_span += DVG_MUX_FRAMES;
+		uint8_t spr_meta[5] = {
+			0, 0, 254, 0x02, 128  // tile 254 in PT1 (1x1 dot), palette 2 (bright)
+		};
+		for (uint16_t j = 0; j < mux_dot_count && spr_count < 64; j++) {
+			if (dot_idx < dot_count) {
+				lnAddSpr(spr_meta, dot_buffer[dot_idx].x, dot_buffer[dot_idx].y);
+				spr_count++;
+			}
+			dot_idx += DVG_MUX_FRAMES;
+			if (dot_idx >= dot_count) {
+				dot_idx -= wrap_span;
+			}
 		}
 	}
 
@@ -879,7 +983,7 @@ void write6502(uint16_t address, uint8_t value)
 		bankswitch_prg(BANK_RENDER);
 		dvg_execute();
 		bankswitch_prg(saved_bank);
-		dvg_triggered = 1;  // tell render_video_b2 to show the new dots
+		dvg_triggered = 1;  // tell render_video_b2 to show the new dots/shapes
 		return;
 	}
 
@@ -1004,17 +1108,17 @@ int main(void)
 	lnPPUCTRL &= ~0x08;
 	IO8(0x2000) = lnPPUCTRL;
 
-	// Initial palette: black BG, white dots
+	// Initial palette: black BG, brightness-graded sprite palettes
 	{
 		static const uint8_t default_pal[] = {
 			0x0F,0x20,0x10,0x00,  // BG palette 0: black, white, gray, dark
 			0x0F,0x20,0x10,0x00,  // BG palette 1
 			0x0F,0x20,0x10,0x00,  // BG palette 2
 			0x0F,0x20,0x10,0x00,  // BG palette 3
-			0x0F,0x20,0x10,0x00,  // Sprite palette 0: black + white dots
-			0x0F,0x20,0x10,0x00,  // Sprite palette 1
-			0x0F,0x20,0x10,0x00,  // Sprite palette 2
-			0x0F,0x20,0x10,0x00,  // Sprite palette 3
+			0x0F,0x00,0x00,0x00,  // Sprite palette 0: dim (DVG brightness 1-3)
+			0x0F,0x10,0x10,0x10,  // Sprite palette 1: medium (brightness 4-7)
+			0x0F,0x20,0x20,0x20,  // Sprite palette 2: bright (brightness 8-11)
+			0x0F,0x30,0x30,0x30,  // Sprite palette 3: full (brightness 12-15)
 		};
 		lnPush(0x3F00, 32, default_pal);
 	}

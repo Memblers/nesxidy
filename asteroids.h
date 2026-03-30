@@ -57,10 +57,10 @@
 // ==========================================================================
 
 // Maximum dots rendered per DVG frame
-#define DVG_MAX_DOTS        390 //384
+#define DVG_MAX_DOTS        521 //384
 
 // Sprite multiplex: cycle over N frames
-#define DVG_MUX_FRAMES      6 //12 //3
+#define DVG_MUX_FRAMES      8 //12 //3
 
 // DVG subroutine call stack depth
 #define DVG_STACK_DEPTH     4

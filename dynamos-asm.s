@@ -1852,6 +1852,74 @@ _sta_indy_handler:
 
 ;=======================================================
 	section "data"
+	if PLATFORM_MILLIPEDE
+	global _read6502
+;-------------------------------------------------------
+; read6502(uint16_t address) -> uint8_t    [WRAM fast path]
+;
+; Handles ROM and RAM reads inline in WRAM; delegates I/O
+; to C read6502_io.  Inlines the bankswitch for ROM reads
+; (saves 2x JSR/RTS ~24 cycles) and eliminates vbcc's
+; 16-bit comparison codegen from the hot path.
+;
+; vbcc calling convention:
+;   r0 = addr_lo ($00), r1 = addr_hi ($01)
+;   return: r0 ($00)
+;
+_read6502:
+	lda r1				; A = address high byte
+	cmp #$40
+	bcs .r6_rom			; >= $4000: ROM (~70% of calls)
+	cmp #$04
+	bcc .r6_ram			; < $0400: RAM (~15%)
+	jmp _read6502_io	; $0400-$3FFF: I/O slow path (C)
+
+.r6_rom:
+	; Inline bankswitch — save current bank in X for restore
+	ldx _mapper_prg_bank
+	cpx #23				; BANK_PLATFORM_ROM
+	beq .r6_rom_rd		; already mapped, skip switch
+	lda #23
+	sta _mapper_prg_bank	; update shadow FIRST (NMI-safe)
+	ora _mapper_chr_bank
+	sta $C000
+.r6_rom_rd:
+	; Compute ROM address: bank window $8000 + (addr & $3FFF)
+	lda r1
+	and #$3F			; fold mirrors $C0-$FF -> $40-$7F -> $00-$3F
+	ora #$80			; -> bank window $80xx-$BFxx
+	sta .r6_rom_ld+2	; self-mod: high byte of LDA abs,Y
+	ldy r0
+.r6_rom_ld:
+	lda $8000,y			; read ROM byte (self-mod address)
+	sta r0				; return value
+	; Restore bank if we switched
+	cpx #23
+	beq .r6_rom_ret
+	stx _mapper_prg_bank	; restore shadow FIRST (NMI-safe)
+	txa
+	ora _mapper_chr_bank
+	sta $C000
+	lda r0				; reload return value (vbcc expects A == r0)
+.r6_rom_ret:
+	rts
+
+.r6_ram:
+	; RAM_BASE is 256-byte aligned in WRAM.
+	; A = addr_hi (0-3). Compute high byte of RAM_BASE + page.
+	clc
+	adc #>_RAM_BASE
+	sta .r6_ram_ld+2	; self-mod: high byte of LDA abs,Y
+	ldy r0
+.r6_ram_ld:
+	lda _RAM_BASE,y		; read RAM byte (self-mod address)
+	sta r0
+	rts
+
+	endif ; PLATFORM_MILLIPEDE
+
+;=======================================================
+	section "data"
 	global _peek_bank_byte
 ;-------------------------------------------------------
 ; peek_bank_byte(uint8_t bank, uint16_t addr) -> uint8_t

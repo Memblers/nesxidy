@@ -102,7 +102,8 @@ uint8_t nes_gamepad(void);
 void nes_gamepad_refresh(void);
 void render_video(void);
 void convert_chr(uint8_t *source);
-uint8_t read6502(uint16_t address);
+uint8_t read6502(uint16_t address);      // WRAM asm fast path (dynamos-asm.s)
+uint8_t read6502_io(uint16_t address);   // C slow path for I/O registers
 void write6502(uint16_t address, uint8_t value);
 void flash_format(void);
 

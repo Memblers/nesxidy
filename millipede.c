@@ -401,31 +401,12 @@ static void build_nes_palette(void)
 
 
 // ==========================================================================
-// read6502 — Millipede memory bus read handler
+// read6502_io — Millipede I/O slow path (called from WRAM asm fast path)
+// Handles POKEY, video RAM, sprite RAM, input ports, EAROM.
+// ROM and RAM are handled inline in the WRAM assembly read6502.
 // ==========================================================================
-uint8_t read6502(uint16_t address)
+uint8_t read6502_io(uint16_t address)
 {
-    #ifdef DEBUG_AUDIO
-        audio ^= address >> 8;
-        IO8(0x4011) = audio;
-    #endif
-	// Program ROM: $4000-$7FFF (and mirrors at $8000-$FFFF)
-	// Moved to top — most frequent path (~70% of calls during emulation)
-	if (address >= 0x4000)
-	{
-		if (mapper_prg_bank == BANK_PLATFORM_ROM)
-			return ROM_NAME[(address & 0x3FFF)];
-		uint8_t saved_bank = mapper_prg_bank;
-		bankswitch_prg(BANK_PLATFORM_ROM);
-		uint8_t temp = ROM_NAME[(address & 0x3FFF)];
-		bankswitch_prg(saved_bank);
-		return temp;
-	}
-
-	// RAM: $0000-$03FF
-	if (address < 0x0400)
-		return RAM_BASE[address];
-
 	// POKEY 1: $0400-$040F
 	if (address >= 0x0400 && address <= 0x040F)
 	{

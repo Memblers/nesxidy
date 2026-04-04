@@ -342,29 +342,40 @@ uint8_t nes_gamepad(void)
 // Build NES attribute table from Millipede VRAM palette bits.
 // Each VRAM byte bits 7-6 = 2-bit palette. NES attribute table
 // packs 4 palettes per byte for each 4x4 tile group.
+// Note: This is a lossy downsampling — Millipede has per-tile palette
+// but NES attributes are 16×16 pixel resolution.  May be replaced
+// entirely when switching to a mapper with 8×8 attributes.
 static void build_attr_table(void)
 {
 	uint16_t row_base = 0;
 	uint8_t idx = 0;
-	for (uint8_t ay = 0; ay < 8; ay++)
+
+	// Rows 0-6: col_base+66 max = 768+28+66 = 862 < 960, no bounds checks
+	for (uint8_t ay = 0; ay < 7; ay++)
 	{
 		uint16_t col_base = row_base;
 		for (uint8_t ax = 0; ax < 8; ax++)
 		{
-			uint8_t tl = 0, tr = 0, bl = 0, br = 0;
-			if (col_base < 960)
-				tl = (SCREEN_RAM_BASE[col_base] >> 6) & 3;
-			if (col_base + 2 < 960)
-				tr = (SCREEN_RAM_BASE[col_base + 2] >> 6) & 3;
-			if (col_base + 64 < 960)
-				bl = (SCREEN_RAM_BASE[col_base + 64] >> 6) & 3;
-			if (col_base + 66 < 960)
-				br = (SCREEN_RAM_BASE[col_base + 66] >> 6) & 3;
-			attr_table[idx] = tl | (tr << 2) | (bl << 4) | (br << 6);
-			idx++;
+			uint8_t tl = (SCREEN_RAM_BASE[col_base] >> 6) & 3;
+			uint8_t tr = (SCREEN_RAM_BASE[col_base + 2] >> 6) & 3;
+			uint8_t bl = (SCREEN_RAM_BASE[col_base + 64] >> 6) & 3;
+			uint8_t br = (SCREEN_RAM_BASE[col_base + 66] >> 6) & 3;
+			attr_table[idx++] = tl | (tr << 2) | (bl << 4) | (br << 6);
 			col_base += 4;
 		}
 		row_base += 128;
+	}
+
+	// Row 7: row_base=896, col_base+64 >= 960 always, so bl=br=0
+	{
+		uint16_t col_base = row_base;
+		for (uint8_t ax = 0; ax < 8; ax++)
+		{
+			uint8_t tl = (SCREEN_RAM_BASE[col_base] >> 6) & 3;
+			uint8_t tr = (SCREEN_RAM_BASE[col_base + 2] >> 6) & 3;
+			attr_table[idx++] = tl | (tr << 2);
+			col_base += 4;
+		}
 	}
 }
 

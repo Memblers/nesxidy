@@ -20,6 +20,9 @@
 #include "bank_map.h"
 #include "mapper30.h"
 #include "core/optimizer.h"
+#ifdef ENABLE_OPTIMIZER_V2
+#include "core/optimizer_v2_simple.h"
+#endif
 #ifdef ENABLE_STATIC_ANALYSIS
 #include "core/static_analysis.h"
 #endif
@@ -317,6 +320,26 @@ static void check_recompile_triggers(void)
 	bankswitch_prg(BANK_RENDER);
 	check_recompile_triggers_b21();
 	bankswitch_prg(saved);
+
+	// --- Manual B+Start press: exhaustive link resolve ---
+	// Runs all 4 phases of opt2_full_link_resolve() to patch every
+	// resolvable branch/epilogue/JMP in the flash cache.  Unlike
+	// B+Select (full recompile via soft reset), this only resolves
+	// links without erasing anything.  Safe to call from the fixed
+	// bank — opt2_full_link_resolve handles its own bank switching.
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+	{
+		static uint8_t b_start_held = 0;
+		if ((cached_raw_pad & (lfB | lfStart)) == (lfB | lfStart)) {
+			if (!b_start_held) {
+				b_start_held = 1;
+				opt2_full_link_resolve();
+			}
+		} else {
+			b_start_held = 0;
+		}
+	}
+#endif
 }
 
 

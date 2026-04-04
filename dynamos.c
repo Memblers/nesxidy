@@ -1542,10 +1542,10 @@ static uint8_t flash_sector_alloc_b17(uint8_t total_size)
 		uint16_t header_start = code_start - BLOCK_HEADER_SIZE;
 		uint16_t end = code_start + total_size;
 		
-		if (end > FLASH_ERASE_SECTOR_SIZE)
+		if (end > FLASH_ERASE_SECTOR_SIZE - 256)
 		{
 			s++;
-			continue;  // doesn't fit in this sector
+			continue;  // doesn't fit (last 256B reserved for trampoline pool)
 		}
 		
 		// Compute bank and address from sector index

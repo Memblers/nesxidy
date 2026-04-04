@@ -85,6 +85,13 @@ uint16_t opt2_stat_direct = 0;
 uint16_t opt2_stat_pending = 0;
 uint16_t opt2_blocks_compiled = 0;  // incremented by opt2_notify_block_compiled
 
+// Diagnostic counters: breakdown of why patches are skipped.
+// Reset by opt2_full_link_resolve() before each exhaustive scan pass.
+uint16_t opt2_diag_xbank = 0;      // cross-bank target (can't direct-patch)
+uint16_t opt2_diag_align = 0;      // $FFF0 alignment (low nibble != 0)
+uint16_t opt2_diag_selfloop = 0;   // self-loop guard
+uint16_t opt2_diag_nocompile = 0;  // target not compiled or stale
+
 //============================================================================
 // The following function does NOT bankswitch, so it can live in bank1.
 // Callers must bankswitch_prg(1) before calling.
@@ -144,6 +151,12 @@ void opt2_record_pending_branch_safe(uint16_t branch_offset_addr,
 // Sector-based cursor: which sector (0..59) and byte offset within sector.
 static uint8_t opt2_epilogue_sector;
 static uint16_t opt2_epilogue_offset;
+
+// Per-sector trampoline pool: 256 bytes at end of each sector ($F00-$FFF)
+// = 16 slots on 16-byte boundaries.  Each slot holds JMP na (3 bytes).
+// No WRAM tracking — slots are scanned in flash (read $4C = used, $FF = free).
+#define SECTOR_TRAMP_POOL_BASE  (FLASH_ERASE_SECTOR_SIZE - 256)
+#define SECTOR_TRAMP_SLOTS      16
 
 //============================================================================
 // Bank 2 implementations
@@ -451,6 +464,11 @@ void opt2_full_branch_scan_b1(void);
 
 void opt2_full_link_resolve(void) {
     uint8_t saved_bank = mapper_prg_bank;
+    // Reset diagnostic counters for this pass
+    opt2_diag_xbank = 0;
+    opt2_diag_align = 0;
+    opt2_diag_selfloop = 0;
+    opt2_diag_nocompile = 0;
     // Phase 1: drain ALL pending branch patches (queue-based)
     bankswitch_prg(2);
     opt2_sweep_pending_patches_b2();
@@ -667,6 +685,22 @@ void opt2_full_branch_scan_b1(void) {
             
             uint16_t code_base = hdr_addr + BLOCK_HEADER_SIZE;
             
+            // Per-block trailing trampoline for $FFF0 alignment workaround.
+            // The first 16-aligned address at or after code_len sits in the
+            // padding between this block and the next header ($FF flash).
+            // We can write a 3-byte JMP there to bounce misaligned targets.
+            // Even when code_len is already 16-aligned (tramp_off == code_len),
+            // there are 8 bytes of header padding available (next code must
+            // be 16-aligned, so next header is 8 bytes before that).
+#ifdef ENABLE_FFF0_TEMPLATES
+            uint16_t tramp_off = (uint16_t)((code_len + 15) & ~15);
+            uint16_t tramp_addr = code_base + tramp_off;
+            // Next header is at sector_base + offset (already advanced).
+            // Trampoline needs 3 bytes: verify it fits before next header.
+            uint8_t tramp_avail = (tramp_addr + 3 <= sector_base + offset);
+            uint16_t tramp_na = 0;  // 0 = slot unused; nonzero = target written
+#endif
+
             // Scan code bytes for patchable JMP patterns.
             // Old templates: $4C $FF $FF (JMP $FFFF)
             // $FFF0 templates: $4C $F0 $FF (JMP $FFF0)
@@ -712,7 +746,17 @@ void opt2_full_branch_scan_b1(void) {
                         (target_pc >> 14) + BANK_PC_FLAGS,
                         (uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
 
-                    if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
+                    if ((flag & RECOMPILED) || flag == 0) {
+                        opt2_diag_nocompile++;
+                        p += 2;
+                        continue;
+                    }
+                    if ((flag & 0x1F) != code_bank) {
+                        opt2_diag_xbank++;
+                        p += 2;
+                        continue;
+                    }
+                    {
                         uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
                         uint8_t pc_bank2 = (target_pc >> 13) + BANK_PC;
                         uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
@@ -720,6 +764,7 @@ void opt2_full_branch_scan_b1(void) {
 
                         // Self-loop guard for unconditional JMP (not branch)
                         if (!is_branch_tmpl && na >= code_base && na < code_base + code_len) {
+                            opt2_diag_selfloop++;
                             p += 2;
                             continue;
                         }
@@ -727,6 +772,64 @@ void opt2_full_branch_scan_b1(void) {
                         // Alignment guard: JMP $FFF0 lo byte is $F0, can only
                         // clear bits → target lo nibble must be 0.
                         if ((na & 0x0F) != 0) {
+                            // Target not aligned — try block-trailing trampoline.
+                            // Write JMP na at tramp_addr (16-aligned padding slot),
+                            // then patch JMP $FFF0 → JMP tramp_addr instead.
+                            if (tramp_avail && tramp_na == 0) {
+                                // Verify slot is $FF (unwritten flash)
+                                if (peek_bank_byte(code_bank, tramp_addr) == 0xFF &&
+                                    peek_bank_byte(code_bank, tramp_addr + 1) == 0xFF &&
+                                    peek_bank_byte(code_bank, tramp_addr + 2) == 0xFF) {
+                                    flash_byte_program(tramp_addr, code_bank, 0x4C);
+                                    flash_byte_program(tramp_addr + 1, code_bank, na & 0xFF);
+                                    flash_byte_program(tramp_addr + 2, code_bank, (na >> 8) & 0xFF);
+                                    tramp_na = na;
+                                }
+                            }
+                            if (tramp_na == na) {
+                                // Redirect JMP $FFF0 → JMP tramp_addr
+                                flash_byte_program(code_base + p + 1, code_bank, tramp_addr & 0xFF);
+                                flash_byte_program(code_base + p + 2, code_bank, (tramp_addr >> 8) & 0xFF);
+                                patches_applied++;
+                                p += 2;
+                                if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) goto done;
+                                continue;
+                            }
+                            // Fallback: per-sector trampoline pool (16 slots)
+                            {
+                                uint16_t pool = sector_base + SECTOR_TRAMP_POOL_BASE;
+                                uint16_t found_addr = 0;
+                                for (uint8_t sl = 0; sl < SECTOR_TRAMP_SLOTS; sl++) {
+                                    uint16_t sa = pool + ((uint16_t)sl << 4);
+                                    uint8_t b = peek_bank_byte(code_bank, sa);
+                                    if (b == 0xFF) {
+                                        // Free slot — write JMP na
+                                        flash_byte_program(sa, code_bank, 0x4C);
+                                        flash_byte_program(sa + 1, code_bank, na & 0xFF);
+                                        flash_byte_program(sa + 2, code_bank, (na >> 8) & 0xFF);
+                                        found_addr = sa;
+                                        break;
+                                    }
+                                    if (b == 0x4C) {
+                                        // Used slot — check if target matches
+                                        uint8_t slo = peek_bank_byte(code_bank, sa + 1);
+                                        uint8_t shi = peek_bank_byte(code_bank, sa + 2);
+                                        if (slo == (na & 0xFF) && shi == ((na >> 8) & 0xFF)) {
+                                            found_addr = sa;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (found_addr) {
+                                    flash_byte_program(code_base + p + 1, code_bank, found_addr & 0xFF);
+                                    flash_byte_program(code_base + p + 2, code_bank, (found_addr >> 8) & 0xFF);
+                                    patches_applied++;
+                                    p += 2;
+                                    if (patches_applied >= EPILOGUE_FULL_SCAN_MAX) goto done;
+                                    continue;
+                                }
+                            }
+                            opt2_diag_align++;
                             p += 2;
                             continue;
                         }
@@ -757,7 +860,11 @@ void opt2_full_branch_scan_b1(void) {
                             (target_pc >> 14) + BANK_PC_FLAGS,
                             (uint16_t)&flash_cache_pc_flags[target_pc & FLASH_BANK_MASK]);
                         
-                        if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
+                        if ((flag & RECOMPILED) || flag == 0) {
+                            opt2_diag_nocompile++;
+                        } else if ((flag & 0x1F) != code_bank) {
+                            opt2_diag_xbank++;
+                        } else {
                             uint16_t pa = (target_pc << 1) & FLASH_BANK_MASK;
                             uint8_t pc_bank2 = (target_pc >> 13) + BANK_PC;
                             uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
@@ -788,7 +895,11 @@ void opt2_full_branch_scan_b1(void) {
                             (exit_pc >> 14) + BANK_PC_FLAGS,
                             (uint16_t)&flash_cache_pc_flags[exit_pc & FLASH_BANK_MASK]);
                         
-                        if (!(flag & RECOMPILED) && (flag & 0x1F) == code_bank) {
+                        if ((flag & RECOMPILED) || flag == 0) {
+                            opt2_diag_nocompile++;
+                        } else if ((flag & 0x1F) != code_bank) {
+                            opt2_diag_xbank++;
+                        } else {
                             uint16_t pa = (exit_pc << 1) & FLASH_BANK_MASK;
                             uint8_t pc_bank2 = (exit_pc >> 13) + BANK_PC;
                             uint16_t na = peek_bank_byte(pc_bank2, (uint16_t)&flash_cache_pc[pa])
@@ -800,6 +911,8 @@ void opt2_full_branch_scan_b1(void) {
                                 flash_byte_program(code_base + p + 1, code_bank, na & 0xFF);
                                 flash_byte_program(code_base + p + 2, code_bank, (na >> 8) & 0xFF);
                                 patches_applied++;
+                            } else if (na >= code_base && na < code_base + code_len) {
+                                opt2_diag_selfloop++;
                             }
                         }
                         p += 2;
@@ -827,6 +940,10 @@ void opt2_reset(void) {
     opt2_stat_direct = 0;
     opt2_stat_pending = 0;
     opt2_blocks_compiled = 0;
+    opt2_diag_xbank = 0;
+    opt2_diag_align = 0;
+    opt2_diag_selfloop = 0;
+    opt2_diag_nocompile = 0;
     opt2_epilogue_sector = 0;
     opt2_epilogue_offset = SECTOR_FIRST_HEADER;
     opt2_prev_unique_blocks = 0;

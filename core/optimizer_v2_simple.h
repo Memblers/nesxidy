@@ -56,6 +56,13 @@ void opt2_drain_static_patches(void);
 // Get statistics for debugging
 void opt2_get_stats(uint16_t *total, uint16_t *direct, uint16_t *stub, uint16_t *pending);
 
+// Diagnostic counters: breakdown of why scan-based patches are skipped.
+// Reset each time opt2_full_link_resolve() runs.
+extern uint16_t opt2_diag_xbank;      // cross-bank target
+extern uint16_t opt2_diag_align;      // $FFF0 alignment (low nibble != 0)
+extern uint16_t opt2_diag_selfloop;   // self-loop guard
+extern uint16_t opt2_diag_nocompile;  // target not compiled or stale
+
 // Reset state (for testing)
 void opt2_reset(void);
 

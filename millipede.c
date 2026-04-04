@@ -289,10 +289,17 @@ void flash_format(void)
 // ==========================================================================
 static uint8_t cached_in0 = 0;     // IN0: fire, joystick/trackball
 static uint8_t cached_in2 = 0;     // IN2: coin, start
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+static uint8_t cached_raw_pad = 0;
+static uint8_t b_start_held = 0;
+#endif
 
 void nes_gamepad_refresh(void)
 {
 	uint8_t joypad = lnGetPad(1);
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+	cached_raw_pad = joypad;
+#endif
 	uint8_t in0 = 0;
 	uint8_t in2 = 0;
 
@@ -890,6 +897,16 @@ int main(void)
 				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
 				nes_gamepad_refresh();
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+				if ((cached_raw_pad & (lfB | lfStart)) == (lfB | lfStart)) {
+					if (!b_start_held) {
+						b_start_held = 1;
+						opt2_full_link_resolve();
+					}
+				} else {
+					b_start_held = 0;
+				}
+#endif
 				render_video();
 				last_nmi_frame = *(volatile uint8_t*)0x26;
 			}
@@ -936,6 +953,16 @@ int main(void)
 				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
 				nes_gamepad_refresh();
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+				if ((cached_raw_pad & (lfB | lfStart)) == (lfB | lfStart)) {
+					if (!b_start_held) {
+						b_start_held = 1;
+						opt2_full_link_resolve();
+					}
+				} else {
+					b_start_held = 0;
+				}
+#endif
 				render_video();
 			}
 		}

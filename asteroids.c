@@ -94,6 +94,11 @@ static uint32_t pokey_lfsr = 0x1FFFF;
 // Cached gamepad state
 static uint8_t cached_pad = 0;
 
+// Edge-detect for B+Start combo (exhaustive link resolve)
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+static uint8_t b_start_held = 0;
+#endif
+
 // Frame timing
 __zpage uint32_t frame_time;
 __zpage uint8_t last_nmi_frame = 0;
@@ -1240,6 +1245,19 @@ int main(void)
 				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
 				nes_gamepad_refresh();
+
+				// --- B+Start: exhaustive link resolve ---
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+				if ((cached_pad & (lfB | lfStart)) == (lfB | lfStart)) {
+					if (!b_start_held) {
+						b_start_held = 1;
+						opt2_full_link_resolve();
+					}
+				} else {
+					b_start_held = 0;
+				}
+#endif
+
 				render_video();
 				last_nmi_frame = *(volatile uint8_t*)0x26;
 
@@ -1293,6 +1311,19 @@ int main(void)
 				{ uint8_t _mb = mapper_prg_bank; bankswitch_prg(BANK_METRICS); metrics_dump_runtime_b2(); bankswitch_prg(_mb); }
 #endif
 				nes_gamepad_refresh();
+
+				// --- B+Start: exhaustive link resolve ---
+#ifdef ENABLE_PATCHABLE_EPILOGUE
+				if ((cached_pad & (lfB | lfStart)) == (lfB | lfStart)) {
+					if (!b_start_held) {
+						b_start_held = 1;
+						opt2_full_link_resolve();
+					}
+				} else {
+					b_start_held = 0;
+				}
+#endif
+
 				render_video();
 			}
 		}

@@ -1,91 +1,173 @@
--- metrics_viewer.lua  —  Mesen 2 Lua script
--- Reads the metrics WRAM block at $7E30 and draws an overlay.
+﻿-- metrics_viewer.lua  —  Mesen 2 Lua script
+-- Reads metrics directly from struct/global addresses resolved via .mlb.
 --
 -- Usage:  In Mesen → Script Window → Open this file → Run
 --
--- WRAM layout (written by metrics.c):
---   $7FA0 +$00  bfs_addresses_visited  u16
---         +$02  bfs_entry_points       u16
---         +$04  bitmap_marked          u16
---         +$06  blocks_compiled        u16
---         +$08  blocks_failed          u16
---         +$0A  blocks_skipped         u16
---         +$0C  code_bytes_written     u16
---         +$0E  flash_sectors_used     u16
---         +$10  bfs_time  (cycles)     u32
---         +$14  cache_hits             u32
---         +$18  cache_misses           u32
---         +$1C  cache_interpret        u32
---         +$20  opt2_stat_total        u32  (branches entered optimizer)
---         +$24  opt2_stat_direct       u32  (successfully patched)
---         +$28  peephole_php_elided    u32
---         +$2C  peephole_plp_elided    u32
---         +$30  dynamic_compile_frames u32
---         +$34  total_frames           u32
---         +$38  flash_occupancy_pct    u8
---         +$39  magic 'M' 'E'
---         +$3C  ir_blocks_processed    u32
---         +$40  ir_bytes_before        u32
---         +$44  ir_bytes_after         u32
---         +$48  ir_nodes_killed        u32
---         +$4C  ir_pass_redundant_load u16  (Pass 1: RL+identity+fold)
---         +$4E  ir_pass_dead_store     u16  (Pass 2: dead store+store-back)
---         +$50  ir_pass_dead_load      u16  (Pass 2b)
---         +$52  ir_pass_php_plp        u16  (Pass 3)
---         +$54  ir_pass_pair_rewrite   u16  (Pass 4: pair rewrite + CMP#0)
---         +$56  ir_pass_rmw_fusion    u16  (Pass 5+6: shift/inc/dec fusion)
---         +$58  ir_instrs_eliminated  u16
---         +$5A  ir_instr_overflow     u16
---         +$5C  idle_detect_count     u8   (auto-detected idle PCs)
---         +$5D  idle_cache_count      u8   (total incl. GAME_IDLE_PC)
---         +$5E  idle_pc[0..7]         u16  (up to 8 idle PC addresses)
+-- Addresses are auto-resolved from the game's .mlb label file so the
+-- script stays correct across rebuilds.  No hardcoded WRAM offsets.
 
-local BASE = 0x7F90   -- CPU address (WRAM $6000-$7FFF mapped)
-local MEM  = emu.memType.nesDebug  -- side-effect-free reads
+---------------------------------------------------------------------
+-- Configuration  —  CHANGE GAME TO MATCH YOUR BUILD
+---------------------------------------------------------------------
+local GAME = "millipede"
+local PROJECT_DIR = "c:\\proj\\c\\NES\\nesxidy-co\\nesxidy\\"
+local MEM = emu.memType.nesMemory
 
--- helpers
-local function r8(off)
-  return emu.read(BASE + off, MEM)
-end
-local function r16(off)
-  return r8(off) + r8(off+1) * 256
-end
-local function r32(off)
-  return r16(off) + r16(off+2) * 65536
+---------------------------------------------------------------------
+-- .mlb parser (same approach as trace_logger.lua / hit_rate.lua)
+---------------------------------------------------------------------
+local mlb_path = PROJECT_DIR .. GAME .. ".mlb"
+
+local function find_addr_in_mlb(path, label)
+  local f = io.open(path, "r")
+  if not f then return nil end
+  for line in f:lines() do
+    local prefix, hex, name = line:match("^(%a):(%x+):(.+)$")
+    if name == label then
+      f:close()
+      local addr = tonumber(hex, 16)
+      if prefix == "S" or prefix == "W" then return addr + 0x6000
+      elseif prefix == "P"              then return addr + 0x8000
+      else                                   return addr
+      end
+    end
+  end
+  f:close()
+  return nil
 end
 
--- colours  (plain RGB for Mesen 2 drawString)
-local COL_BG    = 0x000020     -- dark blue background
-local COL_TITLE = 0x00FFFF     -- cyan titles
-local COL_SA    = 0x00FF00     -- bright green
-local COL_RT    = 0xFFFF00     -- yellow
-local COL_WARN  = 0xFF2020     -- bright red
-local COL_FPS_G = 0x00FF00     -- green  (>= 55 fps)
-local COL_FPS_Y = 0xFFFF00     -- yellow (>= 40 fps)
-local COL_FPS_R = 0xFF4040     -- red    (<  40 fps)
+-- Validate the .mlb exists
+do
+  local f = io.open(mlb_path, "r")
+  if not f then
+    emu.displayMessage("Metrics", "ERROR: cannot open " .. GAME .. ".mlb")
+    return
+  end
+  f:close()
+end
 
--- Emulated-FPS measurement state
--- Tracks delta of total_frames (WRAM +$34) over wall-clock time.
--- total_frames is incremented by the emulated program each time it
--- completes a frame (calls metrics_dump_runtime_b2 from render_video).
+local function sym(label)
+  return find_addr_in_mlb(mlb_path, label)
+end
+
+---------------------------------------------------------------------
+-- Resolve all addresses once at startup
+---------------------------------------------------------------------
+-- sa_metrics_t struct base (offsets match core/metrics.h)
+local SA = sym("_sa_metrics")          -- base of sa_metrics_t
+-- runtime_metrics_t struct base
+local RT = sym("_runtime_metrics")     -- base of runtime_metrics_t
+-- Standalone globals (not inside the structs)
+local CACHE_HITS      = sym("_cache_hits")
+local CACHE_MISSES    = sym("_cache_misses")
+local CACHE_INTERPRET = sym("_cache_interpret")
+local OPT2_TOTAL     = sym("_opt2_stat_total")
+local OPT2_DIRECT    = sym("_opt2_stat_direct")
+local OPT2_XBANK    = sym("_opt2_diag_xbank")
+local OPT2_ALIGN    = sym("_opt2_diag_align")
+local OPT2_SELFLOOP = sym("_opt2_diag_selfloop")
+local OPT2_NOCOMP   = sym("_opt2_diag_nocompile")
+-- Idle detection (standalone globals, not inside a struct)
+local SA_IDLE_COUNT       = sym("_sa_idle_count")
+local SA_IDLE_CACHE_COUNT = sym("_sa_idle_cache_count")
+local SA_IDLE_CACHE       = sym("_sa_idle_cache")
+
+if not SA or not RT then
+  emu.displayMessage("Metrics", "ERROR: _sa_metrics/_runtime_metrics not in " .. mlb_path)
+  return
+end
+
+emu.log(string.format("[metrics] mlb=%s  SA=$%04X  RT=$%04X  hits=$%04X  miss=$%04X",
+  mlb_path, SA, RT, CACHE_HITS or 0, CACHE_MISSES or 0))
+
+---------------------------------------------------------------------
+-- Memory read helpers
+---------------------------------------------------------------------
+local function r8(addr)
+  if not addr then return 0 end
+  return emu.read(addr, MEM)
+end
+local function r16(addr)
+  if not addr then return 0 end
+  return emu.read(addr, MEM) + emu.read(addr + 1, MEM) * 256
+end
+local function r32(addr)
+  if not addr then return 0 end
+  return r16(addr) + r16(addr + 2) * 65536
+end
+
+---------------------------------------------------------------------
+-- Colours
+---------------------------------------------------------------------
+local COL_BG    = 0x000020
+local COL_TITLE = 0x00FFFF
+local COL_SA    = 0x00FF00
+local COL_RT    = 0xFFFF00
+local COL_WARN  = 0xFF2020
+local COL_FPS_G = 0x00FF00
+local COL_FPS_Y = 0xFFFF00
+local COL_FPS_R = 0xFF4040
+local COL_IR    = 0xFF80FF
+local COL_IR2   = 0xCC66CC
+local COL_IDLE  = 0x80FF80
+local COL_IDLE2 = 0x60CC60
+
+---------------------------------------------------------------------
+-- Emulated-FPS measurement
+---------------------------------------------------------------------
 local efps_clock_prev   = os.clock()
-local efps_frames_prev  = 0        -- last sampled total_frames value
-local efps_display      = 0.0      -- displayed emulated FPS
-local efps_ready        = false    -- waiting for first valid sample
-local EFPS_INTERVAL     = 1.0      -- update every ~1 second for stability
+local efps_frames_prev  = 0
+local efps_display      = 0.0
+local efps_ready        = false
+local EFPS_INTERVAL     = 1.0
+
+---------------------------------------------------------------------
+-- sa_metrics_t field offsets (all packed, no padding on 6502)
+---------------------------------------------------------------------
+local SA_bfs_addresses_visited = 0   -- u16
+local SA_bfs_entry_points      = 2   -- u16
+local SA_bitmap_marked         = 4   -- u16
+local SA_blocks_compiled       = 6   -- u16
+local SA_blocks_failed         = 8   -- u16
+local SA_blocks_skipped        = 10  -- u16
+local SA_code_bytes_written    = 12  -- u16
+local SA_flash_sectors_used    = 14  -- u16
+local SA_bfs_start_cycle       = 16  -- u32
+local SA_bfs_end_cycle         = 20  -- u32
+
+---------------------------------------------------------------------
+-- runtime_metrics_t field offsets
+---------------------------------------------------------------------
+local RT_optimizer_runs         = 0   -- u32
+local RT_opt_branches_patched   = 4   -- u32
+local RT_peephole_php_elided    = 8   -- u32
+local RT_peephole_plp_elided    = 12  -- u32
+local RT_dynamic_compile_frames = 16  -- u32
+local RT_total_frames           = 20  -- u32
+local RT_flash_free_bytes       = 24  -- u16
+local RT_flash_occupancy_pct    = 26  -- u8
+local RT_ir_blocks_processed    = 27  -- u32
+local RT_ir_nodes_killed        = 31  -- u32
+local RT_ir_bytes_before        = 35  -- u32
+local RT_ir_bytes_after         = 39  -- u32
+local RT_ir_pass_redundant_load = 43  -- u16
+local RT_ir_pass_dead_store     = 45  -- u16
+local RT_ir_pass_dead_load      = 47  -- u16
+local RT_ir_pass_php_plp        = 49  -- u16
+local RT_ir_pass_pair_rewrite   = 51  -- u16
+local RT_ir_pass_rmw_fusion     = 53  -- u16
+local RT_ir_instrs_eliminated   = 55  -- u16
+local RT_ir_instr_overflow      = 57  -- u16
 
 emu.addEventCallback(function()
-  -- --- Emulated FPS: delta(total_frames) / delta(wall-clock) ---
+  -- --- Emulated FPS ---
   local now = os.clock()
   local dt  = now - efps_clock_prev
-
-  -- Read total_frames from metrics WRAM block (only valid after magic)
-  local have_magic = (r8(0x39) == 0x4D and r8(0x3A) == 0x45)
-  local cur_frames = 0
-  if have_magic then cur_frames = r32(0x34) end
+  local tot_fr = r32(RT + RT_total_frames)
+  local cur_frames = tot_fr
 
   if dt >= EFPS_INTERVAL then
-    if efps_ready and have_magic then
+    if efps_ready then
       local delta = cur_frames - efps_frames_prev
       if delta >= 0 and dt > 0 then
         efps_display = delta / dt
@@ -93,136 +175,127 @@ emu.addEventCallback(function()
     end
     efps_clock_prev  = now
     efps_frames_prev = cur_frames
-    efps_ready       = have_magic  -- arm for next interval
+    efps_ready       = true
   end
 
-  -- Pick colour based on emulated FPS
   local fps_col = COL_FPS_R
   if efps_display >= 55 then fps_col = COL_FPS_G
   elseif efps_display >= 40 then fps_col = COL_FPS_Y end
 
-  -- Always draw emulated FPS even before metrics are ready
   if efps_ready then
     emu.drawString(170, 2, string.format("emu %.1f FPS", efps_display), fps_col, COL_BG)
   else
     emu.drawString(170, 2, "emu -- FPS", COL_FPS_Y, COL_BG)
   end
 
-  -- Check magic signature
-  if r8(0x39) ~= 0x4D or r8(0x3A) ~= 0x45 then
-    emu.drawString(2, 2, "Metrics: no data (waiting for frame dump)", COL_WARN, COL_BG)
-    return
-  end
-
   local y = 2
 
-  -- SA metrics (new layout)
-  local bfs_addrs    = r16(0x00)
-  local bfs_entries  = r16(0x02)
-  local bitmap_total = r16(0x04)
-  local blk_compiled = r16(0x06)
-  local blk_failed   = r16(0x08)
-  local blk_skipped  = r16(0x0A)
-  local code_bytes   = r16(0x0C)
-  local sectors_used = r16(0x0E)
-  local bfs_time     = r32(0x10)
+  -- === Static Analysis (BFS — always runs) ===
+  local bfs_addrs    = r16(SA + SA_bfs_addresses_visited)
+  local bfs_entries  = r16(SA + SA_bfs_entry_points)
 
-  emu.drawString(2, y, "=== Static Analysis ===", COL_TITLE, COL_BG); y = y + 10
+  emu.drawString(2, y, "=== Static Analysis (BFS) ===", COL_TITLE, COL_BG); y = y + 10
   emu.drawString(2, y, string.format("BFS visit:%d entry:%d", bfs_addrs, bfs_entries), COL_SA, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Bitmap:   %d addrs", bitmap_total), COL_SA, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Compiled: %d fail:%d skip:%d", blk_compiled, blk_failed, blk_skipped), COL_SA, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Code: %dB  Sectors:%d", code_bytes, sectors_used), COL_SA, COL_BG); y = y + 12
 
-  -- Runtime metrics
-  local hits    = r32(0x14)
-  local misses  = r32(0x18)
-  local recomp  = r32(0x1C)
-  local opt_total = r32(0x20)
-  local opt_patch = r32(0x24)
-  local ph_php  = r32(0x28)
-  local ph_plp  = r32(0x2C)
-  local dyn_fr  = r32(0x30)
-  local tot_fr  = r32(0x34)
-  local flash_p = r8(0x38)
+  -- === Compile Stats (warm reboot only) ===
+  local bitmap_total = r16(SA + SA_bitmap_marked)
+  local blk_compiled = r16(SA + SA_blocks_compiled)
+  local blk_failed   = r16(SA + SA_blocks_failed)
+  local blk_skipped  = r16(SA + SA_blocks_skipped)
+  local code_bytes   = r16(SA + SA_code_bytes_written)
+  local sectors_used = r16(SA + SA_flash_sectors_used)
+  local sa_compiled   = (bitmap_total + blk_compiled + code_bytes) > 0
 
-  local hit_pct = 0
-  if (hits + misses) > 0 then
-    hit_pct = hits * 100 / (hits + misses)
-  end
-
-  local col_rate = COL_RT
-  if hit_pct < 90 then col_rate = COL_WARN end
-
-  emu.drawString(2, y, "=== Runtime ===", COL_TITLE, COL_BG); y = y + 10
-  emu.drawString(2, y, string.format("Hits: %d  Miss: %d", hits, misses), col_rate, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Hit%%: %.1f%%", hit_pct), col_rate, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Interpret:  %d", recomp), COL_RT, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Opt total:%d patched:%d", opt_total, opt_patch), COL_RT, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Peephole PHP:%d PLP:%d", ph_php, ph_plp), COL_RT, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("DynFrames:%d Tot:%d", dyn_fr, tot_fr), COL_RT, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("Flash: %d%%", flash_p), COL_RT, COL_BG); y = y + 12
-
-  -- IR optimisation metrics
-  local ir_blocks  = r32(0x3C)
-  local ir_before  = r32(0x40)
-  local ir_after   = r32(0x44)
-  local ir_killed  = r32(0x48)
-  local ir_rl      = r16(0x4C)
-  local ir_ds      = r16(0x4E)
-  local ir_dl      = r16(0x50)
-  local ir_pp      = r16(0x52)
-  local ir_pr      = r16(0x54)
-  local ir_rmw     = r16(0x56)
-
-  local ir_saved   = ir_before - ir_after
-  local ir_pct     = 0
-  if ir_before > 0 then ir_pct = ir_saved * 100 / ir_before end
-
-  local COL_IR   = 0xFF80FF  -- magenta/pink
-  local COL_IR2  = 0xCC66CC  -- dim magenta for detail lines
-
-  emu.drawString(2, y, "=== IR Optimizer ===", COL_TITLE, COL_BG); y = y + 10
-
-  if ir_blocks > 0 then
-    local avg_before = ir_before / ir_blocks
-    local avg_after  = ir_after  / ir_blocks
-    local avg_saved  = avg_before - avg_after
-    emu.drawString(2, y, string.format("Blocks: %d  Nodes killed: %d", ir_blocks, ir_killed), COL_IR, COL_BG); y = y + 9
-    emu.drawString(2, y, string.format("Total: %dB -> %dB  (-%dB, %.1f%%)", ir_before, ir_after, ir_saved, ir_pct), COL_IR, COL_BG); y = y + 9
-    emu.drawString(2, y, string.format("Avg/blk: %.1fB -> %.1fB  (-%.1fB)", avg_before, avg_after, avg_saved), COL_IR2, COL_BG); y = y + 9
+  if sa_compiled then
+    emu.drawString(2, y, "=== Compile (SA) ===", COL_TITLE, COL_BG); y = y + 10
+    emu.drawString(2, y, string.format("Bitmap:   %d addrs", bitmap_total), COL_SA, COL_BG); y = y + 9
+    emu.drawString(2, y, string.format("Compiled: %d fail:%d skip:%d", blk_compiled, blk_failed, blk_skipped), COL_SA, COL_BG); y = y + 9
+    emu.drawString(2, y, string.format("Code: %dB  Sectors:%d", code_bytes, sectors_used), COL_SA, COL_BG); y = y + 9
   else
-    emu.drawString(2, y, "No IR blocks yet", COL_IR2, COL_BG); y = y + 9
+    emu.drawString(2, y, "Compile: skipped (cold boot)", 0x808080, COL_BG); y = y + 9
   end
 
-  local ir_total_changes = ir_rl + ir_ds + ir_dl + ir_pp + ir_pr + ir_rmw
-  emu.drawString(2, y, string.format("Pass hits (%d total):", ir_total_changes), COL_IR, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("  RedundLoad:%d DeadStore:%d DeadLoad:%d", ir_rl, ir_ds, ir_dl), COL_IR2, COL_BG); y = y + 9
-  emu.drawString(2, y, string.format("  PHP/PLP:%d PairRwrt:%d RMW:%d", ir_pp, ir_pr, ir_rmw), COL_IR2, COL_BG); y = y + 9
+  -- === Runtime ===
+  emu.drawString(2, y, "=== Runtime ===", COL_TITLE, COL_BG); y = y + 10
+  emu.drawString(2, y, string.format("Frames: %d", tot_fr), COL_RT, COL_BG); y = y + 9
 
-  -- IR elimination / overflow metrics (offsets +$58, +$5A)
-  local ir_elim    = r16(0x58)
-  local ir_overflow = r16(0x5A)
-  emu.drawString(2, y, string.format("  InstrsElim:%d  InstrOverflow:%d", ir_elim, ir_overflow), COL_IR2, COL_BG); y = y + 9
+  -- JIT dispatch stats (only non-zero when NOT in interpreter-only mode)
+  local hits    = CACHE_HITS    and r32(CACHE_HITS) or 0
+  local misses  = CACHE_MISSES  and r32(CACHE_MISSES) or 0
+  local interp  = CACHE_INTERPRET and r32(CACHE_INTERPRET) or 0
+  local jit_active = (hits + misses + interp) > 0
 
-  -- Idle-loop detection metrics
-  local idle_detect = r8(0x5C)
-  local idle_cache  = r8(0x5D)
-  local COL_IDLE    = 0x80FF80  -- light green
-  local COL_IDLE2   = 0x60CC60  -- dim green for detail
+  if jit_active then
+    local hit_pct = 0
+    if (hits + misses) > 0 then hit_pct = hits * 100 / (hits + misses) end
+    local col_rate = COL_RT
+    if hit_pct < 90 then col_rate = COL_WARN end
+    emu.drawString(2, y, string.format("Hits:%d Miss:%d (%.1f%%)", hits, misses, hit_pct), col_rate, COL_BG); y = y + 9
+    emu.drawString(2, y, string.format("Interpret: %d", interp), COL_RT, COL_BG); y = y + 9
+
+    local opt_total = OPT2_TOTAL  and r16(OPT2_TOTAL) or 0
+    local opt_patch = OPT2_DIRECT and r16(OPT2_DIRECT) or 0
+    local ph_php  = r32(RT + RT_peephole_php_elided)
+    local ph_plp  = r32(RT + RT_peephole_plp_elided)
+    local dyn_fr  = r32(RT + RT_dynamic_compile_frames)
+    local flash_p = r8(RT + RT_flash_occupancy_pct)
+    emu.drawString(2, y, string.format("Opt:%d patch:%d", opt_total, opt_patch), COL_RT, COL_BG); y = y + 9
+    -- Diagnostic breakdown of unpatched (only if any diagnostics recorded)
+    local d_xbank = OPT2_XBANK    and r16(OPT2_XBANK) or 0
+    local d_align = OPT2_ALIGN    and r16(OPT2_ALIGN) or 0
+    local d_sloop = OPT2_SELFLOOP and r16(OPT2_SELFLOOP) or 0
+    local d_nocomp = OPT2_NOCOMP  and r16(OPT2_NOCOMP) or 0
+    if (d_xbank + d_align + d_sloop + d_nocomp) > 0 then
+      emu.drawString(2, y, string.format("xbnk:%d aln:%d loop:%d nc:%d", d_xbank, d_align, d_sloop, d_nocomp), 0xAAAA00, COL_BG); y = y + 9
+    end
+    emu.drawString(2, y, string.format("Peephole PHP:%d PLP:%d", ph_php, ph_plp), COL_RT, COL_BG); y = y + 9
+    emu.drawString(2, y, string.format("DynFrames:%d Flash:%d%%", dyn_fr, flash_p), COL_RT, COL_BG); y = y + 9
+
+    -- === IR Optimizer ===
+    local ir_blocks  = r32(RT + RT_ir_blocks_processed)
+    local ir_before  = r32(RT + RT_ir_bytes_before)
+    local ir_after   = r32(RT + RT_ir_bytes_after)
+    local ir_killed  = r32(RT + RT_ir_nodes_killed)
+
+    emu.drawString(2, y, "=== IR Optimizer ===", COL_TITLE, COL_BG); y = y + 10
+    if ir_blocks > 0 then
+      local ir_saved = ir_before - ir_after
+      local ir_pct   = 0
+      if ir_before > 0 then ir_pct = ir_saved * 100 / ir_before end
+      emu.drawString(2, y, string.format("Blocks:%d Killed:%d", ir_blocks, ir_killed), COL_IR, COL_BG); y = y + 9
+      emu.drawString(2, y, string.format("%dB->%dB (-%dB %.1f%%)", ir_before, ir_after, ir_saved, ir_pct), COL_IR, COL_BG); y = y + 9
+
+      local ir_rl  = r16(RT + RT_ir_pass_redundant_load)
+      local ir_ds  = r16(RT + RT_ir_pass_dead_store)
+      local ir_dl  = r16(RT + RT_ir_pass_dead_load)
+      local ir_pp  = r16(RT + RT_ir_pass_php_plp)
+      local ir_pr  = r16(RT + RT_ir_pass_pair_rewrite)
+      local ir_rmw = r16(RT + RT_ir_pass_rmw_fusion)
+      emu.drawString(2, y, string.format("RL:%d DS:%d DL:%d PP:%d PR:%d RMW:%d",
+        ir_rl, ir_ds, ir_dl, ir_pp, ir_pr, ir_rmw), COL_IR2, COL_BG); y = y + 9
+    else
+      emu.drawString(2, y, "No IR blocks", COL_IR2, COL_BG); y = y + 9
+    end
+  else
+    emu.drawString(2, y, "JIT: off (interpreter only)", 0x808080, COL_BG); y = y + 9
+  end
+
+  -- === Idle Detection (at bottom — can have many PCs) ===
+  local idle_detect = SA_IDLE_COUNT       and r8(SA_IDLE_COUNT) or 0
+  local idle_cache  = SA_IDLE_CACHE_COUNT and r8(SA_IDLE_CACHE_COUNT) or 0
 
   emu.drawString(2, y, "=== Idle Detection ===", COL_TITLE, COL_BG); y = y + 10
-  emu.drawString(2, y, string.format("Auto-detected: %d  Cache total: %d", idle_detect, idle_cache), COL_IDLE, COL_BG); y = y + 9
+  emu.drawString(2, y, string.format("Auto-detected: %d  Cached: %d", idle_detect, idle_cache), COL_IDLE, COL_BG); y = y + 9
 
-  if idle_cache > 0 then
+  if idle_cache > 0 and SA_IDLE_CACHE then
     local pc_strs = {}
     for i = 0, idle_cache - 1 do
-      local pc = r16(0x5E + i * 2)
+      local pc = r16(SA_IDLE_CACHE + i * 2)
       if pc ~= 0 then
         table.insert(pc_strs, string.format("$%04X", pc))
       end
     end
     if #pc_strs > 0 then
-      -- Show up to 4 per line
       for row = 1, #pc_strs, 4 do
         local line = "  "
         for col = row, math.min(row + 3, #pc_strs) do

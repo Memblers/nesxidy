@@ -8,7 +8,7 @@
 // Collect and report compilation metrics (BFS discovery, optimizer stats, cache behavior)
 // Minimal overhead when not printing — metrics_*() calls are very fast
 // Enable ENABLE_METRICS_DISPLAY to print stats to WRAM debug area every N frames
-#define ENABLE_METRICS
+//#define ENABLE_METRICS
 
 // Display metrics on-screen (writes to WRAM $7E00 area every frame)
 // Requires ENABLE_METRICS
@@ -41,7 +41,7 @@
 
 // Normal build (linking + optimizer enabled)
 #define ENABLE_LINKING
-#define INTERPRETER_ONLY
+//#define INTERPRETER_ONLY
 
 // Master optimizer toggle - comment out to disable entire optimizer system
 //#define ENABLE_OPTIMIZER   // DISABLED: v1 sector evacuation approach

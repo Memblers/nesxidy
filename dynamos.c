@@ -198,9 +198,15 @@ __zpage uint16_t pc_end;
 __zpage extern uint8_t opcode;
 
 static uint16_t rom_remap_index = 0;
+
+// Dispatch-path cache counters — 32-bit increments on every dispatch.
+// Only pay the ZP/BSS cost when a consumer is active.
+#if defined(ENABLE_METRICS) || defined(ENABLE_DEBUG_STATS)
+#define CACHE_STATS 1
 __zpage uint32_t cache_hits = 0;
 __zpage uint32_t cache_misses = 0;
 uint32_t cache_interpret = 0;       // dispatch returned "interpret"
+#endif
 uint32_t cache_branches = 0;
 uint32_t branch_not_compiled = 0;   // target not yet compiled
 uint32_t branch_wrong_bank = 0;     // target in different flash bank
@@ -520,7 +526,9 @@ void run_6502(void)
 			// already fast and must NOT be caught here.
 			if (pc == idle_anchor) {
 				if (++idle_count >= IDLE_DETECT_THRESHOLD) {
+#ifdef CACHE_STATS
 					cache_interpret++;
+#endif
 					bankswitch_prg(0);
 					uint16_t anchor = pc;
 					uint8_t steps = 8;
@@ -543,7 +551,9 @@ void run_6502(void)
 			}
 			idle_prev_pc = pc;
 #endif
+#ifdef CACHE_STATS
 			cache_interpret++;
+#endif
 			bankswitch_prg(0);
 			interpret_6502();
 #ifdef TRACK_TICKS
@@ -567,7 +577,9 @@ void run_6502(void)
 		}
 		case 0:  // executed from flash
 		{
+#ifdef CACHE_STATS
 			cache_hits++;
+#endif
 #ifdef ENABLE_IDLE_DETECT
 			// DO NOT reset idle_count here.
 			// The idle loop at case-2 may be interrupted by the guest NMI
@@ -669,7 +681,9 @@ batch_exit:  // case 1 (compile needed) jumps here
 	{ volatile uint16_t pc_v = pc;
 	if (pc_v < ROM_ADDR_MIN || pc_v > ROM_ADDR_MAX || pc_v >= 0xFFFA)
 	{
+#ifdef CACHE_STATS
 		cache_interpret++;
+#endif
 		bankswitch_prg(0);
 		interpret_6502();
 		return;
@@ -696,7 +710,9 @@ batch_exit:  // case 1 (compile needed) jumps here
 		if (bm_val & bm_mask) {
 			// Address not in SA bitmap — not a known instruction head.
 			// Interpret instead of compiling to avoid flash corruption.
+#ifdef CACHE_STATS
 			cache_interpret++;
+#endif
 			bankswitch_prg(0);
 			interpret_6502();
 			return;
@@ -705,7 +721,9 @@ batch_exit:  // case 1 (compile needed) jumps here
 #endif
 
 	// Compile directly to flash
+#ifdef CACHE_STATS
 	cache_misses++;
+#endif
 
 #ifdef ENABLE_COMPILE_PPU_EFFECT
 	// Darken screen during dynamic compile (all 3 emphasis bits)
@@ -911,7 +929,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 		// bulk-written after the compile loop.  Per-instruction writes
 		// are redundant because the final loop at the bottom writes
 		// the entire cache_code[0][] to flash anyway.
-		(void)instr_len;  // suppress unused warning in IR mode
+		// IR mode: instr_len unused — flash writes deferred to bulk loop below
 #else
 		for (uint8_t i = 0; i < instr_len; i++)
 		{
@@ -968,7 +986,7 @@ batch_exit:  // case 1 (compile needed) jumps here
 			// to flash space that will be reused by a future block.
 			// See "Deferred IR entry-PC table update" below the code
 			// write loop.
-			(void)0;  // entry PC table update deferred
+			// entry PC table update deferred (see below code write loop)
 #else
 			flash_cache_pc_update(recompile_instr_start, RECOMPILED);
 #ifdef ENABLE_OPTIMIZER_V2
@@ -1511,9 +1529,9 @@ uint8_t flash_cache_search(uint16_t emulated_pc)
 // instead of bankswitch_prg() to avoid unmapping their own code.
 // flash_byte_program() is safe (lives in WRAM, handles its own bankswitch).
 //============================================================================================================
-#pragma section bank17
-
 extern uint8_t peek_bank_byte(uint8_t bank, uint16_t addr);
+
+#pragma section bank17
 
 static uint8_t flash_sector_alloc_b17(uint8_t total_size)
 {
@@ -2102,7 +2120,7 @@ uint8_t emit_dirty_flag(uint8_t *code_ptr, uint8_t ci,
                         uint8_t opcode, uint8_t msb,
                         uint8_t scrn_zp, uint8_t char_zp)
 {
-	(void)scrn_zp; (void)char_zp;  // no longer used
+	// scrn_zp, char_zp: reserved for future per-game configuration
 	// Only for store opcodes to $40xx-$4Fxx
 	if ((opcode == 0x8D || opcode == 0x8E || opcode == 0x8C ||
 	     opcode == 0x9D || opcode == 0x99) &&

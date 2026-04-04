@@ -211,7 +211,6 @@ static uint8_t reverse_bits(uint8_t b)
 
 void convert_chr(uint8_t *source)
 {
-	(void)source;
 	// MAME milliped_get_tile_info:
 	//   tile = (data & 0x3F) + 0x40 + (bank * 0x80)
 	//   bank = (data >> 6) & 1  (with gfx_bank=0)

@@ -2245,6 +2245,9 @@ void sa_load_idle_cache(void)
 
 uint8_t sa_is_idle_pc(uint16_t addr)
 {
+#ifdef GAME_IDLE_PC
+    if (addr == GAME_IDLE_PC) return 1;
+#endif
     for (uint8_t i = 0; i < sa_idle_cache_count; i++)
     {
         if (sa_idle_cache[i] == addr)

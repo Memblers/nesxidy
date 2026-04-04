@@ -708,71 +708,52 @@ void render_video_b2(void)
 		lnList(vram_update_list);
 	}
 
-	// --- Sprites ---
-	// Millipede has 16 motion objects, 8×16 pixels each.
-	// Sprite RAM layout at $13C0-$13FF:
-	//   $13C0+i ($00-$0F): tile/flip
-	//     Bits 1-5: tile number (low 5 bits)
-	//     Bit 0:    tile bit 6 (bank select for upper 64 codes)
-	//     Bit 6:    unused (not flip — Millipede uses VIDROT for screen flip)
-	//     Bit 7:    flip Y
-	//   $13D0+i ($10-$1F): Y position
-	//   $13E0+i ($20-$2F): X position
-	//   $13F0+i ($30-$3F): color
-	//
-	// MAME code: ((byte & 0x3E) >> 1) | ((byte & 0x01) << 6)
-	// This gives a sprite code 0-127 for 8×16 sprites.
-	// Our NES PT1 has 8×8 tiles loaded sequentially, so each MAME
-	// 8×16 code maps to two NES tiles: code*2 (top) and code*2+1 (bottom).
-	for (uint8_t i = 0; i < 16; i++)
+	// --- Sprites (direct OAM writes) ---
+	// Write NES OAM page ($0200) directly instead of calling lnAddSpr
+	// 32 times per frame.  Each NES OAM entry is 4 bytes: Y-1, tile, attr, X.
+	// lazynes tracks the write position at ZP $27.
 	{
-		uint8_t tile_byte = sprite_ram[i];
-		uint8_t y_pos = sprite_ram[0x10 + i];
-		uint8_t x_pos = sprite_ram[0x20 + i];
-		uint8_t color  = sprite_ram[0x30 + i];
+		volatile uint8_t *oam = (volatile uint8_t *)0x0200;
+		uint8_t pos = *(volatile uint8_t *)0x27;
 
-		// MAME sprite code (8×16 index)
-		uint8_t code = ((tile_byte & 0x3E) >> 1) | ((tile_byte & 0x01) << 6);
-
-		// Convert to NES 8×8 tile pair
-		uint8_t tile_top = code << 1;       // code * 2
-		uint8_t tile_bot = tile_top + 1;    // code * 2 + 1
-
-		// Flip flags — Millipede: no per-sprite flipX (VIDROT only)
-		uint8_t flip_y = (tile_byte & 0x80) ? 1 : 0;
-
-		// If flipY, swap top/bottom halves
-		if (flip_y)
+		for (uint8_t i = 0; i < 16; i++)
 		{
-			uint8_t tmp = tile_top;
-			tile_top = tile_bot;
-			tile_bot = tmp;
+			uint8_t tile_byte = sprite_ram[i];
+			uint8_t y_pos = sprite_ram[0x10 + i];
+			uint8_t x_pos = sprite_ram[0x20 + i];
+			uint8_t color  = sprite_ram[0x30 + i];
+
+			// MAME sprite code (8×16 index) → NES 8×8 tile pair
+			uint8_t code = ((tile_byte & 0x3E) >> 1) | ((tile_byte & 0x01) << 6);
+			uint8_t tile_top = code << 1;
+			uint8_t tile_bot = tile_top + 1;
+
+			uint8_t flip_y = (tile_byte & 0x80) ? 1 : 0;
+			if (flip_y) { uint8_t tmp = tile_top; tile_top = tile_bot; tile_bot = tmp; }
+
+			uint8_t nes_y = 240 - y_pos;
+			uint8_t attr = (color & 0x03);
+			if (flip_y) attr |= 0x80;
+
+			// Top half — 4 bytes directly into OAM
+			oam[pos]     = nes_y - 1;
+			oam[pos + 1] = tile_top;
+			oam[pos + 2] = attr;
+			oam[pos + 3] = x_pos;
+			pos += 4;
+
+			// Bottom half (8 pixels down)
+			if (nes_y < 232)
+			{
+				oam[pos]     = nes_y + 7;  // (nes_y + 8) - 1
+				oam[pos + 1] = tile_bot;
+				oam[pos + 2] = attr;
+				oam[pos + 3] = x_pos;
+				pos += 4;
+			}
 		}
 
-		// Y is inverted on Millipede (0 = bottom of screen)
-		uint8_t nes_y = 240 - y_pos;
-		uint8_t nes_x = x_pos;
-
-		// NES OAM attribute byte:
-		// Bit 6: flip horizontal, Bit 7: flip vertical
-		// Bits 0-1: palette (use sprite color lower bits)
-		uint8_t attr = (color & 0x03);
-		if (flip_y) attr |= 0x80;
-
-		// Top half
-		uint8_t spr_meta_top[5] = {
-			0, 0, tile_top, attr, 128
-		};
-		lnAddSpr(spr_meta_top, nes_x, nes_y);
-
-		// Bottom half (8 pixels down)
-		if (nes_y < 232)  // don't overflow off screen
-		{
-			uint8_t spr_meta_bot[5] = {
-				0, 0, tile_bot, attr, 128
-			};
-			lnAddSpr(spr_meta_bot, nes_x, nes_y + 8);
-		}
+		*(volatile uint8_t *)0x27 = pos;
 	}
 
 	// Non-blocking sync

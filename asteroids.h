@@ -134,6 +134,7 @@ uint8_t nes_gamepad(void);
 void nes_gamepad_refresh(void);
 void render_video(void);
 uint8_t read6502(uint16_t address);
+uint8_t read6502_io(uint16_t address);
 void write6502(uint16_t address, uint8_t value);
 void flash_format(void);
 

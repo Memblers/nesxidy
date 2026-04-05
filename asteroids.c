@@ -690,9 +690,7 @@ void render_video_b2(void)
 		for (uint16_t k = 0; k < oam_offset; k++) dot_idx += DVG_MUX_FRAMES;
 		uint16_t wrap_span = dot_idx - mux_frame;
 		for (uint16_t k = oam_offset; k < mux_dot_count; k++) wrap_span += DVG_MUX_FRAMES;
-		uint8_t spr_meta[5] = {
-			0, 0, 254, 0x02, 128  // tile 254 in PT1 (1x1 dot), palette 2 (bright)
-		};
+		uint8_t spr_meta[5] = {0, 0, 254, 0x02, 128};
 		for (uint16_t j = 0; j < mux_dot_count && spr_count < 64; j++) {
 			if (dot_idx < dot_count) {
 				lnAddSpr(spr_meta, dot_buffer[dot_idx].x, dot_buffer[dot_idx].y);
@@ -816,7 +814,9 @@ uint8_t nes_gamepad(void)
 //   offset 2: bits 7,6 = DIP sw 4,3 (center coin / ships per play)
 //   offset 3: bits 7,6 = DIP sw 2,1 (language)
 // ==========================================================================
-uint8_t read6502(uint16_t address)
+// read6502 — Asteroids memory bus read handler
+// ==========================================================================
+uint8_t read6502_io(uint16_t address)
 {
     #ifdef DEBUG_AUDIO
         audio ^= address >> 8;

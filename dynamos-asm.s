@@ -1920,6 +1920,77 @@ _read6502:
 
 ;=======================================================
 	section "data"
+	if PLATFORM_ASTEROIDS
+	global _read6502
+;-------------------------------------------------------
+; read6502(uint16_t address) -> uint8_t    [WRAM fast path]
+;
+; Asteroids 15-bit address bus:
+;   $0000-$03FF: RAM (fast path)
+;   $6800-$7FFF: Program ROM in bank 23 at $8000 (fast path)
+;   Everything else: C read6502_io (I/O, Vector RAM/ROM)
+;
+; vbcc calling convention:
+;   r0 = addr_lo ($00), r1 = addr_hi ($01)
+;   return: r0 ($00)
+;
+_read6502:
+	lda r1				; A = address high byte
+	and #$7F			; 15-bit address bus
+	sta r1
+	cmp #$68
+	bcs .r6a_rom		; >= $6800: Program ROM
+	cmp #$04
+	bcc .r6a_ram		; < $0400: RAM
+	jmp _read6502_io	; $0400-$67FF: I/O, Vector RAM/ROM → C
+
+.r6a_rom:
+	; Inline bankswitch — save current bank in X for restore
+	ldx _mapper_prg_bank
+	cpx #23				; BANK_PLATFORM_ROM
+	beq .r6a_rom_rd		; already mapped, skip switch
+	lda #23
+	sta _mapper_prg_bank
+	ora _mapper_chr_bank
+	sta $C000
+.r6a_rom_rd:
+	; rom_asteroids is at $8000 in bank 23.
+	; Map guest $68xx-$7Fxx → NES $80xx-$97xx: addr_hi + $18
+	lda r1
+	clc
+	adc #$18			; $68+$18=$80, $7F+$18=$97
+	sta .r6a_rom_ld+2	; self-mod: high byte of LDA abs,Y
+	ldy r0
+.r6a_rom_ld:
+	lda $8000,y			; read ROM byte (self-mod address)
+	sta r0				; return value
+	; Restore bank if we switched
+	cpx #23
+	beq .r6a_rom_ret
+	stx _mapper_prg_bank
+	txa
+	ora _mapper_chr_bank
+	sta $C000
+	lda r0				; reload return value (vbcc expects A == r0)
+.r6a_rom_ret:
+	rts
+
+.r6a_ram:
+	; RAM_BASE is 256-byte aligned in WRAM.
+	; A = addr_hi (0-3). Compute high byte of RAM_BASE + page.
+	clc
+	adc #>_RAM_BASE
+	sta .r6a_ram_ld+2	; self-mod: high byte of LDA abs,Y
+	ldy r0
+.r6a_ram_ld:
+	lda _RAM_BASE,y		; read RAM byte (self-mod address)
+	sta r0
+	rts
+
+	endif ; PLATFORM_ASTEROIDS
+
+;=======================================================
+	section "data"
 	global _peek_bank_byte
 ;-------------------------------------------------------
 ; peek_bank_byte(uint8_t bank, uint16_t addr) -> uint8_t

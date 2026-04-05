@@ -195,11 +195,13 @@ __zpage uint32_t instructions = 0; //keep track of total instructions executed
 __zpage uint32_t clockticks6502 = 0, clockgoal6502 = 0;
 __zpage uint16_t oldpc, ea, reladdr, value, result;
 __zpage uint8_t opcode, oldstatus;
+#ifdef CACHE_STATS
 __zpage uint16_t interpret_count = 0;  // Debug: count interpret_6502 calls
 __zpage uint8_t last_interpreted_opcode = 0;  // Debug: track last opcode
 __zpage uint8_t sta_indy_interpret_count = 0;  // Debug: count STA indy interpretations
 __zpage uint16_t last_indy_ea = 0;  // Debug: last effective address from indy
 __zpage uint8_t sta_5000_count = 0;  // Debug: count STA to $5000 (sprite X)
+#endif
 
 //externally supplied functions
 extern uint8_t read6502(uint16_t address);
@@ -358,7 +360,9 @@ static void indy() { // (indirect),Y
     ea = (uint16_t)read6502(eahelp) | ((uint16_t)read6502(eahelp2) << 8);
     startpage = ea & 0xFF00;
     ea += (uint16_t)y;
+#ifdef CACHE_STATS
     last_indy_ea = ea;  // Debug: save last indy EA
+#endif
 
 #ifdef TRACK_TICKS        	
     if (startpage != (ea & 0xFF00)) { //one cycle penlty for page-crossing on some opcodes
@@ -376,15 +380,14 @@ static uint16_t getvalue16() {
     return((uint16_t)read6502(ea) | ((uint16_t)read6502(ea+1) << 8));
 }
 
+#ifdef CACHE_STATS
 __zpage uint16_t last_write_ea = 0;  // Debug: track last write address
 __zpage uint8_t write_50xx_count = 0;  // Debug: count writes to $50xx
+#endif
 
 static void putvalue(uint16_t saveval) {
     if (addrtable[opcode] == acc) a = (uint8_t)(saveval & 0x00FF);
     else {
-        last_write_ea = ea;
-        if ((ea & 0xFF00) == 0x5000) write_50xx_count++;
-        if (ea == 0x5000) sta_5000_count++;  // Track sprite X writes specifically
         write6502(ea, (saveval & 0x00FF));
     }
 }
@@ -1101,7 +1104,9 @@ void exec6502(uint32_t tickcount) {
 
 void step6502() {
     opcode = read6502(pc++);
+#ifdef CACHE_STATS
     last_interpreted_opcode = opcode;
+#endif
     status |= FLAG_CONSTANT;
 
 #ifdef TRACK_TICKS
@@ -1123,11 +1128,15 @@ void step6502() {
 }
 
 void interpret_6502() {
+#ifdef CACHE_STATS
     interpret_count++;  // Debug counter
+#endif
     opcode = read6502(pc++);
+#ifdef CACHE_STATS
     last_interpreted_opcode = opcode;  // Debug: save opcode
     if (opcode == 0x91) sta_indy_interpret_count++;  // Debug: track STA (zp),Y
     if (opcode == 0x40) sta_indy_interpret_count++;  // Debug: reuse counter for RTI (0x40)
+#endif
     status |= FLAG_CONSTANT;
 
 #ifdef TRACK_TICKS

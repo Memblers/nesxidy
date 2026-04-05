@@ -621,19 +621,24 @@ void run_6502(void)
 	//    periodically so its stuck-frame watchdog can re-arm lazynes.
 	if (++batch_count >= 64) break;
 	// 3. Known idle loop — stop dispatching, let main loop poll VBlank
+#ifdef GAME_IDLE_PC
+	// Inline check for GAME_IDLE_PC — avoids sa_is_idle_pc() function call
+	// overhead on every batch iteration (~2.8% exclusive).  When GAME_IDLE_PC
+	// is defined it is the primary idle PC; auto-detected entries are redundant.
+#ifdef NES_NMI_VBLANK_FLAG
+	if (pc == GAME_IDLE_PC && !RAM_BASE[NES_NMI_VBLANK_FLAG]) break;
+#else
+	if (pc == GAME_IDLE_PC) break;
+#endif
+#else
+	// No manual idle PC — fall back to auto-detected idle table
 #ifdef ENABLE_AUTO_IDLE_DETECT
 #ifdef NES_NMI_VBLANK_FLAG
-	// Don't break at idle PC when the VBlank flag is set — the guest
-	// must run to read the flag and exit its spin loop.
 	if (sa_is_idle_pc(pc) && !RAM_BASE[NES_NMI_VBLANK_FLAG]) break;
 #else
 	if (sa_is_idle_pc(pc)) break;
 #endif
 #endif
-#ifdef GAME_IDLE_PC
-	// Manual idle PC override — catches loops the static scanner rejects
-	// (e.g. loops that read hardware I/O).
-	if (pc == GAME_IDLE_PC) break;
 #endif
 	// 4. RTI completed — NMI handler finished, return for state update
 #if defined(PLATFORM_NES) || defined(PLATFORM_ASTEROIDS) || defined(PLATFORM_LLANDER)

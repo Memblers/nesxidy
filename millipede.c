@@ -46,10 +46,12 @@
 extern uint8_t RAM_BASE[];
 extern uint8_t SCREEN_RAM_BASE[];
 extern uint8_t CHARACTER_RAM_BASE[];
+#ifdef CACHE_STATS
 extern uint16_t interpret_count;
 extern uint8_t write_50xx_count;
 extern uint8_t last_interpreted_opcode;
 extern uint8_t indy_hit_count;
+#endif
 
 
 __zpage uint8_t audio;  // debug: audio test value written to $4011 on each read

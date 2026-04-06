@@ -1,6 +1,10 @@
-# ROM files (copyrighted)
+# ROM binaries (copyrighted) - keep .asm disassemblies and rom info.txt
+roms/**
+!roms/**/*.asm
+!roms/**/rom info.txt
+
+# NES ROM files in root
 *.nes
-roms/
 
 # Build artifacts
 *.o
@@ -10,3 +14,35 @@ roms/
 # Split ROM data
 *.chr
 *.prg
+
+# Analysis/debug scripts
+analyze_*.py
+check_*.py
+count_*.py
+crash_trace.py
+deep_trace.py
+disasm_*.py
+dump_*.py
+find_*.py
+flash_*.py
+map_profiler*.py
+metrics_display.py
+parse_*.py
+stack_analysis.py
+system_check.py
+trace_*.py
+verify_*.py
+
+# Debug/check output files
+dynamos_check.s
+dynamos_check_new.s
+fake6502_check.s
+
+# Misc unneeded
+w2.bat
+demos/
+old nes/
+
+# Python cache
+__pycache__/
+*.pyc

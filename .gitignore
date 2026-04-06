@@ -38,6 +38,37 @@ dynamos_check.s
 dynamos_check_new.s
 fake6502_check.s
 
+# Binary/data artifacts
+*.bin
+*.hex
+*.csv
+*.patch
+
+# Lua debug/trace scripts
+*.lua
+
+# PowerShell debug scripts
+*.ps1
+
+# Debug/analysis text files (not rom info.txt)
+addr_*.txt
+build_out.txt
+crash_*.txt
+dev notes.txt
+diag_*.txt
+nes_ram_dump.txt
+nes_trace_lua.txt
+peephole_patterns.txt
+scan_result*.txt
+trace_signal.txt
+waste_report.txt
+
+# IDE / editor
+.vscode/
+
+# Tool output
+tools/asteroids_tiles_preview.html
+
 # Misc unneeded
 w2.bat
 demos/

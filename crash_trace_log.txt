@@ -1,6 +1,0 @@
-=== trace_crash.lua started ===
-Target: $918E
-dispatch_on_pc: $620D
-dispatch JMP:   $6279
-pc_update:      $D45C
-

@@ -4085,10 +4085,17 @@ static uint8_t recompile_opcode_b2()
 			IR_EMIT(&ir_ctx, IR_TEMPLATE, 0xFF, (uint16_t)ir_tmpl_id);
 			/* Record template patches for JSR/NJSR immediate operands */
 			if (ir_tmpl_id == IR_TMPL_JSR) {
+#ifdef ENABLE_NATIVE_STACK
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_ns_jsr_ret_hi, buf[pre + opcode_6502_ns_jsr_ret_hi]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_ns_jsr_ret_lo, buf[pre + opcode_6502_ns_jsr_ret_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_ns_jsr_tgt_lo, buf[pre + opcode_6502_ns_jsr_tgt_lo]);
+				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_ns_jsr_tgt_hi, buf[pre + opcode_6502_ns_jsr_tgt_hi]);
+#else
 				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_ret_hi, buf[pre + opcode_6502_jsr_ret_hi]);
 				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_ret_lo, buf[pre + opcode_6502_jsr_ret_lo]);
 				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_tgt_lo, buf[pre + opcode_6502_jsr_tgt_lo]);
 				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_jsr_tgt_hi, buf[pre + opcode_6502_jsr_tgt_hi]);
+#endif
 			} else if (ir_tmpl_id == IR_TMPL_NJSR) {
 				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_ret_hi, buf[pre + opcode_6502_njsr_ret_hi]);
 				IR_TMPL_PATCH(&ir_ctx, tmpl_node_idx, opcode_6502_njsr_ret_lo, buf[pre + opcode_6502_njsr_ret_lo]);

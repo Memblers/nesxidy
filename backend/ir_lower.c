@@ -183,16 +183,26 @@ static void get_template(uint8_t tmpl_id, uint8_t **out_data, uint8_t *out_size)
             *out_size = opcode_6502_plp_size;
             return;
         case IR_TMPL_JSR:
+#ifdef ENABLE_NATIVE_STACK
+            *out_data = opcode_6502_ns_jsr;
+            *out_size = opcode_6502_ns_jsr_size;
+#else
             *out_data = opcode_6502_jsr;
             *out_size = opcode_6502_jsr_size;
+#endif
             return;
         case IR_TMPL_NJSR:
             *out_data = opcode_6502_njsr;
             *out_size = opcode_6502_njsr_size;
             return;
         case IR_TMPL_NRTS:
+#ifdef ENABLE_NATIVE_STACK
+            *out_data = opcode_6502_ns_rts;
+            *out_size = opcode_6502_ns_rts_size;
+#else
             *out_data = opcode_6502_nrts;
             *out_size = opcode_6502_nrts_size;
+#endif
             return;
         case IR_TMPL_INDY_READ:
             *out_data = addr_6502_indy;

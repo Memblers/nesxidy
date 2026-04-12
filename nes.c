@@ -77,6 +77,7 @@ __zpage extern uint8_t opcode;
 
 uint8_t ppu_queue_index = 0;
 uint8_t ppu_queue[256];
+uint8_t ppu_queue_submit[256];  // snapshot for NMI — isolates live writes
 
 uint8_t PPUCTRL_soft = 0;
 uint8_t PPUMASK_soft = 0;
@@ -883,7 +884,8 @@ void render_video_noblock(void)
 	if (ppu_queue_index == 0)
 		return;  // nothing to flush
 	ppu_queue[ppu_queue_index] = lfEnd;
-	lnList(ppu_queue);
+	memcpy(ppu_queue_submit, ppu_queue, ppu_queue_index + 1);
+	lnList(ppu_queue_submit);
 	ppu_queue_index = 0;
 }
 
@@ -946,7 +948,8 @@ void render_video(void)
 	rv_complete_pending();
 
 	ppu_queue[ppu_queue_index] = lfEnd;
-	lnList(ppu_queue);
+	memcpy(ppu_queue_submit, ppu_queue, ppu_queue_index + 1);
+	lnList(ppu_queue_submit);
 	ppu_queue_index = 0;
 
 	// --- Manual lnSync(0) replacement ---

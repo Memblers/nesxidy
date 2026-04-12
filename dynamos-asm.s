@@ -18,6 +18,8 @@ PLATFORM_ASTEROIDS = 0
 PLATFORM_LLANDER = 0
 	endif
 
+	include "asm_config.inc"
+
 	ifnd ENABLE_NATIVE_STACK
 ENABLE_NATIVE_STACK = 0
 	endif
@@ -139,7 +141,9 @@ _CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
 _RAM_BASE:	reserve $100
 _CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
 	else
-_RAM_BASE:	reserve $400
+_RAM_BASE:		reserve $400
+_screen_shadow:		reserve $400	; placed before CHARACTER_RAM so stack
+					; corruption lands in CHR data, not shadow
 _CHARACTER_RAM_BASE:	reserve $800
 	endif
 	endif
@@ -148,6 +152,9 @@ _CHARACTER_RAM_BASE:	reserve $800
 	section "nesram"
 	align 8
 _SCREEN_RAM_BASE: reserve $400
+	if !(PLATFORM_NES) && !(PLATFORM_ASTEROIDS) && !(PLATFORM_LLANDER)
+_vram_update_list:	reserve 256	; tiles (96) + attr diff + palette diff + terminator
+	endif
 	
 
 ;=======================================================	
@@ -415,7 +422,13 @@ _cross_bank_dispatch:
 	; Without this, the yield → dispatch_on_pc loop never
 	; reaches the C IRQ check, so the VBLANK IRQ never fires
 	; and the game hangs at the wait_vblank spin ($4026).
-	jmp _flash_dispatch_return_status_saved
+	;
+	; Jump to _flash_dispatch_return_bank_restore instead of
+	; _flash_dispatch_return_status_saved: we already saved _sp
+	; and restored host SP above—re-entering status_saved would
+	; tsx/stx _sp a second time, overwriting the guest SP ($00-$7F)
+	; with the host SP ($80-$FF), corrupting the emulated stack.
+	jmp _flash_dispatch_return_bank_restore
 	else
 	jmp _dispatch_on_pc	; re-dispatch _pc without C round-trip
 	endif
@@ -641,16 +654,6 @@ _dispatch_on_pc:
 	; a proper solution (mini-headers or a non-ZP cycle accumulator).
 .no_cycles:
 
-	; NOTE: Block-complete sentinel ($AA at header+7 = dispatch_addr-1)
-	; is written by the C compile path but NOT checked here.  An asm
-	; guard was attempted (LDY #1 / LDA (addr_lo),Y / CMP #$AA / BNE
-	; not_recompiled) but adding an in-range BNE to the same label as
-	; the earlier relaxed BEQ/BMI caused vasm -opt-branch to produce
-	; inconsistent JMP targets, breaking ALL dispatches.  The deferred
-	; PC table update (writing the table entry only after code is in
-	; flash) is the primary crash fix; the sentinel write is kept as
-	; forensic metadata for offline flash dumps.
-
 	; Save stack pointer before JSR so cross_bank_dispatch can
 	; restore it cleanly, even if the block's epilogue is missing PHP.
 	tsx
@@ -729,6 +732,14 @@ _flash_dispatch_return_status_saved:
 	ldx _dispatch_sp
 	txs					; back to host stack
 	endif
+
+	global _flash_dispatch_return_bank_restore
+_flash_dispatch_return_bank_restore:
+	; Entry point when _sp is already saved and host SP already restored.
+	; Used by _cross_bank_dispatch (Millipede) which does its own
+	; tsx/stx _sp/ldx _dispatch_sp/txs before jumping here, avoiding
+	; a double tsx/stx _sp that would overwrite the guest SP with the
+	; host SP value.
 
 	; Restore PRG bank — native code ran in a flash bank (4-18),
 	; but our caller (run_6502/main loop) expects the fixed bank (0).
@@ -1208,7 +1219,7 @@ _native_sta_indy_tmpl_size: db (_native_sta_indy_tmpl_end - _native_sta_indy_tmp
 ;   offset $000-$3BF → nametable 0 ($2000 + offset)
 ;   offset $3C0-$3FF → nametable 2 ($2800 + (offset - $3C0))
 
-VRAM_UPDATE_MAX = 96	; 32 tiles × 3 bytes (must fit in vblank: 32×40≈1280 cyc)
+VRAM_UPDATE_MAX = 120	; 40 tiles × 3 bytes (must fit in vblank: 40×40≈1600 cyc)
 
 	section "zpage"
 _vram_list_pos:	reserve 1	; current write position in update list
@@ -1267,16 +1278,11 @@ _screen_diff_build_list:
 	;--- Return result ---
 	lda _vram_list_pos
 	beq .diff_no_changes
-	cmp #VRAM_UPDATE_MAX
-	bcs .diff_overflow
 	; Terminate the list with $FF (lfEnd)
 	tax
 	lda #$FF
 	sta _vram_update_list,x
 	lda #1			; result = incremental list built
-	rts
-.diff_overflow:
-	lda #$FF		; result = overflow
 	rts
 .diff_no_changes:
 	lda #0			; result = no changes
@@ -1284,13 +1290,13 @@ _screen_diff_build_list:
 
 	;--- Per-page changed handlers ---
 	; A = new tile value, Y = offset in page.
-	; Shadow is updated unconditionally (even on overflow, keeping it in sync).
-	; No PHA/PLA needed: store A (tile) first, then clobber for PPU bytes.
+	; Shadow is updated ONLY when the tile is added to the list.
+	; On overflow, shadow keeps old value → diff catches it next frame.
 .p0_changed:
-	sta _screen_shadow,y
 	ldx _vram_list_pos
 	cpx #VRAM_UPDATE_MAX
-	bcs .p0_next		; overflow: shadow updated, skip list entry
+	bcs .p0_next		; overflow: skip — will retry next frame
+	sta _screen_shadow,y
 	sta _vram_update_list+2,x	; tile value (A still has it)
 	tya
 	sta _vram_update_list+1,x	; PPU lo = Y
@@ -1303,10 +1309,10 @@ _screen_diff_build_list:
 	jmp .p0_next
 
 .p1_changed:
-	sta _screen_shadow+$100,y
 	ldx _vram_list_pos
 	cpx #VRAM_UPDATE_MAX
 	bcs .p1_next
+	sta _screen_shadow+$100,y
 	sta _vram_update_list+2,x
 	tya
 	sta _vram_update_list+1,x
@@ -1319,10 +1325,10 @@ _screen_diff_build_list:
 	jmp .p1_next
 
 .p2_changed:
-	sta _screen_shadow+$200,y
 	ldx _vram_list_pos
 	cpx #VRAM_UPDATE_MAX
 	bcs .p2_next
+	sta _screen_shadow+$200,y
 	sta _vram_update_list+2,x
 	tya
 	sta _vram_update_list+1,x
@@ -1335,10 +1341,10 @@ _screen_diff_build_list:
 	jmp .p2_next
 
 .p3_changed:
-	sta _screen_shadow+$300,y
 	ldx _vram_list_pos
 	cpx #VRAM_UPDATE_MAX
 	bcs .p3_next
+	sta _screen_shadow+$300,y
 	sta _vram_update_list+2,x
 	tya
 	sta _vram_update_list+1,x
@@ -1352,12 +1358,8 @@ _screen_diff_build_list:
 	endif  ; !(PLATFORM_NES) && !(PLATFORM_ASTEROIDS) && !(PLATFORM_LLANDER)
 
 ;-------------------------------------------------------
-; BSS for shadow buffer and update list (tile-based platforms only)
-	section "bss"
-	if !(PLATFORM_NES) && !(PLATFORM_ASTEROIDS) && !(PLATFORM_LLANDER)
-_screen_shadow:		reserve $400	; 1024 bytes
-_vram_update_list:	reserve 256	; tiles (96) + attr diff + palette diff + terminator
-	endif
+; BSS for shadow buffer — now declared in main BSS block above
+; (before _CHARACTER_RAM_BASE to avoid stack corruption)
 	section "data"
 
 ;=======================================================

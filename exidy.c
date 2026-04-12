@@ -634,22 +634,10 @@ void render_video_b2(void)
 	{
 		screen_ram_updated = 0;
 		uint8_t result = screen_diff_build_list();
-		if (result == 0xFF)
-		{
-			// Too many changes for one vblank (screen transition).
-			// Blank for one frame and push everything.
-			lnSync(1);
-			lnPush(0x2000, 0, SCREEN_RAM_BASE);
-			lnPush(0x2100, 0, SCREEN_RAM_BASE+0x100);
-			lnPush(0x2200, 0, SCREEN_RAM_BASE+0x200);
-			lnPush(0x2300, 0xC0, SCREEN_RAM_BASE+0x300);
-			// Re-clear attribute table (Exidy has no attributes).
-			lnPush(0x23C0, 64, attr_zeros);
-			// Shadow already updated by asm helper
-		}
-		else if (result == 1)
+		if (result == 1)
 		{
 			// Incremental update: screen stays on, no flicker!
+			// On overflow, skipped tiles keep stale shadow → caught next frame.
 			lnList(vram_update_list);
 		}
 	}

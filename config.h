@@ -71,7 +71,7 @@
 // Skipping optimisation during the dynamic pass saves ~78 M NES cycles
 // (~9% of boot) at the cost of slightly larger JIT code in the cache.
 // The static pass is unaffected — it always optimises.
-#define SKIP_DYNAMIC_IR_OPT
+//#define SKIP_DYNAMIC_IR_OPT
 
 // Peephole PLP/PHP elimination - elide redundant PLP/PHP pairs between
 // consecutive PHA/PLA templates.  Saves 2 bytes + 2 cycles per pair.

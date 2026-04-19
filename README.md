@@ -56,12 +56,12 @@ The 512kB of Flash memory is reserved as such:
 * 224kB cache blocks
 * 16kB cache block map
 
-The program counter jump table allows for a virtual code space covering every possible program counter position for the emulated CPU.  The emulator first does a static analysis pass, to identify code entry points.  During execution, if the target hasn't been compiled yet, it is compiled into a 6502-like IR (intermediate representation) and optimized there.  This only works on "basic blocks" which are pretty small, so it's impact is limited, as it is now.  To handle branches to unknown destinations, a template format is used in flash with self-modifying code, by changing individual 1 bits to 0 in the instruction operands.  For example, the return to interpreter path is reached by JMP $FFF0, and that instruction may be patched to any location on a 16-byte boundary.\
+The program counter jump table allows for a virtual code space covering every possible program counter position for the emulated CPU.  The emulator first does a static analysis pass, to identify code entry points.  During execution, if the target hasn't been compiled yet, it is compiled into a 6502-like IR (intermediate representation) and optimized there.  This only works on "basic blocks" which are pretty small, so it's impact is limited, as it is now.  To handle branches to unknown destinations, a template format is used in flash with self-modifying code, by changing individual 1 bits to 0 in the instruction operands.  For example, the return to interpreter path is reached by JMP $FFF0, and that instruction may be patched to any location on a 16-byte boundary.
 
-The emulator is has an optional static recompilation pass that may be used.  The performance is only slightly better than the dynamic mode.  It's set to automatically trigger when the cache is nearly full.\
+The emulator is has an optional static recompilation pass that may be used.  The performance is only slightly better than the dynamic mode.  It's set to automatically trigger when the cache is nearly full.
 
-Select + B triggers a static recompilation pass on supported platforms.\
-Select + A triggers branch link search on supported platforms.\
+Select + B triggers a static recompilation pass on supported platforms.
+Select + A triggers branch link search on supported platforms.
 
 ## known issues
 * coin input not accepted in Targ, Spectar
@@ -76,7 +76,7 @@ Select + A triggers branch link search on supported platforms.\
 possible next steps
 * additional CPU support.  Chip-8, 8080, Z80, 6809, LR35902..?
 * partial TMS9918 emulation (CreatiVision)
-* improved static recompilation quality
+* improve static recompilation quality
 * move to newer mapper, such as Rainbow, allowing 8x8 attribute for display emulation, and more memory.
 
 

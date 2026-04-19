@@ -79,3 +79,4 @@ __pycache__/
 *.pyc
 opt65.c
 dynamos.asm
+roms/nes/DonkeyKongDisassembly.asm

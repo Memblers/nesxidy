@@ -131,6 +131,7 @@ _CHARACTER_RAM_BASE = _RAM_BASE + $400	; alias — keeps C references valid
 	else
 	if PLATFORM_MILLIPEDE
 _RAM_BASE:	reserve $400
+_screen_shadow:		reserve $400
 _CHARACTER_RAM_BASE = _RAM_BASE	; dummy alias — not used at runtime
 	else
 	if PLATFORM_ASTEROIDS

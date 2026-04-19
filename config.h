@@ -324,6 +324,9 @@
 #ifndef ENABLE_BATCH_DISPATCH
 #define ENABLE_BATCH_DISPATCH
 #endif
+#ifndef INTERPRETER_ONLY
+#define INTERPRETER_ONLY
+#endif
 #endif
 
 // --- Millipede arcade ---

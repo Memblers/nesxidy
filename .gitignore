@@ -77,3 +77,5 @@ old nes/
 # Python cache
 __pycache__/
 *.pyc
+opt65.c
+dynamos.asm
